@@ -1,0 +1,24 @@
+{
+  "name": "pi-orchestrator-workflow",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Personal Pi package for orchestrated coding workflows.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "orchestration",
+    "agent"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "pi": {
+    "extensions": [
+      "./src/pi-extension.js"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  }
+}

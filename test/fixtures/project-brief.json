@@ -1,0 +1,23 @@
+{
+  "goal": "Build a personal Pi package for an orchestrator/subagent coding workflow that can take a project from nothing to a complete project",
+  "projectName": "pi-orchestrator",
+  "constraints": [
+    "Keep orchestration and policy in code instead of prompt glue",
+    "Prefer bounded autonomy over interactive sessions"
+  ],
+  "nonGoals": [
+    "Do not rely on recursive delegation"
+  ],
+  "targetUsers": [
+    "single operator"
+  ],
+  "stackPreferences": [
+    "Node.js",
+    "ESM",
+    "Pi package"
+  ],
+  "successCriteria": [
+    "The harness can plan, slice, execute, and audit a bounded project"
+  ],
+  "autonomyMode": "autonomous"
+}

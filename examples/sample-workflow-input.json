@@ -1,0 +1,15 @@
+{
+  "goal": "Implement a bounded fix for a failing formatter helper.",
+  "allowedFiles": [
+    "web/src/utils/format.js",
+    "web/test/format.test.js"
+  ],
+  "forbiddenFiles": [
+    "platform/",
+    "infra/"
+  ],
+  "contextFiles": [
+    "AGENTS.md",
+    "README.md"
+  ]
+}

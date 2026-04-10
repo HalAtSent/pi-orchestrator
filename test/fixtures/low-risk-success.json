@@ -1,0 +1,45 @@
+{
+  "input": {
+    "goal": "Rename a local helper in one file",
+    "allowedFiles": [
+      "web/src/utils/format.js"
+    ],
+    "contextFiles": [
+      "README.md"
+    ]
+  },
+  "script": [
+    {
+      "role": "implementer",
+      "result": {
+        "status": "success",
+        "summary": "Renamed the helper and kept the patch inside the formatter file.",
+        "changedFiles": [
+          "web/src/utils/format.js"
+        ],
+        "commandsRun": [
+          "node --test test/format.test.js"
+        ],
+        "evidence": [
+          "Targeted formatter test passed locally."
+        ],
+        "openQuestions": []
+      }
+    },
+    {
+      "role": "verifier",
+      "result": {
+        "status": "success",
+        "summary": "Verified the targeted formatter behavior with the declared test command.",
+        "changedFiles": [],
+        "commandsRun": [
+          "node --test test/format.test.js"
+        ],
+        "evidence": [
+          "node --test test/format.test.js exited 0."
+        ],
+        "openQuestions": []
+      }
+    }
+  ]
+}

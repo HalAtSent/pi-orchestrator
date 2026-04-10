@@ -1,0 +1,119 @@
+{
+  "input": {
+    "goal": "Tighten shared formatter behavior across adjacent utilities",
+    "allowedFiles": [
+      "web/src/utils/format.js",
+      "web/src/utils/parse.js",
+      "web/src/utils/print.js",
+      "web/src/utils/normalize.js",
+      "web/src/utils/tokenize.js",
+      "web/src/utils/render.js",
+      "web/test/format.test.js"
+    ],
+    "contextFiles": [
+      "README.md",
+      "examples/sample-workflow-input.json"
+    ]
+  },
+  "script": [
+    {
+      "role": "explorer",
+      "result": {
+        "status": "success",
+        "summary": "Mapped the formatter helpers and the targeted test entrypoint.",
+        "changedFiles": [],
+        "commandsRun": [
+          "rg --files",
+          "rg -n \"format|render|normalize\" web/src web/test"
+        ],
+        "evidence": [
+          "Formatter helpers are isolated to web/src/utils/* and web/test/format.test.js."
+        ],
+        "openQuestions": []
+      }
+    },
+    {
+      "role": "implementer",
+      "result": {
+        "status": "success",
+        "summary": "Patched the formatter helper and updated the targeted test fixture.",
+        "changedFiles": [
+          "web/src/utils/format.js",
+          "web/test/format.test.js"
+        ],
+        "commandsRun": [
+          "node --test web/test/format.test.js"
+        ],
+        "evidence": [
+          "Targeted formatter test passed after the initial patch."
+        ],
+        "openQuestions": []
+      }
+    },
+    {
+      "role": "reviewer",
+      "result": {
+        "status": "repair_required",
+        "summary": "Repair required: the patch misses an empty-input edge case covered by the spec.",
+        "changedFiles": [],
+        "commandsRun": [
+          "git diff -- web/src/utils/format.js web/test/format.test.js"
+        ],
+        "evidence": [
+          "The diff updates the happy path but leaves the empty-input branch untested."
+        ],
+        "openQuestions": [
+          "Should empty input return an empty string or null?"
+        ]
+      }
+    },
+    {
+      "role": "implementer",
+      "result": {
+        "status": "success",
+        "summary": "Addressed the empty-input edge case and tightened the targeted test.",
+        "changedFiles": [
+          "web/src/utils/format.js",
+          "web/test/format.test.js"
+        ],
+        "commandsRun": [
+          "node --test web/test/format.test.js"
+        ],
+        "evidence": [
+          "Targeted formatter test still passes after the repair."
+        ],
+        "openQuestions": []
+      }
+    },
+    {
+      "role": "reviewer",
+      "result": {
+        "status": "success",
+        "summary": "No further review findings after the repair patch.",
+        "changedFiles": [],
+        "commandsRun": [
+          "git diff -- web/src/utils/format.js web/test/format.test.js"
+        ],
+        "evidence": [
+          "The empty-input branch is now covered by the targeted test update."
+        ],
+        "openQuestions": []
+      }
+    },
+    {
+      "role": "verifier",
+      "result": {
+        "status": "success",
+        "summary": "Verified the repaired formatter behavior with the targeted test suite.",
+        "changedFiles": [],
+        "commandsRun": [
+          "node --test web/test/format.test.js"
+        ],
+        "evidence": [
+          "node --test web/test/format.test.js exited 0 after the repair."
+        ],
+        "openQuestions": []
+      }
+    }
+  ]
+}

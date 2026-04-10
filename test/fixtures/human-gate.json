@@ -1,0 +1,9 @@
+{
+  "input": {
+    "goal": "Add a schema migration for event storage",
+    "allowedFiles": [
+      "platform/contracts/ingest/artifact.json"
+    ]
+  },
+  "script": []
+}
