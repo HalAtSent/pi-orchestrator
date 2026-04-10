@@ -22,7 +22,7 @@
       "./skills"
     ]
   },
-  "devDependencies": {
+  "dependencies": {
     "@mariozechner/pi-coding-agent": "^0.66.1"
   }
 }
