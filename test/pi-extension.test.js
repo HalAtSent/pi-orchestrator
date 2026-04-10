@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
+import { AUTO_BACKEND_MODES } from "../src/auto-backend-runner.js";
+import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
 import { createPiWorkerRunner } from "../src/pi-worker-runner.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
@@ -119,6 +121,160 @@ test("default export routes approved high-risk /auto runs through all worker rol
     requestedRuns.map((entry) => entry.request.role),
     ["explorer", "implementer", "reviewer", "verifier"]
   );
+});
+
+test("pi extension can route low-risk /auto implementer and verifier work through the process backend when explicitly configured", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const processBackend = createProcessWorkerBackend({
+    launcher: async ({ packet, targetAbsolutePath }) => {
+      if (packet.role === "implementer") {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "process backend updated this file\n", "utf8");
+      }
+
+      return {
+        launcher: "fake_process_launcher",
+        command: "node",
+        args: ["fake-process-launch.js"],
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "ok",
+        stderr: "",
+        error: null,
+        durationMs: 3,
+        commandsRun: ["node fake-process-launch.js"]
+      };
+    }
+  });
+
+  const registeredCommands = new Map();
+  const extension = createPiExtension({
+    processWorkerBackend: processBackend,
+    autoBackendMode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Rename a helper in one file",
+    allowedFiles: ["src/helpers.js"],
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify() {},
+      setStatus() {}
+    }
+  });
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(execution.runs.map((run) => run.packet.role), ["implementer", "verifier"]);
+  assert.equal(processBackend.getCalls().length, 2);
+  assert.equal(processBackend.getCalls()[0].packet.role, "implementer");
+  assert.equal(processBackend.getCalls()[1].packet.role, "verifier");
+});
+
+test("pi extension can route approved high-risk /auto work through process subagents when explicitly configured", async () => {
+  await withTempDir("pi-orchestrator-process-subagents-", async (repositoryRoot) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const processBackend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ packet, targetAbsolutePath }) => {
+        if (packet.role === "implementer") {
+          await mkdir(dirname(targetAbsolutePath), { recursive: true });
+          await writeFile(targetAbsolutePath, "process backend updated this file\n", "utf8");
+          return {
+            launcher: "fake_process_launcher",
+            command: "node",
+            args: ["fake-process-launch.js"],
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "implementer completed",
+            stderr: "",
+            error: null,
+            durationMs: 3,
+            commandsRun: ["node fake-process-launch.js"]
+          };
+        }
+
+        const stdoutByRole = {
+          explorer: JSON.stringify({
+            status: "success",
+            summary: "Scoped files and dependencies identified.",
+            evidence: ["Relevant files mapped."],
+            openQuestions: []
+          }),
+          reviewer: JSON.stringify({
+            status: "success",
+            summary: "Independent review found no blocking issues.",
+            evidence: ["Scoped review passed."],
+            openQuestions: []
+          }),
+          verifier: JSON.stringify({
+            status: "success",
+            summary: "Verification checks passed.",
+            evidence: ["Verification evidence collected."],
+            openQuestions: []
+          })
+        };
+
+        return {
+          launcher: "fake_process_launcher",
+          command: "node",
+          args: ["fake-process-launch.js"],
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: stdoutByRole[packet.role],
+          stderr: "",
+          error: null,
+          durationMs: 3,
+          commandsRun: ["node fake-process-launch.js"]
+        };
+      }
+    });
+
+    const registeredCommands = new Map();
+    const extension = createPiExtension({
+      processWorkerBackend: processBackend,
+      autoBackendMode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+      goal: "Apply a schema migration for billing events",
+      allowedFiles: ["platform/contracts/ingest/artifact.json"],
+      approvedHighRisk: true,
+      maxRepairLoops: 1
+    }), {
+      ui: {
+        notify() {},
+        setStatus() {}
+      }
+    });
+
+    assert.equal(execution.status, "success");
+    assert.deepEqual(
+      execution.runs.map((run) => run.packet.role),
+      ["explorer", "implementer", "reviewer", "verifier"]
+    );
+    assert.deepEqual(
+      processBackend.getCalls().map((call) => call.packet.role),
+      ["explorer", "implementer", "reviewer", "verifier"]
+    );
+  });
 });
 
 test("pi extension exposes worker runtime diagnostics and blocked auto includes stop reason", async () => {

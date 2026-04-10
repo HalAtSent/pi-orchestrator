@@ -11,7 +11,8 @@
     "agent"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "smoke:spike-worker": "node examples/spike-worker-smoke.js"
   },
   "pi": {
     "extensions": [
@@ -20,5 +21,8 @@
     "skills": [
       "./skills"
     ]
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.66.1"
   }
 }

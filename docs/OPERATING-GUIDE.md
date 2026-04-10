@@ -108,6 +108,7 @@ Current state:
 
 - plans a bounded workflow
 - runs it through the configured worker runner
+- can opt in to a low-risk implementer process backend for `/auto` while keeping verifier/review paths on the default runner
 - enforces read-only roles and repair-loop budget
 - uses the Pi-backed runner by default when the host exposes worker execution
 - cleanly blocks if the live Pi runtime surface is missing or unsafe

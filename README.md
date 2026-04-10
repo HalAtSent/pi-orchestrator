@@ -17,6 +17,8 @@ This scaffold is intentionally small. It includes:
 - workflow planning and execution-program helpers
 - a pure auto-workflow executor with one repair loop by default
 - a Pi-backed worker adapter and runner boundary with local/scripted runners for tests
+- an implementer-only process worker backend for bounded out-of-process execution
+- an opt-in low-risk `/auto` selector that can route implementer packets to the process backend
 - a thin Pi extension entrypoint with program-run and resume surfaces
 - local persisted run journals for execution programs
 - role skills for explorer, implementer, reviewer, and verifier workers
@@ -36,9 +38,13 @@ the contracts in `src/`.
 - `src/worker-runner.js`: local/scripted worker dispatch abstractions for tests
 - `src/pi-worker-runner.js`: Pi-backed bounded worker runner with file claims
 - `src/pi-adapter.js`: live Pi worker adapter boundary
+- `src/process-worker-backend.js`: implementer-only process backend with temp-workspace isolation
+- `src/auto-backend-runner.js`: opt-in low-risk backend selector for `/auto`
+- `src/spike-worker-backend.js`: compatibility exports for existing spike imports
 - `src/program-runner.js`: sequential execution-program runner with stop states
 - `src/run-store.js`: local JSON-backed persisted run journals
 - `src/pi-extension.js`: Pi extension entrypoint and orchestration tools
+- `examples/spike-worker-smoke.js`: local smoke helper that runs the process backend once
 - `docs/OPERATING-GUIDE.md`: how to run and evolve the workflow
 - `skills/`: worker role instructions
 - `test/`: deterministic unit tests and regression fixtures

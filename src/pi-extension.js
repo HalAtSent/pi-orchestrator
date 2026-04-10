@@ -1,4 +1,8 @@
 import { formatWorkflowExecution, runAutoWorkflow } from "./auto-workflow.js";
+import {
+  AUTO_BACKEND_MODES,
+  createAutoBackendRunner
+} from "./auto-backend-runner.js";
 import { validateWorkerResult } from "./contracts.js";
 import { createInitialWorkflow } from "./orchestrator.js";
 import {
@@ -276,9 +280,12 @@ export function createPiExtension({
   contractExecutor,
   runStore = null,
   workerAdapter,
+  processWorkerBackend = null,
+  autoBackendMode = AUTO_BACKEND_MODES.PI_RUNTIME,
   adapterSupportedRoles = PI_ADAPTER_DEFAULT_SUPPORTED_ROLES,
   adapterFactory = createPiAdapter,
-  workerRunnerFactory = createPiWorkerRunner
+  workerRunnerFactory = createPiWorkerRunner,
+  autoRunnerFactory = createAutoBackendRunner
 } = {}) {
   return function registerPiExtension(pi) {
     const resolvedWorkerAdapter = workerAdapter ?? adapterFactory({
@@ -287,6 +294,11 @@ export function createPiExtension({
     });
     const resolvedWorkerRunner = workerRunner ?? workerRunnerFactory({
       adapter: resolvedWorkerAdapter
+    });
+    const resolvedAutoRunner = autoRunnerFactory({
+      defaultRunner: resolvedWorkerRunner,
+      processBackend: processWorkerBackend,
+      mode: autoBackendMode
     });
     const resolvedContractExecutor = contractExecutor ?? createProgramContractExecutor({
       runner: resolvedWorkerRunner
@@ -375,7 +387,7 @@ export function createPiExtension({
       description: "Plan and execute a bounded workflow with the configured worker runner.",
       handler: async (args, ctx) => {
         const execution = await runAutoWorkflow(parseAutoArgs(args), {
-          runner: resolvedWorkerRunner
+          runner: resolvedAutoRunner
         });
 
         const notification = execution.status === "success"
@@ -565,7 +577,7 @@ export function createPiExtension({
       }),
       async execute(_toolCallId, params) {
         const execution = await runAutoWorkflow(params, {
-          runner: resolvedWorkerRunner
+          runner: resolvedAutoRunner
         });
 
         return {
