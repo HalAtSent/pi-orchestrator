@@ -107,9 +107,10 @@ Use when the task is already bounded enough to execute.
 Current state:
 
 - plans a bounded workflow
-- runs it against the configured local worker runner
+- runs it through the configured worker runner
 - enforces read-only roles and repair-loop budget
-- cleanly blocks if there is no real worker backend
+- uses the Pi-backed runner by default when the host exposes worker execution
+- cleanly blocks if the live Pi runtime surface is missing or unsafe
 
 ## Recommended Operating Loop
 
@@ -120,7 +121,7 @@ For package design or ambiguous project work:
 3. Run `blueprint`
 4. Run `slice`
 5. Run `audit`
-6. Execute one contract or one bounded task with `auto`
+6. Execute one contract or one bounded task with `run-program` or `auto`
 
 For a well-scoped implementation task:
 
@@ -134,7 +135,8 @@ For zero-to-project work:
 2. Freeze with `blueprint`
 3. Produce milestone contracts with `slice`
 4. Use `bootstrap` for the first setup contract
-5. Execute contracts in sequence once the program runner exists
+5. Execute contracts in sequence with `run-program`
+6. Resume interrupted runs with `resume-program`
 
 ## Pi Commands
 
@@ -147,6 +149,9 @@ Available commands inside Pi:
 - `/bootstrap`
 - `/audit`
 - `/auto`
+- `/run-program`
+- `/resume-program`
+- `/worker-runtime-status`
 
 Matching tool surfaces also exist for programmatic use:
 
@@ -157,6 +162,9 @@ Matching tool surfaces also exist for programmatic use:
 - `audit_project`
 - `plan_workflow`
 - `run_auto_workflow`
+- `run_execution_program`
+- `resume_execution_program`
+- `inspect_worker_runtime`
 - `validate_worker_result`
 
 ## Example Inputs
@@ -176,15 +184,16 @@ Working now:
 - Pi extension loads locally
 - lifecycle planning commands return structured artifacts
 - `audit` validates artifact consistency
-- `auto` runs against the local/scripted runner abstraction
-- blocked execution is surfaced cleanly when no real worker backend exists
+- `auto` runs through the Pi-backed runner when the host exposes worker execution
+- `run-program` executes an `ExecutionProgram` sequentially
+- persisted run journals are written locally and can be resumed
+- blocked execution is surfaced cleanly when the runtime surface is missing or unsafe
 
 Not implemented yet:
 
-- real Pi-backed worker spawning
-- execution of a full `ExecutionProgram`
-- runtime file claim registry
-- persistent run journal and resume
+- guaranteed live worker invocation in every Pi host
+- broader live diagnostics for runtime capability mismatches
+- proven end-to-end live medium/high-risk runs in Pi
 - end-to-end autonomous project delivery
 
 ## Evidence Expectations
@@ -203,10 +212,10 @@ That means:
 
 The next highest-value work is:
 
-1. add a `program-runner` that executes an `ExecutionProgram`
-2. compile contracts into bounded worker packets
-3. replace the placeholder runner with a real Pi-backed worker runner
-4. add persistence for lifecycle artifacts and run journals
+1. harden live Pi runtime diagnostics and capability detection
+2. prove live low-risk, then medium/high-risk runs in Pi
+3. expand on-disk evidence and operator controls
+4. add stronger execution-profile controls for budgets and approvals
 
 ## Local Verification
 

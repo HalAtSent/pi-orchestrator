@@ -1,7 +1,16 @@
 import { formatWorkflowExecution, runAutoWorkflow } from "./auto-workflow.js";
 import { validateWorkerResult } from "./contracts.js";
 import { createInitialWorkflow } from "./orchestrator.js";
+import {
+  createPiAdapter,
+  PI_ADAPTER_DEFAULT_SUPPORTED_ROLES
+} from "./pi-adapter.js";
+import {
+  formatPiWorkerRuntimeStatus,
+  inspectPiWorkerRuntime
+} from "./pi-runtime-diagnostics.js";
 import { createProgramContractExecutor } from "./program-contract-executor.js";
+import { createPiWorkerRunner } from "./pi-worker-runner.js";
 import {
   formatProgramRunJournal,
   resumeExecutionProgram,
@@ -13,7 +22,6 @@ import {
 } from "./project-workflows.js";
 import { createRunStore } from "./run-store.js";
 import { Type } from "./schema.js";
-import { createLocalWorkerRunner } from "./worker-runner.js";
 
 const projectBriefSchema = Type.Object({
   goal: Type.String({ description: "The project or package goal." }),
@@ -72,6 +80,8 @@ const resumeExecutionProgramSchema = Type.Object({
     description: "ExecutionProgram id to resume from local persisted run state."
   })
 });
+
+const inspectWorkerRuntimeSchema = Type.Object({});
 
 function formatWorkflow(workflow) {
   const packetLines = workflow.packets.map((packet) => {
@@ -262,20 +272,52 @@ function buildLifecycleFromParams(params) {
 }
 
 export function createPiExtension({
-  workerRunner = createLocalWorkerRunner(),
+  workerRunner = null,
   contractExecutor,
-  runStore = null
+  runStore = null,
+  workerAdapter,
+  adapterSupportedRoles = PI_ADAPTER_DEFAULT_SUPPORTED_ROLES,
+  adapterFactory = createPiAdapter,
+  workerRunnerFactory = createPiWorkerRunner
 } = {}) {
-  const resolvedContractExecutor = contractExecutor ?? createProgramContractExecutor({
-    runner: workerRunner
-  });
-
   return function registerPiExtension(pi) {
+    const resolvedWorkerAdapter = workerAdapter ?? adapterFactory({
+      host: pi,
+      supportedRoles: adapterSupportedRoles
+    });
+    const resolvedWorkerRunner = workerRunner ?? workerRunnerFactory({
+      adapter: resolvedWorkerAdapter
+    });
+    const resolvedContractExecutor = contractExecutor ?? createProgramContractExecutor({
+      runner: resolvedWorkerRunner
+    });
+
     pi.registerCommand("workflow-status", {
       description: "Show whether the orchestration package is loaded.",
       handler: async (_args, ctx) => {
         ctx.ui.notify("pi-orchestrator-workflow loaded", "info");
         ctx.ui.setStatus("workflow", "orchestrator package ready");
+      }
+    });
+
+    pi.registerCommand("worker-runtime-status", {
+      description: "Inspect whether the live Pi host exposes bounded worker execution.",
+      handler: async (_args, ctx) => {
+        const status = inspectPiWorkerRuntime({
+          host: pi,
+          supportedRoles: adapterSupportedRoles
+        });
+        const summary = status.selectedInvoker === "none"
+          ? "worker runtime unavailable (no runWorker surface)"
+          : `worker runtime ready (${status.selectedInvoker})`;
+
+        ctx.ui.notify(summary, status.selectedInvoker === "none" ? "warning" : "info");
+        ctx.ui.setStatus("workflow", summary);
+
+        return {
+          text: formatPiWorkerRuntimeStatus(status),
+          details: status
+        };
       }
     });
 
@@ -330,13 +372,17 @@ export function createPiExtension({
     });
 
     pi.registerCommand("auto", {
-      description: "Plan and execute a bounded workflow with the configured local worker runner.",
+      description: "Plan and execute a bounded workflow with the configured worker runner.",
       handler: async (args, ctx) => {
         const execution = await runAutoWorkflow(parseAutoArgs(args), {
-          runner: workerRunner
+          runner: resolvedWorkerRunner
         });
 
-        ctx.ui.notify(`auto workflow ${execution.status}`, execution.status === "success" ? "info" : "warning");
+        const notification = execution.status === "success"
+          ? "auto workflow success"
+          : `auto workflow ${execution.status}: ${execution.stopReason ?? "no stop reason reported"}`;
+
+        ctx.ui.notify(notification, execution.status === "success" ? "info" : "warning");
         ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
 
         return execution;
@@ -492,7 +538,7 @@ export function createPiExtension({
     pi.registerTool({
       name: "run_auto_workflow",
       label: "Run Auto Workflow",
-      description: "Plan and execute a bounded workflow with the configured local worker runner.",
+      description: "Plan and execute a bounded workflow with the configured worker runner.",
       parameters: Type.Object({
         goal: Type.String({ description: "The coding task to orchestrate and execute." }),
         allowedFiles: Type.Array(Type.String(), {
@@ -519,7 +565,7 @@ export function createPiExtension({
       }),
       async execute(_toolCallId, params) {
         const execution = await runAutoWorkflow(params, {
-          runner: workerRunner
+          runner: resolvedWorkerRunner
         });
 
         return {
@@ -561,6 +607,24 @@ export function createPiExtension({
         return {
           content: [{ type: "text", text: formatProgramRunJournal(runJournal) }],
           details: runJournal
+        };
+      }
+    });
+
+    pi.registerTool({
+      name: "inspect_worker_runtime",
+      label: "Inspect Worker Runtime",
+      description: "Inspect whether the live Pi host exposes bounded worker execution.",
+      parameters: inspectWorkerRuntimeSchema,
+      async execute() {
+        const status = inspectPiWorkerRuntime({
+          host: pi,
+          supportedRoles: adapterSupportedRoles
+        });
+
+        return {
+          content: [{ type: "text", text: formatPiWorkerRuntimeStatus(status) }],
+          details: status
         };
       }
     });

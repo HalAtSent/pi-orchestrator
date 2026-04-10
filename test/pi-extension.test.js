@@ -30,6 +30,150 @@ test("pi extension entrypoint imports without undeclared runtime dependencies", 
   assert.equal(typeof module.createPiExtension, "function");
 });
 
+test("default export routes /auto through the Pi adapter and worker runner", async () => {
+  const module = await import("../src/pi-extension.js");
+  const requestedRuns = [];
+  const registeredCommands = new Map();
+
+  module.default({
+    async runWorker(request, runtimeContext) {
+      requestedRuns.push({
+        request,
+        runtimeContext
+      });
+
+      return {
+        status: "success",
+        summary: `${request.role} completed`,
+        changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
+        commandsRun: [...request.commands],
+        evidence: [`role=${request.role}`],
+        openQuestions: []
+      };
+    },
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Rename a helper in one file",
+    allowedFiles: ["src/helpers.js"],
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify() {},
+      setStatus() {}
+    }
+  });
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(requestedRuns.map((entry) => entry.request.role), ["implementer", "verifier"]);
+  assert.equal(requestedRuns[0].request.controls.noRecursiveDelegation, true);
+  assert.equal(requestedRuns[0].request.controls.writePolicy, "allowlist_only");
+  assert.equal(requestedRuns[1].request.controls.writePolicy, "read_only");
+});
+
+test("default export routes approved high-risk /auto runs through all worker roles", async () => {
+  const module = await import("../src/pi-extension.js");
+  const requestedRuns = [];
+  const registeredCommands = new Map();
+
+  module.default({
+    async runWorker(request, runtimeContext) {
+      requestedRuns.push({
+        request,
+        runtimeContext
+      });
+
+      return {
+        status: "success",
+        summary: `${request.role} completed`,
+        changedFiles: request.role === "implementer" ? ["platform/contracts/ingest/artifact.json"] : [],
+        commandsRun: [...request.commands],
+        evidence: [`role=${request.role}`],
+        openQuestions: []
+      };
+    },
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Apply a schema migration for billing events",
+    allowedFiles: ["platform/contracts/ingest/artifact.json"],
+    approvedHighRisk: true,
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify() {},
+      setStatus() {}
+    }
+  });
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(
+    requestedRuns.map((entry) => entry.request.role),
+    ["explorer", "implementer", "reviewer", "verifier"]
+  );
+});
+
+test("pi extension exposes worker runtime diagnostics and blocked auto includes stop reason", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const registeredTools = new Map();
+  const uiEvents = [];
+
+  const extension = createPiExtension();
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool(config) {
+      registeredTools.set(config.name, config);
+    }
+  });
+
+  const runtimeStatus = await registeredCommands.get("worker-runtime-status").handler("", {
+    ui: {
+      notify(message, level) {
+        uiEvents.push({ message, level });
+      },
+      setStatus(scope, value) {
+        uiEvents.push({ scope, value });
+      }
+    }
+  });
+
+  assert.match(runtimeStatus.text, /selected_invoker: none/);
+  assert.equal(registeredTools.has("inspect_worker_runtime"), true);
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Rename a helper in one file",
+    allowedFiles: ["src/helpers.js"],
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify(message, level) {
+        uiEvents.push({ message, level });
+      },
+      setStatus(scope, value) {
+        uiEvents.push({ scope, value });
+      }
+    }
+  });
+
+  assert.equal(execution.status, "blocked");
+  assert.match(execution.stopReason, /does not expose runWorker/i);
+  assert.equal(
+    uiEvents.some((event) => event.message && /does not expose runWorker/i.test(event.message)),
+    true
+  );
+});
+
 test("pi extension exposes run-program/resume-program and execution tools", async () => {
   const { createPiExtension } = await import("../src/pi-extension.js");
   const registeredCommands = new Map();

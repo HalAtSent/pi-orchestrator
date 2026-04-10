@@ -63,3 +63,55 @@ test("default program contract executor can succeed with a scripted worker runne
   assert.match(result.summary, /Executed contract-low-risk through 2 bounded packet run\(s\)\./);
   assert.equal(runner.getPendingStepCount(), 0);
 });
+
+test("program contract executor threads program execution context into packet workers", async () => {
+  const runner = createLocalWorkerRunner({
+    handlers: {
+      implementer: async () => ({
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Implementer step passed."],
+        openQuestions: []
+      }),
+      verifier: async () => ({
+        status: "success",
+        summary: "Verified the helper rename.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      })
+    }
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+  const contractContext = {
+    programId: "program-smoke",
+    completedContractIds: ["bootstrap-package"],
+    pendingContractIds: ["contract-low-risk"],
+    contractRuns: [
+      {
+        contractId: "bootstrap-package",
+        status: "success",
+        summary: "Bootstrap completed.",
+        evidence: [],
+        openQuestions: []
+      }
+    ]
+  };
+
+  const result = await executeContract(buildLowRiskContract(), contractContext);
+  const calls = runner.getCalls();
+
+  assert.equal(result.status, "success");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].context.programId, "program-smoke");
+  assert.deepEqual(calls[0].context.completedContractIds, ["bootstrap-package"]);
+  assert.deepEqual(calls[0].context.pendingContractIds, ["contract-low-risk"]);
+  assert.equal(calls[0].context.contractRuns.length, 1);
+  assert.equal(calls[0].context.priorResults.length, 0);
+  assert.equal(calls[1].context.programId, "program-smoke");
+  assert.equal(calls[1].context.priorResults.at(-1).role, "implementer");
+  assert.equal(calls[1].context.priorResults.at(-1).status, "success");
+});

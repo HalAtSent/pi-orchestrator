@@ -115,10 +115,10 @@ export function createProgramContractExecutor({
       const execution = await executePlannedWorkflow({
         workflow: compiledPlan.workflow,
         approvedHighRisk,
-        maxRepairLoops
-      }, {
-        runner,
+        maxRepairLoops,
         context
+      }, {
+        runner
       });
 
       return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution);

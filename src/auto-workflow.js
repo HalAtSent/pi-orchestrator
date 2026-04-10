@@ -45,7 +45,10 @@ function normalizePlannedWorkflowInput(input) {
   return {
     workflow: clone(input.workflow),
     approvedHighRisk: Boolean(input.approvedHighRisk),
-    maxRepairLoops: input.maxRepairLoops ?? 1
+    maxRepairLoops: input.maxRepairLoops ?? 1,
+    context: input.context && typeof input.context === "object" && !Array.isArray(input.context)
+      ? clone(input.context)
+      : {}
   };
 }
 
@@ -70,8 +73,9 @@ function sanitizePriorResults(runs) {
   }));
 }
 
-function buildRunContext({ workflow, runs, repairCount, reviewResult }) {
+function buildRunContext({ workflow, runs, repairCount, reviewResult, baseContext = {} }) {
   return {
+    ...clone(baseContext),
     workflowId: workflow.workflowId,
     goal: workflow.goal,
     risk: workflow.risk,
@@ -102,12 +106,22 @@ function validateChangedFiles(packet, result) {
   }
 }
 
-async function executePacket({ runner, packet, workflow, runs, repairCount, reviewResult = null, iteration = 0 }) {
+async function executePacket({
+  runner,
+  packet,
+  workflow,
+  runs,
+  repairCount,
+  reviewResult = null,
+  iteration = 0,
+  baseContext = {}
+}) {
   const context = buildRunContext({
     workflow,
     runs,
     repairCount,
-    reviewResult
+    reviewResult,
+    baseContext
   });
   const result = await runner.run(packet, context);
 
@@ -149,7 +163,7 @@ function createRepairPacket({ workflow, packet, role, repairCount }) {
   });
 }
 
-async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount }) {
+async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount, baseContext }) {
   const implementerPacket = createRepairPacket({
     workflow,
     packet: reviewerPacket,
@@ -162,7 +176,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     workflow,
     runs,
     repairCount,
-    iteration: repairCount
+    iteration: repairCount,
+    baseContext
   });
 
   if (repairRun.result.status !== "success") {
@@ -185,7 +200,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     runs,
     repairCount,
     reviewResult: repairRun.result,
-    iteration: repairCount
+    iteration: repairCount,
+    baseContext
   });
 
   return {
@@ -202,6 +218,7 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
   assertRunner(runner);
   const normalizedInput = normalizePlannedWorkflowInput(input);
   const workflow = normalizedInput.workflow;
+  const baseContext = normalizedInput.context;
   assertRepairBudget(normalizedInput.maxRepairLoops);
   const runs = [];
   let repairCount = 0;
@@ -223,7 +240,8 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
       packet,
       workflow,
       runs,
-      repairCount
+      repairCount,
+      baseContext
     });
 
     if (packet.role === "reviewer" && run.result.status === "repair_required") {
@@ -244,7 +262,8 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
         workflow,
         reviewerPacket: packet,
         runs,
-        repairCount
+        repairCount,
+        baseContext
       });
 
       if (repairOutcome.status !== "success") {
