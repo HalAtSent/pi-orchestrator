@@ -1,12 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import { createPiWorkerRunner } from "../src/pi-worker-runner.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
+import { createRunStore } from "../src/run-store.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
+}
+
+async function withTempDir(prefix, callback) {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  try {
+    return await callback(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test("pi extension entrypoint imports without undeclared runtime dependencies", async () => {
@@ -16,7 +30,7 @@ test("pi extension entrypoint imports without undeclared runtime dependencies", 
   assert.equal(typeof module.createPiExtension, "function");
 });
 
-test("pi extension exposes run-program and run_execution_program", async () => {
+test("pi extension exposes run-program/resume-program and execution tools", async () => {
   const { createPiExtension } = await import("../src/pi-extension.js");
   const registeredCommands = new Map();
   const registeredTools = new Map();
@@ -44,8 +58,10 @@ test("pi extension exposes run-program and run_execution_program", async () => {
   });
 
   assert.equal(registeredCommands.has("run-program"), true);
+  assert.equal(registeredCommands.has("resume-program"), true);
   assert.equal(registeredCommands.has("auto"), true);
   assert.equal(registeredTools.has("run_execution_program"), true);
+  assert.equal(registeredTools.has("resume_execution_program"), true);
   assert.equal(registeredTools.has("run_auto_workflow"), true);
 
   const program = buildProjectLifecycleArtifacts(loadFixture("project-brief.json")).executionProgram;
@@ -69,6 +85,61 @@ test("pi extension exposes run-program and run_execution_program", async () => {
   const runFromTool = await registeredTools.get("run_execution_program").execute("tool-call-1", { program });
   assert.equal(runFromTool.details.status, "success");
   assert.match(runFromTool.content[0].text, /^program:/m);
+});
+
+test("pi extension resume-program resumes a persisted execution program run", async () => {
+  await withTempDir("pi-orchestrator-pi-extension-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const runStore = createRunStore({ rootDir });
+    const executionCounts = new Map();
+
+    const extension = createPiExtension({
+      runStore,
+      contractExecutor: async (contract) => {
+        const count = executionCounts.get(contract.id) ?? 0;
+        executionCounts.set(contract.id, count + 1);
+
+        if (contract.id === "freeze-lifecycle-contracts" && count === 0) {
+          return {
+            status: "blocked",
+            summary: "Waiting for a one-time human decision.",
+            evidence: [],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const program = buildProjectLifecycleArtifacts(loadFixture("project-brief.json")).executionProgram;
+    const ui = {
+      notify() {},
+      setStatus() {}
+    };
+
+    const firstRun = await registeredCommands.get("run-program").handler(JSON.stringify({ program }), { ui });
+    assert.equal(firstRun.status, "blocked");
+
+    const resumedRun = await registeredCommands.get("resume-program").handler(program.id, { ui });
+    assert.equal(resumedRun.status, "success");
+
+    assert.equal(executionCounts.get("bootstrap-package"), 1);
+    assert.equal(executionCounts.get("freeze-lifecycle-contracts"), 2);
+  });
 });
 
 test("pi extension run-program uses the default compiler/executor path with a scripted runner", async () => {
@@ -149,4 +220,51 @@ test("pi extension run-program uses the default compiler/executor path with a sc
   assert.equal(runJournal.contractRuns.length, 1);
   assert.equal(runJournal.contractRuns[0].status, "success");
   assert.equal(runner.getPendingStepCount(), 0);
+});
+
+test("pi extension auto command runs through an injected Pi-backed runner", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const requestedRoles = [];
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker(request) {
+        requestedRoles.push(request.role);
+        return {
+          status: "success",
+          summary: `${request.role} completed`,
+          changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
+          commandsRun: [...request.commands],
+          evidence: [`role=${request.role}`],
+          openQuestions: []
+        };
+      }
+    }
+  });
+  const registeredCommands = new Map();
+
+  const extension = createPiExtension({
+    workerRunner: runner
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Rename a helper in one file",
+    allowedFiles: ["src/helpers.js"],
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify() {},
+      setStatus() {}
+    }
+  });
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
+  assert.equal(execution.runs.length, 2);
 });

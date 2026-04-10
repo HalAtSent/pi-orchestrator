@@ -2,11 +2,16 @@ import { formatWorkflowExecution, runAutoWorkflow } from "./auto-workflow.js";
 import { validateWorkerResult } from "./contracts.js";
 import { createInitialWorkflow } from "./orchestrator.js";
 import { createProgramContractExecutor } from "./program-contract-executor.js";
-import { formatProgramRunJournal, runExecutionProgram } from "./program-runner.js";
+import {
+  formatProgramRunJournal,
+  resumeExecutionProgram,
+  runExecutionProgram
+} from "./program-runner.js";
 import {
   brainstormProject,
   buildProjectLifecycleArtifacts
 } from "./project-workflows.js";
+import { createRunStore } from "./run-store.js";
 import { Type } from "./schema.js";
 import { createLocalWorkerRunner } from "./worker-runner.js";
 
@@ -59,6 +64,12 @@ const runExecutionProgramSchema = Type.Object({
   program: Type.Object({}, {
     description: "ExecutionProgram artifact to execute contract-by-contract.",
     additionalProperties: true
+  })
+});
+
+const resumeExecutionProgramSchema = Type.Object({
+  programId: Type.String({
+    description: "ExecutionProgram id to resume from local persisted run state."
   })
 });
 
@@ -213,6 +224,37 @@ function parseRunProgramArgs(args) {
   throw new Error("Provide an ExecutionProgram JSON object or {\"program\": { ... }}.");
 }
 
+function parseResumeProgramArgs(args) {
+  if (typeof args === "string") {
+    const raw = args.trim();
+    if (raw.length === 0) {
+      throw new Error("Provide a program id string or a JSON object with programId.");
+    }
+
+    if (raw.startsWith("{")) {
+      return parseResumeProgramArgs(JSON.parse(raw));
+    }
+
+    return {
+      programId: raw
+    };
+  }
+
+  if (Array.isArray(args)) {
+    return parseResumeProgramArgs(args.join(" "));
+  }
+
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    if (typeof args.programId === "string" && args.programId.trim().length > 0) {
+      return {
+        programId: args.programId.trim()
+      };
+    }
+  }
+
+  throw new Error("Provide a program id string or {\"programId\": \"...\"}.");
+}
+
 function buildLifecycleFromParams(params) {
   return buildProjectLifecycleArtifacts(params, {
     selectedAlternativeId: params.selectedAlternativeId
@@ -221,7 +263,8 @@ function buildLifecycleFromParams(params) {
 
 export function createPiExtension({
   workerRunner = createLocalWorkerRunner(),
-  contractExecutor
+  contractExecutor,
+  runStore = null
 } = {}) {
   const resolvedContractExecutor = contractExecutor ?? createProgramContractExecutor({
     runner: workerRunner
@@ -305,7 +348,24 @@ export function createPiExtension({
       handler: async (args, ctx) => {
         const { program } = parseRunProgramArgs(args);
         const runJournal = await runExecutionProgram(program, {
-          contractExecutor: resolvedContractExecutor
+          contractExecutor: resolvedContractExecutor,
+          runStore
+        });
+
+        ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");
+        ctx.ui.setStatus("workflow", `${runJournal.status}: ${runJournal.programId}`);
+
+        return runJournal;
+      }
+    });
+
+    pi.registerCommand("resume-program", {
+      description: "Resume a persisted ExecutionProgram run from local run-state snapshots.",
+      handler: async (args, ctx) => {
+        const { programId } = parseResumeProgramArgs(args);
+        const runJournal = await resumeExecutionProgram(programId, {
+          contractExecutor: resolvedContractExecutor,
+          runStore
         });
 
         ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");
@@ -476,7 +536,26 @@ export function createPiExtension({
       parameters: runExecutionProgramSchema,
       async execute(_toolCallId, params) {
         const runJournal = await runExecutionProgram(params.program, {
-          contractExecutor: resolvedContractExecutor
+          contractExecutor: resolvedContractExecutor,
+          runStore
+        });
+
+        return {
+          content: [{ type: "text", text: formatProgramRunJournal(runJournal) }],
+          details: runJournal
+        };
+      }
+    });
+
+    pi.registerTool({
+      name: "resume_execution_program",
+      label: "Resume Execution Program",
+      description: "Resume a persisted ExecutionProgram run from local run-state snapshots.",
+      parameters: resumeExecutionProgramSchema,
+      async execute(_toolCallId, params) {
+        const runJournal = await resumeExecutionProgram(params.programId, {
+          contractExecutor: resolvedContractExecutor,
+          runStore
         });
 
         return {
@@ -509,4 +588,6 @@ export function createPiExtension({
   };
 }
 
-export default createPiExtension();
+export default createPiExtension({
+  runStore: createRunStore()
+});

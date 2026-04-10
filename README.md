@@ -52,6 +52,8 @@ The first extension cut exposes:
 - `audit_project`: audit the lifecycle scaffolding before execution
 - `plan_workflow`: build a bounded execution plan from a coding request
 - `run_auto_workflow`: plan and execute a workflow with a configured local runner
+- `run_execution_program`: execute a compiled execution program contract-by-contract
+- `resume_execution_program`: resume a persisted execution program run from local snapshots
 - `validate_worker_result`: validate structured worker output
 - `/brainstorm`: command entrypoint for structured alternatives
 - `/blueprint`: command entrypoint for a frozen project blueprint
@@ -59,6 +61,8 @@ The first extension cut exposes:
 - `/bootstrap`: command entrypoint for the first bootstrap contract
 - `/audit`: command entrypoint for lifecycle audit
 - `/auto`: command entrypoint for bounded workflow execution
+- `/run-program`: command entrypoint for execution-program runs
+- `/resume-program`: command entrypoint to continue a persisted run
 - `/workflow-status`: confirm the package loaded inside Pi
 
 ## Move-Out Plan

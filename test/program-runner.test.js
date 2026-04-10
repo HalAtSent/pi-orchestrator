@@ -1,9 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { runExecutionProgram } from "../src/program-runner.js";
+import { resumeExecutionProgram, runExecutionProgram } from "../src/program-runner.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import { createRunStore } from "../src/run-store.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
@@ -12,6 +16,15 @@ function loadFixture(name) {
 function buildProgram() {
   const brief = loadFixture("project-brief.json");
   return buildProjectLifecycleArtifacts(brief).executionProgram;
+}
+
+async function withTempDir(prefix, callback) {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
+  try {
+    return await callback(directory);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 test("program runner executes contracts in dependency order", async () => {
@@ -149,4 +162,99 @@ test("program runner blocks execution when dependencies contain a cycle", async 
   assert.match(journal.stopReason, /cycle/i);
   assert.equal(journal.contractRuns.length, 0);
   assert.equal(calls.length, 0);
+});
+
+test("program runner persists run state and resumes from the next pending contract", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const firstJournal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === "freeze-lifecycle-contracts") {
+          return {
+            status: "blocked",
+            summary: "Waiting for human decision before continuing.",
+            evidence: [],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(firstJournal.status, "blocked");
+    assert.deepEqual(firstJournal.completedContractIds, ["bootstrap-package"]);
+
+    const resumedContracts = [];
+    const resumedJournal = await resumeExecutionProgram(program.id, {
+      contractExecutor: async (contract) => {
+        resumedContracts.push(contract.id);
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(resumedJournal.status, "success");
+    assert.deepEqual(resumedContracts, [
+      "freeze-lifecycle-contracts",
+      "wire-execution-backend",
+      "harden-regressions-and-audit",
+      "package-readiness"
+    ]);
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "success");
+    assert.equal(persisted.runJournal.status, "success");
+  });
+});
+
+test("program runner blocks resume when persisted state is inconsistent", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "manually corrupted state",
+        contractRuns: [],
+        completedContractIds: ["missing-contract-id"],
+        pendingContractIds: []
+      }
+    });
+
+    const attemptedContracts = [];
+    const resumedJournal = await resumeExecutionProgram(program.id, {
+      contractExecutor: async (contract) => {
+        attemptedContracts.push(contract.id);
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(resumedJournal.status, "blocked");
+    assert.match(resumedJournal.stopReason, /inconsistent/i);
+    assert.equal(attemptedContracts.length, 0);
+  });
 });

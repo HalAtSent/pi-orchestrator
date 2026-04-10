@@ -9,6 +9,7 @@ export const CONTRACT_EXECUTION_STATUSES = Object.freeze([
   "repair_required"
 ]);
 export const PROGRAM_RUN_STATUSES = Object.freeze([
+  "running",
   "success",
   "blocked",
   "failed",
