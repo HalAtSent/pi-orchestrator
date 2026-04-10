@@ -17,6 +17,17 @@ function buildProgram() {
   return buildProjectLifecycleArtifacts(brief).executionProgram;
 }
 
+function createDeferred() {
+  let resolvePromise;
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: resolvePromise
+  };
+}
+
 async function withTempDir(prefix, callback) {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   try {
@@ -106,5 +117,82 @@ test("run store updates a persisted run journal and preserves createdAt", async 
     assert.equal(loaded.lastStatus, "blocked");
     assert.equal(loaded.runJournal.contractRuns.length, 1);
     assert.equal(loaded.createdAt, updated.createdAt);
+  });
+});
+
+test("run store serializes overlapping updateRun calls so updates are not clobbered", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const [firstContract, secondContract] = program.contracts;
+    assert.ok(firstContract);
+    assert.ok(secondContract);
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      }
+    });
+
+    function appendSuccessfulRun(existing, contractId) {
+      return {
+        ...existing,
+        runJournal: {
+          ...existing.runJournal,
+          status: "running",
+          stopReason: null,
+          contractRuns: [
+            ...existing.runJournal.contractRuns,
+            {
+              contractId,
+              status: "success",
+              summary: `Executed ${contractId}.`,
+              evidence: [],
+              openQuestions: []
+            }
+          ],
+          completedContractIds: [
+            ...existing.runJournal.completedContractIds,
+            contractId
+          ],
+          pendingContractIds: existing.runJournal.pendingContractIds.filter((pendingId) => pendingId !== contractId)
+        }
+      };
+    }
+
+    const firstUpdaterStarted = createDeferred();
+    const allowFirstUpdaterToFinish = createDeferred();
+    let secondObservedCompletedContractIds = null;
+
+    const firstUpdate = runStore.updateRun(program.id, async (existing) => {
+      firstUpdaterStarted.resolve();
+      await allowFirstUpdaterToFinish.promise;
+      return appendSuccessfulRun(existing, firstContract.id);
+    });
+
+    await firstUpdaterStarted.promise;
+    const secondUpdate = runStore.updateRun(program.id, async (existing) => {
+      secondObservedCompletedContractIds = [...existing.runJournal.completedContractIds];
+      return appendSuccessfulRun(existing, secondContract.id);
+    });
+
+    allowFirstUpdaterToFinish.resolve();
+    await Promise.all([firstUpdate, secondUpdate]);
+
+    assert.deepEqual(secondObservedCompletedContractIds, [firstContract.id]);
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.equal(loaded.runJournal.contractRuns.length, 2);
+    assert.deepEqual(
+      new Set(loaded.runJournal.completedContractIds),
+      new Set([firstContract.id, secondContract.id])
+    );
   });
 });

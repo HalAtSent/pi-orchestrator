@@ -218,6 +218,34 @@ function parseAutoArgs(args) {
   };
 }
 
+function coerceGoal(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : "(invalid auto workflow input)";
+}
+
+function coerceRepairBudget(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 1;
+}
+
+function createBlockedAutoExecution({ goal, maxRepairLoops, stopReason }) {
+  return {
+    workflow: {
+      workflowId: "workflow-invalid-auto-input",
+      goal: coerceGoal(goal),
+      risk: "low",
+      humanGate: false,
+      roleSequence: [],
+      packets: []
+    },
+    status: "blocked",
+    stopReason,
+    repairCount: 0,
+    maxRepairLoops: coerceRepairBudget(maxRepairLoops),
+    runs: []
+  };
+}
+
 function parseRunProgramArgs(args) {
   const parsed = parseJsonArgs(args);
 
@@ -386,7 +414,19 @@ export function createPiExtension({
     pi.registerCommand("auto", {
       description: "Plan and execute a bounded workflow with the configured worker runner.",
       handler: async (args, ctx) => {
-        const execution = await runAutoWorkflow(parseAutoArgs(args), {
+        const input = parseAutoArgs(args);
+        if (input.allowedFiles.length === 0) {
+          const execution = createBlockedAutoExecution({
+            goal: input.goal,
+            maxRepairLoops: input.maxRepairLoops,
+            stopReason: "allowedFiles must contain at least one file path for /auto workflows"
+          });
+          ctx.ui.notify(`auto workflow ${execution.status}: ${execution.stopReason}`, "warning");
+          ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
+          return execution;
+        }
+
+        const execution = await runAutoWorkflow(input, {
           runner: resolvedAutoRunner
         });
 

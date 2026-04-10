@@ -680,6 +680,63 @@ export function bootstrapProject({ blueprint } = {}) {
   });
 }
 
+function findDependencyCycle(contracts, contractIdSet) {
+  const contractIndex = new Map();
+  for (const contract of contracts) {
+    if (!contractIndex.has(contract.id)) {
+      contractIndex.set(contract.id, contract);
+    }
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+  const stack = [];
+
+  function visit(contractId) {
+    if (visiting.has(contractId)) {
+      const cycleStart = stack.indexOf(contractId);
+      return stack.slice(cycleStart).concat(contractId);
+    }
+
+    if (visited.has(contractId)) {
+      return null;
+    }
+
+    const contract = contractIndex.get(contractId);
+    if (!contract) {
+      return null;
+    }
+
+    visiting.add(contractId);
+    stack.push(contractId);
+
+    for (const dependencyId of contract.dependsOn) {
+      if (!contractIdSet.has(dependencyId)) {
+        continue;
+      }
+
+      const cycle = visit(dependencyId);
+      if (cycle) {
+        return cycle;
+      }
+    }
+
+    stack.pop();
+    visiting.delete(contractId);
+    visited.add(contractId);
+    return null;
+  }
+
+  for (const contract of contracts) {
+    const cycle = visit(contract.id);
+    if (cycle) {
+      return cycle;
+    }
+  }
+
+  return null;
+}
+
 export function auditProject({ blueprint, executionProgram } = {}) {
   validateProjectBlueprint(blueprint);
   const program = executionProgram ?? sliceProject({ blueprint });
@@ -718,7 +775,25 @@ export function auditProject({ blueprint, executionProgram } = {}) {
     });
   }
 
-  const contractIds = new Set(program.contracts.map((contract) => contract.id));
+  const contractIdCounts = new Map();
+  for (const contract of program.contracts) {
+    contractIdCounts.set(contract.id, (contractIdCounts.get(contract.id) ?? 0) + 1);
+  }
+
+  const contractIds = new Set(contractIdCounts.keys());
+  const duplicateContractIds = [...contractIdCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([contractId]) => contractId);
+
+  for (const duplicateContractId of duplicateContractIds) {
+    findings.push({
+      id: `duplicate-contract-id-${duplicateContractId}`,
+      severity: "high",
+      summary: `Execution program contains duplicate contract id: ${duplicateContractId}.`,
+      recommendation: "Ensure every contract id is unique so dependency resolution is deterministic."
+    });
+  }
+
   for (const contract of program.contracts) {
     const missingDependencies = contract.dependsOn.filter((dependencyId) => !contractIds.has(dependencyId));
     if (missingDependencies.length > 0) {
@@ -729,6 +804,16 @@ export function auditProject({ blueprint, executionProgram } = {}) {
         recommendation: "Ensure every dependsOn entry references a real contract id in the execution program."
       });
     }
+  }
+
+  const dependencyCycle = findDependencyCycle(program.contracts, contractIds);
+  if (dependencyCycle) {
+    findings.push({
+      id: "dependency-cycle-detected",
+      severity: "high",
+      summary: `Execution program contains a dependency cycle: ${dependencyCycle.join(" -> ")}.`,
+      recommendation: "Remove circular dependsOn references so milestone contracts form an acyclic graph."
+    });
   }
 
   if (blueprint.executionProfile.autonomyMode === "autonomous" &&

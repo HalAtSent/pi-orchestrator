@@ -77,6 +77,50 @@ test("default export routes /auto through the Pi adapter and worker runner", asy
   assert.equal(requestedRuns[1].request.controls.writePolicy, "read_only");
 });
 
+test("default export blocks /auto when the allowlist is empty", async () => {
+  const module = await import("../src/pi-extension.js");
+  const requestedRuns = [];
+  const registeredCommands = new Map();
+
+  module.default({
+    async runWorker(request, runtimeContext) {
+      requestedRuns.push({
+        request,
+        runtimeContext
+      });
+
+      return {
+        status: "success",
+        summary: `${request.role} completed`,
+        changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
+        commandsRun: [...request.commands],
+        evidence: [`role=${request.role}`],
+        openQuestions: []
+      };
+    },
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+    goal: "Rename a helper in one file",
+    allowedFiles: [],
+    maxRepairLoops: 1
+  }), {
+    ui: {
+      notify() {},
+      setStatus() {}
+    }
+  });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(requestedRuns.length, 0);
+  assert.match(execution.stopReason, /allowedFiles must contain at least one file path/i);
+});
+
 test("default export routes approved high-risk /auto runs through all worker roles", async () => {
   const module = await import("../src/pi-extension.js");
   const requestedRuns = [];
@@ -124,59 +168,71 @@ test("default export routes approved high-risk /auto runs through all worker rol
 });
 
 test("pi extension can route low-risk /auto implementer and verifier work through the process backend when explicitly configured", async () => {
-  const { createPiExtension } = await import("../src/pi-extension.js");
-  const processBackend = createProcessWorkerBackend({
-    launcher: async ({ packet, targetAbsolutePath }) => {
-      if (packet.role === "implementer") {
-        await mkdir(dirname(targetAbsolutePath), { recursive: true });
-        await writeFile(targetAbsolutePath, "process backend updated this file\n", "utf8");
+  await withTempDir("pi-orchestrator-process-implementer-", async (repositoryRoot) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const processBackend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ packet, targetAbsolutePath }) => {
+        if (packet.role === "implementer") {
+          await mkdir(dirname(targetAbsolutePath), { recursive: true });
+          await writeFile(targetAbsolutePath, "process backend updated this file\n", "utf8");
+        }
+
+        const stdout = packet.role === "verifier"
+          ? JSON.stringify({
+            status: "success",
+            summary: "Verification checks passed.",
+            evidence: ["Verification evidence collected."],
+            openQuestions: []
+          })
+          : "ok";
+
+        return {
+          launcher: "fake_process_launcher",
+          command: "node",
+          args: ["fake-process-launch.js"],
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout,
+          stderr: "",
+          error: null,
+          durationMs: 3,
+          commandsRun: ["node fake-process-launch.js"]
+        };
       }
+    });
 
-      return {
-        launcher: "fake_process_launcher",
-        command: "node",
-        args: ["fake-process-launch.js"],
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        stdout: "ok",
-        stderr: "",
-        error: null,
-        durationMs: 3,
-        commandsRun: ["node fake-process-launch.js"]
-      };
-    }
+    const registeredCommands = new Map();
+    const extension = createPiExtension({
+      processWorkerBackend: processBackend,
+      autoBackendMode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+      goal: "Rename a helper in one file",
+      allowedFiles: ["src/helpers.js"],
+      maxRepairLoops: 1
+    }), {
+      ui: {
+        notify() {},
+        setStatus() {}
+      }
+    });
+
+    assert.equal(execution.status, "success");
+    assert.deepEqual(execution.runs.map((run) => run.packet.role), ["implementer", "verifier"]);
+    assert.equal(processBackend.getCalls().length, 2);
+    assert.equal(processBackend.getCalls()[0].packet.role, "implementer");
+    assert.equal(processBackend.getCalls()[1].packet.role, "verifier");
   });
-
-  const registeredCommands = new Map();
-  const extension = createPiExtension({
-    processWorkerBackend: processBackend,
-    autoBackendMode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER
-  });
-
-  extension({
-    registerCommand(name, config) {
-      registeredCommands.set(name, config);
-    },
-    registerTool() {}
-  });
-
-  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
-    goal: "Rename a helper in one file",
-    allowedFiles: ["src/helpers.js"],
-    maxRepairLoops: 1
-  }), {
-    ui: {
-      notify() {},
-      setStatus() {}
-    }
-  });
-
-  assert.equal(execution.status, "success");
-  assert.deepEqual(execution.runs.map((run) => run.packet.role), ["implementer", "verifier"]);
-  assert.equal(processBackend.getCalls().length, 2);
-  assert.equal(processBackend.getCalls()[0].packet.role, "implementer");
-  assert.equal(processBackend.getCalls()[1].packet.role, "verifier");
 });
 
 test("pi extension can route approved high-risk /auto work through process subagents when explicitly configured", async () => {

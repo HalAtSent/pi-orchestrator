@@ -1,10 +1,13 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createExecutionProgram, createRunJournal } from "./project-contracts.js";
 
 export const RUN_STORE_FORMAT_VERSION = 1;
 const DEFAULT_RUN_DIRECTORY = ".pi/runs";
+const RUN_UPDATE_LOCK_RETRY_DELAY_MS = 25;
+const RUN_UPDATE_LOCK_TIMEOUT_MS = 5000;
+const RUN_UPDATE_LOCK_STALE_MS = 30000;
 
 function assert(condition, message) {
   if (!condition) {
@@ -108,6 +111,12 @@ function formatPersistedRecord(record) {
   return `${JSON.stringify(record, null, 2)}\n`;
 }
 
+function wait(ms) {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, ms);
+  });
+}
+
 export function createRunStore({
   rootDir = process.cwd(),
   runsDirectory = DEFAULT_RUN_DIRECTORY
@@ -122,6 +131,77 @@ export function createRunStore({
   function resolveRunPath(programId) {
     const normalizedProgramId = normalizeProgramId(programId);
     return join(resolvedRunsDirectory, `${encodeURIComponent(normalizedProgramId)}.json`);
+  }
+
+  function resolveRunLockPath(programId) {
+    return `${resolveRunPath(programId)}.lock`;
+  }
+
+  async function acquireRunUpdateLock(programId) {
+    const normalizedProgramId = normalizeProgramId(programId);
+    const lockPath = resolveRunLockPath(normalizedProgramId);
+    const startedAt = Date.now();
+    await ensureRunsDirectory();
+
+    while (true) {
+      try {
+        await writeFile(
+          lockPath,
+          `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`,
+          {
+            encoding: "utf8",
+            flag: "wx"
+          }
+        );
+        return async () => {
+          try {
+            await unlink(lockPath);
+          } catch (error) {
+            if (error && error.code === "ENOENT") {
+              return;
+            }
+            throw error;
+          }
+        };
+      } catch (error) {
+        if (!error || error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+
+      let staleLockRemoved = false;
+      try {
+        const lockStats = await stat(lockPath);
+        if (Date.now() - lockStats.mtimeMs > RUN_UPDATE_LOCK_STALE_MS) {
+          try {
+            await unlink(lockPath);
+            staleLockRemoved = true;
+          } catch (error) {
+            if (error && error.code === "ENOENT") {
+              staleLockRemoved = true;
+            } else {
+              throw error;
+            }
+          }
+        }
+      } catch (error) {
+        if (error && error.code === "ENOENT") {
+          staleLockRemoved = true;
+        } else {
+          throw error;
+        }
+      }
+
+      if (staleLockRemoved) {
+        continue;
+      }
+
+      if (Date.now() - startedAt >= RUN_UPDATE_LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out acquiring run update lock for programId: ${normalizedProgramId}`);
+      }
+
+      await wait(RUN_UPDATE_LOCK_RETRY_DELAY_MS);
+    }
   }
 
   async function writeRecord(record) {
@@ -168,27 +248,31 @@ export function createRunStore({
     async updateRun(programId, updater) {
       const normalizedProgramId = normalizeProgramId(programId);
       assert(typeof updater === "function", "updateRun(programId, updater) requires an updater function");
+      const releaseLock = await acquireRunUpdateLock(normalizedProgramId);
+      try {
+        const existing = await this.loadRun(normalizedProgramId);
+        const nextValue = await updater(clone(existing));
+        assertPlainObject("updateRun result", nextValue);
+        const {
+          completedContractIds: _ignoredCompletedContractIds,
+          pendingContractIds: _ignoredPendingContractIds,
+          lastStatus: _ignoredLastStatus,
+          stopReason: _ignoredStopReason,
+          ...nextRecordInput
+        } = nextValue;
 
-      const existing = await this.loadRun(normalizedProgramId);
-      const nextValue = await updater(clone(existing));
-      assertPlainObject("updateRun result", nextValue);
-      const {
-        completedContractIds: _ignoredCompletedContractIds,
-        pendingContractIds: _ignoredPendingContractIds,
-        lastStatus: _ignoredLastStatus,
-        stopReason: _ignoredStopReason,
-        ...nextRecordInput
-      } = nextValue;
-
-      const record = normalizePersistedRunRecord({
-        ...nextRecordInput,
-        programId: normalizedProgramId,
-        updatedAt: new Date().toISOString()
-      }, {
-        existingCreatedAt: existing?.createdAt
-      });
-      await writeRecord(record);
-      return clone(record);
+        const record = normalizePersistedRunRecord({
+          ...nextRecordInput,
+          programId: normalizedProgramId,
+          updatedAt: new Date().toISOString()
+        }, {
+          existingCreatedAt: existing?.createdAt
+        });
+        await writeRecord(record);
+        return clone(record);
+      } finally {
+        await releaseLock();
+      }
     }
   };
 }

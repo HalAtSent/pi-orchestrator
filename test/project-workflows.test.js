@@ -161,3 +161,37 @@ test("audit flags a contract dependency on a missing milestone id", () => {
   assert.equal(auditReport.status, "attention_required");
   assert.ok(auditReport.findings.some((finding) => finding.id === "missing-dependency-freeze-lifecycle-contracts"));
 });
+
+test("audit flags dependency cycles in execution-program topology", () => {
+  const brief = loadFixture("project-brief.json");
+  const { blueprint, executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const cyclicalProgram = structuredClone(executionProgram);
+  const finalContractId = cyclicalProgram.contracts[cyclicalProgram.contracts.length - 1].id;
+  cyclicalProgram.contracts[0].dependsOn = [finalContractId];
+
+  const auditReport = auditProject({
+    blueprint,
+    executionProgram: cyclicalProgram
+  });
+
+  assert.equal(auditReport.status, "attention_required");
+  assert.ok(auditReport.findings.some((finding) => finding.id === "dependency-cycle-detected"));
+  assert.ok(auditReport.findings.some((finding) => finding.summary.includes("dependency cycle")));
+});
+
+test("audit flags duplicate contract ids in execution-program topology", () => {
+  const brief = loadFixture("project-brief.json");
+  const { blueprint, executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const duplicateProgram = structuredClone(executionProgram);
+  const duplicateContract = structuredClone(duplicateProgram.contracts[0]);
+  duplicateProgram.contracts.push(duplicateContract);
+
+  const auditReport = auditProject({
+    blueprint,
+    executionProgram: duplicateProgram
+  });
+
+  assert.equal(auditReport.status, "attention_required");
+  assert.ok(auditReport.findings.some((finding) => finding.id === `duplicate-contract-id-${duplicateContract.id}`));
+  assert.ok(auditReport.findings.some((finding) => finding.summary.includes(`duplicate contract id: ${duplicateContract.id}`)));
+});

@@ -61,6 +61,32 @@ test("auto workflow stops before execution when a human gate is required", async
   assert.match(execution.stopReason, /Human approval is required/i);
 });
 
+test("auto workflow blocks empty allowlists during input normalization", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "This step should never run.",
+        changedFiles: [],
+        commandsRun: [],
+        evidence: [],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: []
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /allowedFiles must contain at least one file path/i);
+});
+
 test("auto workflow rejects read-only roles that claim file changes", async () => {
   const runner = createScriptedWorkerRunner([
     {

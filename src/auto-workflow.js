@@ -20,13 +20,46 @@ function clone(value) {
   return value === undefined ? undefined : structuredClone(value);
 }
 
+function coerceGoal(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : "(invalid auto workflow input)";
+}
+
+function coerceRepairBudget(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 1;
+}
+
+function blockedInputExecution({ goal, maxRepairLoops, stopReason }) {
+  return {
+    workflow: {
+      workflowId: "workflow-invalid-auto-input",
+      goal: coerceGoal(goal),
+      risk: "low",
+      humanGate: false,
+      roleSequence: [],
+      packets: []
+    },
+    status: "blocked",
+    stopReason,
+    repairCount: 0,
+    maxRepairLoops: coerceRepairBudget(maxRepairLoops),
+    runs: []
+  };
+}
+
 function normalizeWorkflowInput(input) {
   assert(input && typeof input === "object", "workflow input must be an object");
   assert(typeof input.goal === "string" && input.goal.trim().length > 0, "goal must be a non-empty string");
+  const allowedFiles = Array.isArray(input.allowedFiles) ? unique(input.allowedFiles.map(normalizePath)) : [];
+  assert(
+    allowedFiles.length > 0,
+    "allowedFiles must contain at least one file path for /auto workflows"
+  );
 
   return {
     goal: input.goal.trim(),
-    allowedFiles: Array.isArray(input.allowedFiles) ? input.allowedFiles.map(normalizePath) : [],
+    allowedFiles,
     forbiddenFiles: Array.isArray(input.forbiddenFiles) ? input.forbiddenFiles.map(normalizePath) : [],
     contextFiles: Array.isArray(input.contextFiles) ? input.contextFiles.map(normalizePath) : [],
     approvedHighRisk: Boolean(input.approvedHighRisk),
@@ -303,7 +336,18 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
 }
 
 export async function runAutoWorkflow(input, { runner } = {}) {
-  const normalizedInput = normalizeWorkflowInput(input);
+  let normalizedInput;
+
+  try {
+    normalizedInput = normalizeWorkflowInput(input);
+  } catch (error) {
+    return blockedInputExecution({
+      goal: input?.goal,
+      maxRepairLoops: input?.maxRepairLoops,
+      stopReason: error instanceof Error ? error.message : String(error)
+    });
+  }
+
   const workflow = createInitialWorkflow({
     goal: normalizedInput.goal,
     allowedFiles: normalizedInput.allowedFiles,

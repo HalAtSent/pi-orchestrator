@@ -16,6 +16,20 @@ function clone(value) {
   return structuredClone(value);
 }
 
+function describeError(error) {
+  if (error instanceof Error) {
+    const message = typeof error.message === "string" ? error.message.trim() : "";
+    if (message.length > 0) {
+      return `${error.name}: ${message}`;
+    }
+
+    return error.name;
+  }
+
+  const message = String(error);
+  return message.trim().length > 0 ? message : "Unknown error";
+}
+
 function normalizeProgramId(programId) {
   assert(typeof programId === "string" && programId.trim().length > 0, "programId must be a non-empty string");
   return programId.trim();
@@ -452,12 +466,25 @@ async function runProgramFromState(program, {
       return blockedJournal;
     }
 
-    const rawResult = await executeContract(clone(contract), {
-      programId: program.id,
-      completedContractIds: [...completedContractIdSet],
-      pendingContractIds: [...pendingContractIdSet],
-      contractRuns: clone(contractRuns)
-    });
+    let rawResult;
+    let executionErrorMessage = null;
+    try {
+      rawResult = await executeContract(clone(contract), {
+        programId: program.id,
+        completedContractIds: [...completedContractIdSet],
+        pendingContractIds: [...pendingContractIdSet],
+        contractRuns: clone(contractRuns)
+      });
+    } catch (error) {
+      executionErrorMessage = describeError(error);
+      rawResult = {
+        status: "blocked",
+        summary: `Contract executor threw: ${executionErrorMessage}`,
+        evidence: [],
+        openQuestions: []
+      };
+    }
+
     const result = createContractExecutionResult(rawResult);
 
     pendingContractIdSet.delete(contract.id);
@@ -504,10 +531,14 @@ async function runProgramFromState(program, {
       `Unexpected terminal contract result status: ${result.status}`
     );
 
+    const terminalStopReason = executionErrorMessage === null
+      ? `Contract ${contract.id} returned ${result.status}: ${result.summary}`
+      : `Contract ${contract.id} execution threw: ${executionErrorMessage}`;
+
     const terminalJournal = stopProgram({
       program,
       status: result.status,
-      stopReason: `Contract ${contract.id} returned ${result.status}: ${result.summary}`,
+      stopReason: terminalStopReason,
       contractRuns: clone(contractRuns),
       completedContractIds: [...completedContractIdSet]
     });

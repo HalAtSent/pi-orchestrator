@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdir, mkdtemp, readdir, rm, readFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, readdir, rename, rm, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -10,6 +10,7 @@ import { getPiSpawnCommand } from "./pi-spawn.js";
 const SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const DEFAULT_TEMP_PREFIX = "pi-orchestrator-process-worker-";
+const DEFAULT_APPLY_TEMP_PREFIX = ".pi-orchestrator-apply-";
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
 
 function assert(condition, message) {
@@ -190,34 +191,122 @@ function assertWithinRoot(rootPath, absolutePath, label) {
   assert(!outsideRoot, `${label} resolves outside the expected root`);
 }
 
-async function pathExists(pathValue) {
+async function getPathStats(pathValue) {
   try {
-    await access(pathValue);
-    return true;
-  } catch {
-    return false;
+    return await stat(pathValue);
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+
+    throw error;
   }
 }
 
 async function applyChangedFilesToRepository({
   repositoryRoot,
   workspaceRoot,
-  changedFiles
+  changedFiles,
+  moveFileFn = rename
 }) {
-  for (const changedFile of changedFiles) {
-    const sourcePath = resolve(workspaceRoot, changedFile);
-    assertWithinRoot(workspaceRoot, sourcePath, "workspace changed file");
+  assert(typeof moveFileFn === "function", "moveFileFn(sourcePath, destinationPath) must be a function");
 
-    const destinationPath = resolve(repositoryRoot, changedFile);
-    assertWithinRoot(repositoryRoot, destinationPath, "repository changed file");
+  const normalizedRepositoryRoot = resolve(repositoryRoot);
+  const normalizedWorkspaceRoot = resolve(workspaceRoot);
+  const applyRoot = await mkdtemp(join(normalizedRepositoryRoot, DEFAULT_APPLY_TEMP_PREFIX));
+  const stagedRoot = resolve(applyRoot, "staged");
+  const backupRoot = resolve(applyRoot, "backup");
+  const operations = [];
+  let commitStarted = false;
 
-    if (await pathExists(sourcePath)) {
-      await mkdir(dirname(destinationPath), { recursive: true });
-      await copyFile(sourcePath, destinationPath);
-      continue;
+  try {
+    for (const changedFileInput of changedFiles) {
+      const changedFile = normalizeRelativeFilePath(changedFileInput, "changedFiles");
+      const sourcePath = resolve(normalizedWorkspaceRoot, changedFile);
+      assertWithinRoot(normalizedWorkspaceRoot, sourcePath, "workspace changed file");
+
+      const destinationPath = resolve(normalizedRepositoryRoot, changedFile);
+      assertWithinRoot(normalizedRepositoryRoot, destinationPath, "repository changed file");
+
+      const sourceStats = await getPathStats(sourcePath);
+      if (sourceStats && !sourceStats.isFile()) {
+        throw new Error(`changed file source must be a regular file: ${changedFile}`);
+      }
+
+      const destinationStats = await getPathStats(destinationPath);
+      if (destinationStats?.isDirectory()) {
+        throw new Error(`cannot atomically replace directory destination: ${changedFile}`);
+      }
+
+      const stagedPath = resolve(stagedRoot, changedFile);
+      assertWithinRoot(stagedRoot, stagedPath, "staged changed file");
+
+      const backupPath = resolve(backupRoot, changedFile);
+      assertWithinRoot(backupRoot, backupPath, "backup changed file");
+
+      if (sourceStats) {
+        await mkdir(dirname(stagedPath), { recursive: true });
+        await copyFile(sourcePath, stagedPath);
+      }
+
+      operations.push({
+        changedFile,
+        destinationPath,
+        stagedPath,
+        backupPath,
+        sourceExists: Boolean(sourceStats),
+        destinationExisted: Boolean(destinationStats),
+        destinationApplied: false,
+        backupCreated: false
+      });
     }
 
-    await rm(destinationPath, { force: true });
+    commitStarted = true;
+    for (const operation of operations) {
+      if (operation.destinationExisted) {
+        await mkdir(dirname(operation.backupPath), { recursive: true });
+        await moveFileFn(operation.destinationPath, operation.backupPath);
+        operation.backupCreated = true;
+      }
+
+      if (operation.sourceExists) {
+        await mkdir(dirname(operation.destinationPath), { recursive: true });
+        await moveFileFn(operation.stagedPath, operation.destinationPath);
+        operation.destinationApplied = true;
+      }
+    }
+  } catch (error) {
+    if (commitStarted) {
+      let rollbackError = null;
+      for (const operation of [...operations].reverse()) {
+        try {
+          if (operation.destinationApplied) {
+            await rm(operation.destinationPath, { force: true });
+            operation.destinationApplied = false;
+          }
+
+          if (operation.backupCreated) {
+            await mkdir(dirname(operation.destinationPath), { recursive: true });
+            await moveFileFn(operation.backupPath, operation.destinationPath);
+            operation.backupCreated = false;
+          }
+        } catch (rollbackFailure) {
+          rollbackError = rollbackError ?? rollbackFailure;
+        }
+      }
+
+      if (rollbackError) {
+        throw new Error(
+          `failed to apply changed files atomically and rollback failed: ${errorMessage(error)}; rollback_error: ${errorMessage(rollbackError)}`
+        );
+      }
+
+      throw new Error(`failed to apply changed files atomically: ${errorMessage(error)}`);
+    }
+
+    throw new Error(`failed to prepare changed files for atomic apply: ${errorMessage(error)}`);
+  } finally {
+    await rm(applyRoot, { recursive: true, force: true });
   }
 }
 
@@ -687,12 +776,14 @@ export function createProcessWorkerBackend({
   launcher = createProcessPiCliLauncher(),
   repositoryRoot = process.cwd(),
   keepWorkspace = false,
-  tempPrefix = DEFAULT_TEMP_PREFIX
+  tempPrefix = DEFAULT_TEMP_PREFIX,
+  moveFileFn = rename
 } = {}) {
   assert(typeof launcher === "function", "launcher(request) is required");
   assert(typeof repositoryRoot === "string" && repositoryRoot.length > 0, "repositoryRoot must be a non-empty string");
   assert(typeof keepWorkspace === "boolean", "keepWorkspace must be a boolean");
   assert(typeof tempPrefix === "string" && tempPrefix.length > 0, "tempPrefix must be a non-empty string");
+  assert(typeof moveFileFn === "function", "moveFileFn(sourcePath, destinationPath) must be a function");
 
   const normalizedRepositoryRoot = resolve(repositoryRoot);
   const calls = [];
@@ -769,9 +860,16 @@ export function createProcessWorkerBackend({
           const destinationPath = resolve(workspaceRoot, seedFile);
           assertWithinRoot(workspaceRoot, destinationPath, "seed destination file");
 
-          if (await pathExists(sourcePath)) {
+          const sourceStats = await getPathStats(sourcePath);
+          if (sourceStats) {
             await mkdir(dirname(destinationPath), { recursive: true });
-            await copyFile(sourcePath, destinationPath);
+
+            if (sourceStats.isDirectory()) {
+              await cp(sourcePath, destinationPath, { recursive: true });
+            } else {
+              await copyFile(sourcePath, destinationPath);
+            }
+
             copiedSeedFiles.push(seedFile);
             continue;
           }
@@ -919,6 +1017,20 @@ export function createProcessWorkerBackend({
           });
         }
 
+        if (READ_ONLY_ROLES.has(packet.role) && !structuredReadOnlyOutput) {
+          return createFailedResult(`${packet.role} process worker failed: invalid structured read-only output`, {
+            changedFiles,
+            commandsRun,
+            evidence: unique([
+              ...evidence,
+              "read_only_structured_output_valid: false"
+            ]),
+            openQuestions: [
+              `Return valid JSON for ${packet.role} with status, summary, evidence, and openQuestions.`
+            ]
+          });
+        }
+
         const successSummary = READ_ONLY_ROLES.has(packet.role)
           ? `${packet.role} process worker succeeded: non-interactive bounded read-only execution completed in isolated workspace`
           : "implementer process worker succeeded: non-interactive bounded worker launch completed in isolated workspace";
@@ -927,7 +1039,8 @@ export function createProcessWorkerBackend({
           await applyChangedFilesToRepository({
             repositoryRoot: normalizedRepositoryRoot,
             workspaceRoot,
-            changedFiles
+            changedFiles,
+            moveFileFn
           });
         }
 

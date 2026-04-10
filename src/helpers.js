@@ -1,1 +1,3 @@
-process backend updated this file
+export function identity(value) {
+  return value;
+}

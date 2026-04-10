@@ -94,6 +94,45 @@ test("program runner stops on the first blocked contract", async () => {
   assert.deepEqual(journal.completedContractIds, ["bootstrap-package"]);
 });
 
+test("runExecutionProgram converts thrown contract executor errors into a blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          throw new Error("executor crashed during contract execution");
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /execution threw/i);
+    assert.match(journal.stopReason, /executor crashed during contract execution/i);
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /contract executor threw/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
 test("program runner reports pending contracts after a stop", async () => {
   const program = buildProgram();
 
@@ -114,6 +153,67 @@ test("program runner reports pending contracts after a stop", async () => {
     "harden-regressions-and-audit",
     "package-readiness"
   ]);
+});
+
+test("resumeExecutionProgram converts thrown contract executor errors into a blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContract = program.contracts[0];
+    const failingContractId = program.contracts[1].id;
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        contractRuns: [
+          {
+            contractId: firstContract.id,
+            status: "success",
+            summary: `Executed ${firstContract.id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [firstContract.id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const resumedJournal = await resumeExecutionProgram(program.id, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          throw new Error("executor crashed while resuming");
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(resumedJournal.status, "blocked");
+    assert.match(resumedJournal.stopReason, /execution threw/i);
+    assert.match(resumedJournal.stopReason, /executor crashed while resuming/i);
+    assert.equal(resumedJournal.contractRuns.length, 2);
+    assert.equal(resumedJournal.contractRuns[0].contractId, firstContract.id);
+    assert.equal(resumedJournal.contractRuns[1].contractId, failingContractId);
+    assert.equal(resumedJournal.contractRuns[1].status, "blocked");
+    assert.match(resumedJournal.contractRuns[1].summary, /contract executor threw/i);
+    assert.deepEqual(resumedJournal.completedContractIds, [firstContract.id]);
+    assert.deepEqual(resumedJournal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, resumedJournal.stopReason);
+  });
 });
 
 test("program runner blocks execution when a dependency id is missing", async () => {
