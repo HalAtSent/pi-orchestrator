@@ -392,6 +392,18 @@ function getReadOnlyAllowedStatusInstruction(role) {
       : 'Allowed statuses: "success", "blocked".';
 }
 
+function getReadOnlyWorkerObjective(packet) {
+  if (packet.role === "explorer") {
+    return "Inspect the allowed scope, describe the relevant context, and tell the implementer what should be created or changed.";
+  }
+
+  if (packet.role === "reviewer") {
+    return "Review the scoped implementation independently against the original task and acceptance checks.";
+  }
+
+  return "Verify the scoped implementation against the original task and acceptance checks.";
+}
+
 function buildCodexPrompt(packet) {
   if (READ_ONLY_ROLES.has(packet.role)) {
     const roleLabel = packet.role === "explorer"
@@ -402,7 +414,8 @@ function buildCodexPrompt(packet) {
     const roleSpecificRules = packet.role === "explorer"
       ? [
         "- Inspect the allowed scope and identify the relevant code paths.",
-        "- Return a structured summary of what matters for implementation."
+        "- Return a structured summary of what matters for implementation.",
+        "- If an allowed target file does not exist yet, report that fact and describe what the implementer should create; do not block solely because the file is absent."
       ]
       : packet.role === "reviewer"
         ? [
@@ -418,7 +431,8 @@ function buildCodexPrompt(packet) {
       `You are the ${roleLabel} worker for a bounded coding task.`,
       `Work only in the current working directory and stop after ${roleLabel === "explorer" ? "inspection" : "verification"}.`,
       "",
-      `Goal: ${packet.goal}`,
+      `YOUR_READ_ONLY_OBJECTIVE: ${getReadOnlyWorkerObjective(packet)}`,
+      `ORIGINAL_IMPLEMENTER_TASK: ${packet.goal}`,
       "",
       "Hard rules:",
       "- Do not modify any files.",
@@ -499,7 +513,8 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout) {
     "Your previous response was invalid because it was not valid structured JSON.",
     "Retry now and return exactly one JSON object only.",
     "",
-    `Goal: ${packet.goal}`,
+    `YOUR_READ_ONLY_OBJECTIVE: ${getReadOnlyWorkerObjective(packet)}`,
+    `ORIGINAL_IMPLEMENTER_TASK: ${packet.goal}`,
     "",
     "Hard rules:",
     "- Do not modify any files.",

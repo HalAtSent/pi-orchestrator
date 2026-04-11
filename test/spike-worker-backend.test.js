@@ -567,6 +567,62 @@ test("process backend does not retry implementer runs for structured output pars
   );
 });
 
+test("explorer launcher prompt treats a missing target file as inspectable context", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-explorer-prompt-"));
+  let capturedPrompt = null;
+
+  try {
+    const launcher = createPiCliLauncher({
+      argsBuilder: async ({ prompt }) => {
+        capturedPrompt = prompt;
+        return ["-p", "--no-session", "--thinking", "off", prompt];
+      },
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: [],
+        launcher: "test_launcher",
+        launcherPath: process.execPath,
+        piScriptPath: __filename,
+        piPackageRoot: dirname(__filename),
+        resolutionMessage: "test resolution"
+      }),
+      runCommandFn: async () => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "{\"status\":\"success\",\"summary\":\"inspected\",\"evidence\":[],\"openQuestions\":[]}",
+        stderr: ""
+      })
+    });
+
+    await launcher({
+      packet: createPacket("explorer", {
+        risk: "high",
+        goal: "Inspect the scoped codebase context for this task and report what the implementer should change: Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop.",
+        allowedFiles: ["docs/specs/model-evidence-smoke.md"]
+      }),
+      context: {},
+      workspaceRoot
+    });
+
+    assert.equal(typeof capturedPrompt, "string");
+    assert.match(
+      capturedPrompt,
+      /YOUR_READ_ONLY_OBJECTIVE: Inspect the allowed scope, describe the relevant context, and tell the implementer what should be created or changed\./i
+    );
+    assert.match(
+      capturedPrompt,
+      /ORIGINAL_IMPLEMENTER_TASK: Inspect the scoped codebase context for this task and report what the implementer should change: Create docs\/specs\/model-evidence-smoke\.md containing exactly MODEL EVIDENCE SMOKE OK and stop\./i
+    );
+    assert.match(
+      capturedPrompt,
+      /If an allowed target file does not exist yet, report that fact and describe what the implementer should create/i
+    );
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("pi launcher command evidence uses resolved pi script path in non-interactive mode", async () => {
   const launcher = createPiCliLauncher({
     modelProbe: async () => ({

@@ -104,6 +104,22 @@ function roleCommands(role) {
   return ["<repo-specific edit and test commands>"];
 }
 
+function roleGoal(goal, role) {
+  if (role === "explorer") {
+    return `Inspect the scoped codebase context for this task and report what the implementer should change: ${goal}`;
+  }
+
+  if (role === "reviewer") {
+    return `Review the scoped implementation independently against the original goal and acceptance checks: ${goal}`;
+  }
+
+  if (role === "verifier") {
+    return `Verify the scoped implementation against the original goal and acceptance checks: ${goal}`;
+  }
+
+  return goal;
+}
+
 export function buildTaskPacket({
   goal,
   role,
@@ -126,7 +142,7 @@ export function buildTaskPacket({
     parentTaskId,
     role,
     risk,
-    goal,
+    goal: roleGoal(goal, role),
     nonGoals: roleNonGoals(role),
     allowedFiles: normalizedAllowedFiles,
     forbiddenFiles: normalizedForbiddenFiles,

@@ -5,7 +5,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { resumeExecutionProgram, runExecutionProgram } from "../src/program-runner.js";
+import {
+  formatProgramRunJournal,
+  resumeExecutionProgram,
+  runExecutionProgram
+} from "../src/program-runner.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
 import { createRunStore } from "../src/run-store.js";
 
@@ -425,6 +429,31 @@ test("resumeExecutionProgram resumes a persisted running journal from the next p
     assert.equal(persisted.lastStatus, "success");
     assert.equal(persisted.runJournal.status, "success");
   });
+});
+
+test("formatProgramRunJournal includes contract evidence", () => {
+  const formatted = formatProgramRunJournal({
+    programId: "program-evidence-smoke",
+    status: "success",
+    stopReason: null,
+    completedContractIds: ["contract-a"],
+    pendingContractIds: [],
+    contractRuns: [
+      {
+        contractId: "contract-a",
+        status: "success",
+        summary: "Executed contract-a.",
+        evidence: [
+          "selected_provider: openai-codex",
+          "selected_model: gpt-5.4"
+        ],
+        openQuestions: []
+      }
+    ]
+  });
+
+  assert.match(formatted, /selected_provider: openai-codex/i);
+  assert.match(formatted, /selected_model: gpt-5\.4/i);
 });
 
 test("program runner blocks resume when persisted state is inconsistent", async () => {

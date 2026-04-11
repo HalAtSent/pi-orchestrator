@@ -685,6 +685,18 @@ export function formatProgramRunJournal(journal) {
   } else {
     for (const entry of journal.contractRuns) {
       lines.push(`- ${entry.contractId} (${entry.status}): ${entry.summary}`);
+      if (entry.evidence.length > 0) {
+        lines.push("  evidence:");
+        for (const evidence of entry.evidence) {
+          lines.push(`  - ${evidence}`);
+        }
+      }
+      if (entry.openQuestions.length > 0) {
+        lines.push("  open_questions:");
+        for (const openQuestion of entry.openQuestions) {
+          lines.push(`  - ${openQuestion}`);
+        }
+      }
     }
   }
 

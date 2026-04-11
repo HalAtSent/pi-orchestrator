@@ -1008,6 +1008,8 @@ test("pi extension run-program executes a declared high-risk contract when appro
 test("pi extension auto command runs through an injected Pi-backed runner", async () => {
   const { createPiExtension } = await import("../src/pi-extension.js");
   const requestedRoles = [];
+  const notifications = [];
+  const statuses = [];
   const runner = createPiWorkerRunner({
     adapter: {
       async runWorker(request) {
@@ -1017,7 +1019,17 @@ test("pi extension auto command runs through an injected Pi-backed runner", asyn
           summary: `${request.role} completed`,
           changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
           commandsRun: [...request.commands],
-          evidence: [`role=${request.role}`],
+          evidence: request.role === "implementer"
+            ? [
+              `role=${request.role}`,
+              "selected_provider: openai-codex",
+              "selected_model: gpt-5.3-codex"
+            ]
+            : [
+              `role=${request.role}`,
+              "selected_provider: openai-codex",
+              "selected_model: gpt-5.4-mini"
+            ],
           openQuestions: []
         };
       }
@@ -1042,12 +1054,22 @@ test("pi extension auto command runs through an injected Pi-backed runner", asyn
     maxRepairLoops: 1
   }), {
     ui: {
-      notify() {},
-      setStatus() {}
+      notify(message, tone) {
+        notifications.push({ message, tone });
+      },
+      setStatus(key, value) {
+        statuses.push({ key, value });
+      }
     }
   });
 
   assert.equal(execution.status, "success");
   assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
   assert.equal(execution.runs.length, 2);
+  assert.match(execution.summary, /openai-codex/i);
+  assert.match(execution.summary, /implementer=gpt-5\.3-codex/i);
+  assert.match(notifications[0].message, /openai-codex/i);
+  assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
+  assert.match(statuses[0].value, /openai-codex/i);
+  assert.match(statuses[0].value, /implementer=gpt-5\.3-codex/i);
 });

@@ -102,6 +102,43 @@ test("auto workflow runs one repair loop after an independent review finding", a
   assert.equal(runner.getPendingStepCount(), 0);
 });
 
+test("formatWorkflowExecution includes run evidence and commands", () => {
+  const formatted = formatWorkflowExecution({
+    workflow: {
+      workflowId: "workflow-evidence-smoke",
+      risk: "high",
+      humanGate: true
+    },
+    status: "success",
+    stopReason: null,
+    repairCount: 0,
+    maxRepairLoops: 1,
+    runs: [
+      {
+        packet: {
+          role: "implementer"
+        },
+        result: {
+          status: "success",
+          summary: "Applied scoped changes.",
+          changedFiles: ["docs/specs/model-evidence-smoke.md"],
+          commandsRun: ["pi -p --provider openai-codex --model gpt-5.3-codex"],
+          evidence: [
+            "selected_provider: openai-codex",
+            "selected_model: gpt-5.3-codex"
+          ],
+          openQuestions: []
+        }
+      }
+    ]
+  });
+
+  assert.match(formatted, /launch_selection: openai-codex \(implementer=gpt-5\.3-codex\)/i);
+  assert.match(formatted, /commands: pi -p --provider openai-codex --model gpt-5\.3-codex/i);
+  assert.match(formatted, /selected_provider: openai-codex/i);
+  assert.match(formatted, /selected_model: gpt-5\.3-codex/i);
+});
+
 test("auto workflow stops before execution when a human gate is required", async () => {
   const fixture = loadFixture("human-gate.json");
   const runner = createScriptedWorkerRunner(fixture.script);

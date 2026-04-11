@@ -245,6 +245,74 @@ function stopExecution({ workflow, runs, repairCount, maxRepairLoops, status, st
   };
 }
 
+function parseEvidenceValue(evidenceEntries, key) {
+  const prefix = `${key}: `;
+  const entry = evidenceEntries.find((item) => typeof item === "string" && item.startsWith(prefix));
+  return entry ? entry.slice(prefix.length).trim() : null;
+}
+
+export function summarizeWorkflowLaunchSelection(execution) {
+  if (!execution || !Array.isArray(execution.runs)) {
+    return null;
+  }
+
+  const roleSelections = new Map();
+  for (const run of execution.runs) {
+    const evidenceEntries = Array.isArray(run?.result?.evidence) ? run.result.evidence : [];
+    const selectedProvider = parseEvidenceValue(evidenceEntries, "selected_provider");
+    const selectedModel = parseEvidenceValue(evidenceEntries, "selected_model");
+
+    if (selectedProvider || selectedModel) {
+      roleSelections.set(run.packet.role, {
+        provider: selectedProvider,
+        model: selectedModel
+      });
+    }
+  }
+
+  if (roleSelections.size === 0) {
+    return null;
+  }
+
+  const workflowRoles = Array.isArray(execution?.workflow?.roleSequence)
+    ? execution.workflow.roleSequence
+    : [];
+  const orderedRoles = [
+    ...workflowRoles,
+    ...[...roleSelections.keys()].filter((role) => !workflowRoles.includes(role))
+  ];
+  const uniqueProviders = unique(
+    [...roleSelections.values()]
+      .map((selection) => selection.provider)
+      .filter((provider) => typeof provider === "string" && provider.length > 0)
+  );
+
+  const roleSummaries = orderedRoles
+    .filter((role) => roleSelections.has(role))
+    .map((role) => {
+      const selection = roleSelections.get(role);
+      if (uniqueProviders.length === 1 && selection.model) {
+        return `${role}=${selection.model}`;
+      }
+
+      if (selection.provider && selection.model) {
+        return `${role}=${selection.provider}/${selection.model}`;
+      }
+
+      return `${role}=${selection.model ?? selection.provider ?? "unknown"}`;
+    });
+
+  if (roleSummaries.length === 0) {
+    return null;
+  }
+
+  if (uniqueProviders.length === 1) {
+    return `${uniqueProviders[0]} (${roleSummaries.join(", ")})`;
+  }
+
+  return roleSummaries.join(", ");
+}
+
 function createRepairPacket({ workflow, packet, role, repairCount }) {
   return buildTaskPacket({
     goal: `${role === "implementer" ? "Address review findings for" : "Re-review repaired patch for"}: ${workflow.goal}`,
@@ -436,6 +504,7 @@ export async function runAutoWorkflow(input, { runner } = {}) {
 }
 
 export function formatWorkflowExecution(execution) {
+  const launchSelectionSummary = summarizeWorkflowLaunchSelection(execution);
   const lines = [
     `workflow: ${execution.workflow.workflowId}`,
     `status: ${execution.status}`,
@@ -443,6 +512,7 @@ export function formatWorkflowExecution(execution) {
     `human_gate: ${execution.workflow.humanGate ? "required" : "not-required"}`,
     `repair_loops: ${execution.repairCount}/${execution.maxRepairLoops}`,
     `stop_reason: ${execution.stopReason ?? "none"}`,
+    `launch_selection: ${launchSelectionSummary ?? "none"}`,
     "runs:"
   ];
 
@@ -451,6 +521,21 @@ export function formatWorkflowExecution(execution) {
   } else {
     for (const run of execution.runs) {
       lines.push(`- ${run.packet.role} (${run.result.status}): ${run.result.summary}`);
+      if (run.result.commandsRun.length > 0) {
+        lines.push(`  commands: ${run.result.commandsRun.join(" | ")}`);
+      }
+      if (run.result.evidence.length > 0) {
+        lines.push("  evidence:");
+        for (const evidence of run.result.evidence) {
+          lines.push(`  - ${evidence}`);
+        }
+      }
+      if (run.result.openQuestions.length > 0) {
+        lines.push("  open_questions:");
+        for (const openQuestion of run.result.openQuestions) {
+          lines.push(`  - ${openQuestion}`);
+        }
+      }
     }
   }
 

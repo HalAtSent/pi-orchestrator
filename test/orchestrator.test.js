@@ -114,6 +114,26 @@ test("medium and high risk workflows include independent review", () => {
   assert.deepEqual(workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
 });
 
+test("initial workflow uses role-specific packet goals for read-only roles", () => {
+  const workflow = createInitialWorkflow({
+    goal: "Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop.",
+    allowedFiles: ["docs/specs/model-evidence-smoke.md"]
+  });
+
+  const explorerPacket = workflow.packets.find((packet) => packet.role === "explorer");
+  const reviewerPacket = workflow.packets.find((packet) => packet.role === "reviewer");
+  const verifierPacket = workflow.packets.find((packet) => packet.role === "verifier");
+  const implementerPacket = workflow.packets.find((packet) => packet.role === "implementer");
+
+  assert.match(explorerPacket.goal, /^Inspect the scoped codebase context for this task/i);
+  assert.match(reviewerPacket.goal, /^Review the scoped implementation independently/i);
+  assert.match(verifierPacket.goal, /^Verify the scoped implementation against the original goal/i);
+  assert.equal(
+    implementerPacket.goal,
+    "Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop."
+  );
+});
+
 test("worker result validation enforces the output contract", () => {
   const result = validateWorkerResult({
     status: "success",

@@ -1,4 +1,8 @@
-import { formatWorkflowExecution, runAutoWorkflow } from "./auto-workflow.js";
+import {
+  formatWorkflowExecution,
+  runAutoWorkflow,
+  summarizeWorkflowLaunchSelection
+} from "./auto-workflow.js";
 import {
   AUTO_BACKEND_MODES,
   createAutoBackendRunner
@@ -258,6 +262,17 @@ function createBlockedAutoExecution({ goal, maxRepairLoops, stopReason }) {
   };
 }
 
+function appendLaunchSelectionSummary(baseText, execution) {
+  const launchSelectionSummary = summarizeWorkflowLaunchSelection(execution);
+  return launchSelectionSummary
+    ? `${baseText} (${launchSelectionSummary})`
+    : baseText;
+}
+
+function summarizeAutoCommandResult(execution) {
+  return appendLaunchSelectionSummary(execution.workflow.workflowId, execution);
+}
+
 function parseRunProgramArgs(args) {
   const parsed = parseJsonArgs(args);
   const approvedHighRisk = parseBooleanFlag(parsed.approvedHighRisk, {
@@ -482,6 +497,7 @@ export function createPiExtension({
           ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
           return {
             ...execution,
+            summary: summarizeAutoCommandResult(execution),
             text: formatWorkflowExecution(execution),
             details: execution
           };
@@ -492,14 +508,18 @@ export function createPiExtension({
         });
 
         const notification = execution.status === "success"
-          ? "auto workflow success"
+          ? appendLaunchSelectionSummary("auto workflow success", execution)
           : `auto workflow ${execution.status}: ${execution.stopReason ?? "no stop reason reported"}`;
 
         ctx.ui.notify(notification, execution.status === "success" ? "info" : "warning");
-        ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
+        ctx.ui.setStatus(
+          "workflow",
+          appendLaunchSelectionSummary(`${execution.status}: ${execution.workflow.workflowId}`, execution)
+        );
 
         return {
           ...execution,
+          summary: summarizeAutoCommandResult(execution),
           text: formatWorkflowExecution(execution),
           details: execution
         };
