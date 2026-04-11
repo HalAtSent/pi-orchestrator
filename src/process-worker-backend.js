@@ -681,6 +681,22 @@ function normalizeProcessRoleProfiles(roleProfilesInput) {
   return Object.freeze(normalized);
 }
 
+function resolveProcessModelProbeCandidates({ roleProfiles, fallbackModel }) {
+  const preferredModels = Object.values(roleProfiles)
+    .map((profile) => profile?.preferredModel)
+    .filter((model) => typeof model === "string" && model.trim().length > 0)
+    .map((model) => model.trim());
+  const normalizedFallbackModel = typeof fallbackModel === "string" && fallbackModel.trim().length > 0
+    ? fallbackModel.trim()
+    : PROCESS_MODEL_FALLBACK;
+
+  return unique([
+    ...PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES,
+    ...preferredModels,
+    normalizedFallbackModel
+  ]);
+}
+
 function normalizeLauncherArgsBuilderOutput(value) {
   if (value && typeof value === "object" && !Array.isArray(value) && "args" in value) {
     const argsValue = value.args;
@@ -832,8 +848,12 @@ export function createProcessRoleArgsBuilder({
   const normalizedFallbackModel = typeof fallbackModel === "string" && fallbackModel.trim().length > 0
     ? fallbackModel.trim()
     : PROCESS_MODEL_FALLBACK;
+  const probeCandidateModels = resolveProcessModelProbeCandidates({
+    roleProfiles: normalizedRoleProfiles,
+    fallbackModel: normalizedFallbackModel
+  });
 
-  return async function buildProcessRoleArgs({ packet, prompt, launchSelectionOverride }) {
+  return async function buildProcessRoleArgs({ packet, prompt, workspaceRoot, launchSelectionOverride }) {
     const roleProfile = normalizedRoleProfiles[packet.role];
     assert(roleProfile, `process backend blocked: role profile missing for ${packet.role}`);
 
@@ -857,7 +877,8 @@ export function createProcessRoleArgsBuilder({
 
     const probeResult = await modelProbe({
       providerId: roleProfile.provider,
-      candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+      candidateModels: probeCandidateModels,
+      workspaceRoot
     });
 
     if (probeResult?.blockedReason) {

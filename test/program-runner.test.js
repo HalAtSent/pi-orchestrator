@@ -7,6 +7,7 @@ import { join } from "node:path";
 
 import {
   formatProgramRunJournal,
+  getRunJournalResumePolicy,
   resumeExecutionProgram,
   runExecutionProgram
 } from "../src/program-runner.js";
@@ -76,6 +77,8 @@ test("program runner executes contracts in dependency order", async () => {
   });
 
   assert.equal(journal.status, "success");
+  assert.equal(journal.stopReasonCode, null);
+  assert.equal(journal.validationOutcome, "pass");
   assert.deepEqual(executed, [
     "bootstrap-package",
     "freeze-lifecycle-contracts",
@@ -142,12 +145,146 @@ test("runExecutionProgram converts thrown contract executor errors into a blocke
     });
 
     assert.equal(journal.status, "blocked");
+    assert.equal(journal.stopReasonCode, "execution_error");
+    assert.equal(journal.validationOutcome, "blocked");
     assert.match(journal.stopReason, /execution threw/i);
     assert.match(journal.stopReason, /executor crashed during contract execution/i);
     assert.equal(journal.contractRuns.length, 2);
     assert.equal(journal.contractRuns[1].contractId, failingContractId);
     assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.equal(journal.contractRuns[1].validationOutcome, "blocked");
     assert.match(journal.contractRuns[1].summary, /contract executor threw/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram converts invalid contract status returns into a blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "not-a-status",
+            summary: "Malformed executor status.",
+            evidence: [],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(journal.stopReason, /contractExecutionResult\.status must be one of/i);
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram converts malformed evidence/openQuestions returns into a blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed arrays.",
+            evidence: "not-an-array",
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(journal.stopReason, /contractExecutionResult\.evidence must be an array/i);
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram converts missing summary returns into a blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            evidence: [],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(journal.stopReason, /contractExecutionResult\.summary must be a non-empty string/i);
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
     assert.deepEqual(journal.completedContractIds, [firstContractId]);
     assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
 
@@ -373,6 +510,7 @@ test("program runner blocks execution when dependencies contain a cycle", async 
   });
 
   assert.equal(journal.status, "blocked");
+  assert.equal(journal.stopReasonCode, "dependency_cycle");
   assert.match(journal.stopReason, /cycle/i);
   assert.equal(journal.contractRuns.length, 0);
   assert.equal(calls.length, 0);
@@ -436,6 +574,7 @@ test("formatProgramRunJournal includes contract evidence", () => {
     programId: "program-evidence-smoke",
     status: "success",
     stopReason: null,
+    validationOutcome: "pass",
     completedContractIds: ["contract-a"],
     pendingContractIds: [],
     contractRuns: [
@@ -443,6 +582,7 @@ test("formatProgramRunJournal includes contract evidence", () => {
         contractId: "contract-a",
         status: "success",
         summary: "Executed contract-a.",
+        validationOutcome: "pass",
         evidence: [
           "selected_provider: openai-codex",
           "selected_model: gpt-5.4"
@@ -454,6 +594,17 @@ test("formatProgramRunJournal includes contract evidence", () => {
 
   assert.match(formatted, /selected_provider: openai-codex/i);
   assert.match(formatted, /selected_model: gpt-5\.4/i);
+  assert.match(formatted, /validation_outcome: pass/i);
+});
+
+test("program runner exports shared resume-policy mapping for operator surfaces", () => {
+  assert.equal(getRunJournalResumePolicy("running"), "resume");
+  assert.equal(getRunJournalResumePolicy("success"), "return_existing");
+  assert.equal(getRunJournalResumePolicy("blocked"), "reject_terminal");
+  assert.equal(getRunJournalResumePolicy("failed"), "reject_terminal");
+  assert.equal(getRunJournalResumePolicy("repair_required"), "reject_terminal");
+  assert.equal(getRunJournalResumePolicy("unknown-status"), null);
+  assert.equal(getRunJournalResumePolicy(null), null);
 });
 
 test("program runner blocks resume when persisted state is inconsistent", async () => {

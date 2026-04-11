@@ -30,6 +30,29 @@ function normalizeStringArray(values = []) {
   return values.map((value) => String(value));
 }
 
+function normalizeStrictStringArray(values, fieldName) {
+  if (!Array.isArray(values)) {
+    return {
+      ok: false,
+      reason: `${fieldName} must be an array`
+    };
+  }
+
+  for (const [index, value] of values.entries()) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      return {
+        ok: false,
+        reason: `${fieldName}[${index}] must be a non-empty string`
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    value: [...values]
+  };
+}
+
 function normalizeFileList(files = []) {
   return unique(normalizeStringArray(files).map((path) => normalizePath(path)));
 }
@@ -146,14 +169,35 @@ function normalizeRuntimeWorkerResult(response, request, invocationLabel) {
     `Pi runtime returned ${status} for ${request.role}.`
   );
 
-  return createWorkerResult({
-    status,
-    summary,
-    changedFiles: normalizeFileList(candidate.changedFiles ?? []),
-    commandsRun: normalizeStringArray(candidate.commandsRun ?? []),
-    evidence: normalizeStringArray(candidate.evidence ?? []),
-    openQuestions: normalizeStringArray(candidate.openQuestions ?? [])
-  });
+  const normalizedStringArrayFields = {};
+  for (const fieldName of ["commandsRun", "evidence", "openQuestions"]) {
+    const candidateValue = Object.prototype.hasOwnProperty.call(candidate, fieldName)
+      ? candidate[fieldName]
+      : [];
+    const normalizedField = normalizeStrictStringArray(candidateValue, `result.${fieldName}`);
+    if (!normalizedField.ok) {
+      return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned malformed ${fieldName}.`, {
+        evidence: [normalizedField.reason]
+      });
+    }
+
+    normalizedStringArrayFields[fieldName] = normalizedField.value;
+  }
+
+  try {
+    return createWorkerResult({
+      status,
+      summary,
+      changedFiles: normalizeFileList(candidate.changedFiles ?? []),
+      commandsRun: normalizedStringArrayFields.commandsRun,
+      evidence: normalizedStringArrayFields.evidence,
+      openQuestions: normalizedStringArrayFields.openQuestions
+    });
+  } catch (error) {
+    return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned invalid worker result payload.`, {
+      evidence: [error.message]
+    });
+  }
 }
 
 function validateRequestSafety(request, supportedRoles) {

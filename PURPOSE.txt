@@ -1,3 +1,4 @@
-This package is a temporary greenfield workspace for a personal Pi
-orchestration workflow. It is not part of the Sentimetrics product or
-runtime.
+This package is a personal Pi-based autonomous coding harness for
+day-to-day software work. It keeps orchestration, policy, risk control,
+and evidence in code while using bounded workers for scoped task
+execution. It is not part of the Sentimetrics product or runtime.

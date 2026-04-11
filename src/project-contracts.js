@@ -1,4 +1,5 @@
 import { RISK_LEVELS, ROLE_TYPES, validateTaskPacket } from "./contracts.js";
+import { normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
 
 export const AUDIT_STATUSES = Object.freeze(["pass", "attention_required"]);
 export const FINDING_SEVERITIES = Object.freeze(["low", "medium", "high"]);
@@ -29,8 +30,11 @@ function assertString(name, value) {
 
 function assertStringArray(name, value) {
   assert(Array.isArray(value), `${name} must be an array`);
-  for (const item of value) {
-    assert(typeof item === "string", `${name} must only contain strings`);
+  for (const [index, item] of value.entries()) {
+    assert(
+      typeof item === "string" && item.trim().length > 0,
+      `${name}[${index}] must be a non-empty string`
+    );
   }
 }
 
@@ -231,6 +235,13 @@ export function validateRunJournalEntry(entry) {
   assertString("runJournalEntry.summary", entry.summary);
   assertStringArray("runJournalEntry.evidence", entry.evidence);
   assertStringArray("runJournalEntry.openQuestions", entry.openQuestions);
+  try {
+    entry.validationOutcome = normalizeValidationOutcome(entry.validationOutcome, {
+      status: entry.status
+    });
+  } catch (error) {
+    throw new Error(`runJournalEntry.validationOutcome ${error.message}`);
+  }
   return entry;
 }
 
@@ -243,6 +254,21 @@ export function validateRunJournal(journal) {
   );
   if (journal.stopReason !== null && journal.stopReason !== undefined) {
     assertString("runJournal.stopReason", journal.stopReason);
+  }
+  try {
+    journal.stopReasonCode = normalizeStopReasonCode(journal.stopReasonCode, {
+      status: journal.status,
+      stopReason: journal.stopReason
+    });
+  } catch (error) {
+    throw new Error(`runJournal.stopReasonCode ${error.message}`);
+  }
+  try {
+    journal.validationOutcome = normalizeValidationOutcome(journal.validationOutcome, {
+      status: journal.status
+    });
+  } catch (error) {
+    throw new Error(`runJournal.validationOutcome ${error.message}`);
   }
   assertArrayOfObjects("runJournal.contractRuns", journal.contractRuns);
   for (const entry of journal.contractRuns) {

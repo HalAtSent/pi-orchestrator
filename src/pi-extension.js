@@ -26,9 +26,24 @@ import {
   runExecutionProgram
 } from "./program-runner.js";
 import {
+  normalizeActionClasses,
+  normalizePolicyProfile,
+  normalizeValidationArtifacts
+} from "./run-evidence.js";
+import {
   brainstormProject,
   buildProjectLifecycleArtifacts
 } from "./project-workflows.js";
+import {
+  formatOperatorApprovalCheckpoint,
+  formatOperatorBuildSessionLookupBlocked,
+  formatOperatorBuildSessionStatus,
+  formatOperatorBlockedMessage,
+  formatOperatorIntakeSummary,
+  formatOperatorStagedPlan
+} from "./operator-formatters.js";
+import { createBuildSessionStore } from "./build-session-store.js";
+import { createOperatorIntake } from "./operator-intake.js";
 import { createRunStore } from "./run-store.js";
 import { Type } from "./schema.js";
 
@@ -335,6 +350,109 @@ function parseResumeProgramArgs(args) {
   throw new Error("Provide a program id string or {\"programId\": \"...\"}.");
 }
 
+function parseBuildSessionIdArgs(args, { commandName } = {}) {
+  const commandLabel = commandName ?? "build command";
+
+  if (typeof args === "string") {
+    const raw = args.trim();
+    if (raw.length === 0) {
+      throw new Error(`Provide a build id string or a JSON object with buildId for /${commandLabel}.`);
+    }
+
+    if (raw.startsWith("{")) {
+      return parseBuildSessionIdArgs(JSON.parse(raw), { commandName: commandLabel });
+    }
+
+    return {
+      buildId: raw
+    };
+  }
+
+  if (Array.isArray(args)) {
+    return parseBuildSessionIdArgs(args.join(" "), { commandName: commandLabel });
+  }
+
+  if (args && typeof args === "object" && !Array.isArray(args)) {
+    if (typeof args.buildId === "string" && args.buildId.trim().length > 0) {
+      return {
+        buildId: args.buildId.trim()
+      };
+    }
+  }
+
+  throw new Error(`Provide a build id string or {"buildId":"..."} for /${commandLabel}.`);
+}
+
+function summarizeBuildSessionExecutionFromRunJournal(runJournal) {
+  const stopReasonCode = runJournal.stopReasonCode ?? null;
+  const validationOutcome = runJournal.validationOutcome;
+
+  return {
+    status: runJournal.status,
+    stopReason: runJournal.stopReason ?? null,
+    stopReasonCode,
+    validationOutcome,
+    actionClasses: normalizeActionClasses(runJournal.actionClasses, {
+      contractRuns: runJournal.contractRuns,
+      stopReasonCode
+    }),
+    policyProfile: normalizePolicyProfile(runJournal.policyProfile),
+    validationArtifacts: normalizeValidationArtifacts(runJournal.validationArtifacts, {
+      validationOutcome
+    }),
+    programId: runJournal.programId,
+    completedContracts: runJournal.completedContractIds.length,
+    pendingContracts: runJournal.pendingContractIds.length,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+function applyRunJournalToBuildSession(buildSession, runJournal) {
+  return {
+    ...buildSession,
+    execution: summarizeBuildSessionExecutionFromRunJournal(runJournal)
+  };
+}
+
+function stringArraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function validationArtifactsEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function buildSessionExecutionMatchesRunJournal(buildSession, runJournal) {
+  const expectedExecution = summarizeBuildSessionExecutionFromRunJournal(runJournal);
+
+  return buildSession.execution.status === expectedExecution.status &&
+    (buildSession.execution.stopReason ?? null) === expectedExecution.stopReason &&
+    (buildSession.execution.stopReasonCode ?? null) === expectedExecution.stopReasonCode &&
+    buildSession.execution.validationOutcome === expectedExecution.validationOutcome &&
+    (buildSession.execution.programId ?? null) === expectedExecution.programId &&
+    buildSession.execution.completedContracts === expectedExecution.completedContracts &&
+    buildSession.execution.pendingContracts === expectedExecution.pendingContracts &&
+    stringArraysEqual(
+      Array.isArray(buildSession.execution.actionClasses) ? buildSession.execution.actionClasses : [],
+      expectedExecution.actionClasses
+    ) &&
+    (buildSession.execution.policyProfile ?? null) === expectedExecution.policyProfile &&
+    validationArtifactsEqual(
+      Array.isArray(buildSession.execution.validationArtifacts) ? buildSession.execution.validationArtifacts : [],
+      expectedExecution.validationArtifacts
+    );
+}
+
 function buildLifecycleFromParams(params) {
   return buildProjectLifecycleArtifacts(params, {
     selectedAlternativeId: params.selectedAlternativeId
@@ -361,6 +479,7 @@ export function createPiExtension({
   workerRunner = null,
   contractExecutor,
   runStore = null,
+  buildSessionStore = null,
   workerAdapter,
   processWorkerBackend = null,
   autoBackendMode = AUTO_BACKEND_MODES.PI_RUNTIME,
@@ -382,6 +501,7 @@ export function createPiExtension({
       processBackend: processWorkerBackend,
       mode: autoBackendMode
     });
+    const resolvedBuildSessionStore = buildSessionStore ?? createBuildSessionStore();
     const configuredContractExecutor = contractExecutor
       ? resolveContractExecutorInvoker(contractExecutor)
       : null;
@@ -404,11 +524,548 @@ export function createPiExtension({
       });
     };
 
+    const syncBuildSessionWithRunStore = async (buildSession) => {
+      if (!runStore || typeof runStore.loadRun !== "function") {
+        return {
+          buildSession,
+          runJournal: null
+        };
+      }
+
+      if (typeof buildSession.execution.programId !== "string" || buildSession.execution.programId.trim().length === 0) {
+        return {
+          buildSession,
+          runJournal: null
+        };
+      }
+
+      const persistedRun = await runStore.loadRun(buildSession.execution.programId);
+      if (!persistedRun || !persistedRun.runJournal) {
+        return {
+          buildSession,
+          runJournal: null
+        };
+      }
+
+      const runJournal = persistedRun.runJournal;
+      if (buildSessionExecutionMatchesRunJournal(buildSession, runJournal)) {
+        return {
+          buildSession,
+          runJournal
+        };
+      }
+
+      const syncedBuildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+        if (!existingSession) {
+          throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+        }
+
+        return applyRunJournalToBuildSession(existingSession, runJournal);
+      });
+
+      return {
+        buildSession: syncedBuildSession,
+        runJournal
+      };
+    };
+
     pi.registerCommand("workflow-status", {
       description: "Show whether the orchestration package is loaded.",
       handler: async (_args, ctx) => {
         ctx.ui.notify("pi-orchestrator-workflow loaded", "info");
         ctx.ui.setStatus("workflow", "orchestrator package ready");
+      }
+    });
+
+    pi.registerCommand("build", {
+      description: "Operator-first project intake and staged lifecycle planning from plain-English input.",
+      handler: async (args, ctx) => {
+        let buildSession = null;
+
+        try {
+          const intake = createOperatorIntake(args);
+          const lifecycle = buildLifecycleFromParams(intake.planningInput);
+          buildSession = await resolvedBuildSessionStore.createBuildSession({
+            intake,
+            lifecycle: {
+              proposalSet: lifecycle.proposalSet,
+              blueprint: lifecycle.blueprint,
+              executionProgram: lifecycle.executionProgram,
+              auditReport: lifecycle.auditReport
+            },
+            approvalRequested: intake.approvalRequested
+          });
+
+          const intakeSummary = formatOperatorIntakeSummary(intake);
+          const stagedPlan = formatOperatorStagedPlan(lifecycle);
+
+          if (!intake.approvalRequested) {
+            const approvalCheckpoint = formatOperatorApprovalCheckpoint({
+              intake,
+              lifecycle,
+              approvalRequested: false,
+              approvalCommand: `/build-approve ${buildSession.buildId}`
+            });
+            const sessionStatus = formatOperatorBuildSessionStatus(buildSession);
+            const text = [sessionStatus, intakeSummary, stagedPlan, approvalCheckpoint].join("\n\n");
+            const recommendedNextAction = `/build-approve ${buildSession.buildId}`;
+
+            ctx.ui.notify(`build session ${buildSession.buildId} ready: awaiting approval`, "info");
+            ctx.ui.setStatus("workflow", `build awaiting approval: ${buildSession.buildId}`);
+
+            return {
+              status: "awaiting_approval",
+              summary: "Operator intake and staged plan are ready for approval.",
+              buildId: buildSession.buildId,
+              recommendedNextAction,
+              intake,
+              lifecycle: {
+                proposalSet: lifecycle.proposalSet,
+                blueprint: lifecycle.blueprint,
+                executionProgram: lifecycle.executionProgram,
+                auditReport: lifecycle.auditReport
+              },
+              buildSession,
+              text,
+              details: {
+                buildId: buildSession.buildId,
+                intake,
+                lifecycle,
+                buildSession
+              }
+            };
+          }
+
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+            }
+
+            return {
+              ...existingSession,
+              approval: {
+                ...existingSession.approval,
+                approved: true,
+                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString()
+              },
+              execution: {
+                ...existingSession.execution,
+                status: "running",
+                stopReason: null,
+                programId: lifecycle.executionProgram.id,
+                completedContracts: 0,
+                pendingContracts: lifecycle.executionProgram.contracts.length,
+                updatedAt: new Date().toISOString()
+              }
+            };
+          });
+
+          const runJournal = await runExecutionProgram(lifecycle.executionProgram, {
+            contractExecutor: createExecutionProgramExecutor(),
+            runStore
+          });
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+            }
+
+            return applyRunJournalToBuildSession(existingSession, runJournal);
+          });
+
+          const approvalCheckpoint = formatOperatorApprovalCheckpoint({
+            intake,
+            lifecycle,
+            approvalRequested: true,
+            runJournal
+          });
+          const sessionStatus = formatOperatorBuildSessionStatus(buildSession);
+          const text = [sessionStatus, intakeSummary, stagedPlan, approvalCheckpoint].join("\n\n");
+          const recommendedNextAction = `/build-status ${buildSession.buildId}`;
+
+          ctx.ui.notify(
+            `build session ${buildSession.buildId} execution ${runJournal.status}`,
+            runJournal.status === "success" ? "info" : "warning"
+          );
+          ctx.ui.setStatus("workflow", `build ${runJournal.status}: ${buildSession.buildId}`);
+
+          return {
+            status: runJournal.status,
+            summary: `Build session ${buildSession.buildId} routed through run-program with status ${runJournal.status}.`,
+            buildId: buildSession.buildId,
+            recommendedNextAction,
+            intake,
+            lifecycle: {
+              proposalSet: lifecycle.proposalSet,
+              blueprint: lifecycle.blueprint,
+              executionProgram: lifecycle.executionProgram,
+              auditReport: lifecycle.auditReport
+            },
+            runJournal,
+            buildSession,
+            text,
+            details: {
+              buildId: buildSession.buildId,
+              intake,
+              lifecycle,
+              runJournal,
+              buildSession
+            }
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (buildSession && buildSession.approval.approved) {
+            try {
+              buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+                if (!existingSession) {
+                  throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+                }
+
+                return {
+                  ...existingSession,
+                  execution: {
+                    ...existingSession.execution,
+                    status: "blocked",
+                    stopReason: message,
+                    programId: existingSession.execution.programId ?? existingSession.lifecycle.executionProgram.id,
+                    updatedAt: new Date().toISOString()
+                  }
+                };
+              });
+            } catch {
+              // The command still returns a blocked response even if session persistence fails here.
+            }
+          }
+
+          ctx.ui.notify(`build blocked: ${message}`, "warning");
+          ctx.ui.setStatus("workflow", "build blocked");
+
+          const blockedText = buildSession
+            ? [formatOperatorBuildSessionStatus(buildSession), formatOperatorBlockedMessage({ message })].join("\n\n")
+            : formatOperatorBlockedMessage({ message });
+
+          return {
+            status: "blocked",
+            stopReason: message,
+            summary: "Build flow blocked before execution.",
+            buildId: buildSession?.buildId ?? null,
+            text: blockedText,
+            details: {
+              buildId: buildSession?.buildId ?? null,
+              stopReason: message
+            }
+          };
+        }
+      }
+    });
+
+    pi.registerCommand("build-approve", {
+      description: "Approve and execute an existing build session by build id.",
+      handler: async (args, ctx) => {
+        let buildId = null;
+        let buildSession = null;
+
+        try {
+          const parsed = parseBuildSessionIdArgs(args, { commandName: "build-approve" });
+          buildId = parsed.buildId;
+          buildSession = await resolvedBuildSessionStore.loadBuildSession(buildId);
+
+          if (!buildSession) {
+            const message = `No persisted build session found for build id: ${buildId}`;
+            ctx.ui.notify(`build approval blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build approval blocked");
+
+            return {
+              status: "blocked",
+              buildId,
+              stopReason: message,
+              summary: "Build approval could not proceed.",
+              text: formatOperatorBuildSessionLookupBlocked({
+                buildId,
+                message
+              }),
+              details: {
+                buildId,
+                stopReason: message
+              }
+            };
+          }
+
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildId}`);
+            }
+
+            return {
+              ...existingSession,
+              approval: {
+                ...existingSession.approval,
+                approved: true,
+                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString()
+              },
+              execution: {
+                ...existingSession.execution,
+                status: existingSession.execution.status === "awaiting_approval"
+                  ? "approved"
+                  : existingSession.execution.status,
+                stopReason: existingSession.execution.status === "awaiting_approval"
+                  ? null
+                  : existingSession.execution.stopReason,
+                updatedAt: new Date().toISOString()
+              }
+            };
+          });
+
+          const syncedState = await syncBuildSessionWithRunStore(buildSession);
+          buildSession = syncedState.buildSession;
+          if (syncedState.runJournal) {
+            const text = [
+              formatOperatorBuildSessionStatus(buildSession),
+              formatOperatorApprovalCheckpoint({
+                intake: buildSession.intake,
+                lifecycle: buildSession.lifecycle,
+                approvalRequested: true,
+                runJournal: syncedState.runJournal
+              })
+            ].join("\n\n");
+
+            ctx.ui.notify(
+              `build session ${buildId} already has execution status ${syncedState.runJournal.status}`,
+              syncedState.runJournal.status === "success" ? "info" : "warning"
+            );
+            ctx.ui.setStatus("workflow", `build ${syncedState.runJournal.status}: ${buildId}`);
+
+            return {
+              status: syncedState.runJournal.status,
+              buildId,
+              summary: `Build session ${buildId} already has execution status ${syncedState.runJournal.status}.`,
+              recommendedNextAction: `/build-status ${buildId}`,
+              intake: buildSession.intake,
+              lifecycle: {
+                proposalSet: buildSession.lifecycle.proposalSet,
+                blueprint: buildSession.lifecycle.blueprint,
+                executionProgram: buildSession.lifecycle.executionProgram,
+                auditReport: buildSession.lifecycle.auditReport
+              },
+              runJournal: syncedState.runJournal,
+              buildSession,
+              text,
+              details: {
+                buildId,
+                buildSession,
+                runJournal: syncedState.runJournal
+              }
+            };
+          }
+
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildId}`);
+            }
+
+            return {
+              ...existingSession,
+              execution: {
+                ...existingSession.execution,
+                status: "running",
+                stopReason: null,
+                programId: existingSession.lifecycle.executionProgram.id,
+                completedContracts: 0,
+                pendingContracts: existingSession.lifecycle.executionProgram.contracts.length,
+                updatedAt: new Date().toISOString()
+              }
+            };
+          });
+
+          const runJournal = await runExecutionProgram(buildSession.lifecycle.executionProgram, {
+            contractExecutor: createExecutionProgramExecutor(),
+            runStore
+          });
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildId}`);
+            }
+
+            return applyRunJournalToBuildSession(existingSession, runJournal);
+          });
+
+          const text = [
+            formatOperatorBuildSessionStatus(buildSession),
+            formatOperatorApprovalCheckpoint({
+              intake: buildSession.intake,
+              lifecycle: buildSession.lifecycle,
+              approvalRequested: true,
+              runJournal
+            })
+          ].join("\n\n");
+
+          ctx.ui.notify(
+            `build session ${buildId} execution ${runJournal.status}`,
+            runJournal.status === "success" ? "info" : "warning"
+          );
+          ctx.ui.setStatus("workflow", `build ${runJournal.status}: ${buildId}`);
+
+          return {
+            status: runJournal.status,
+            buildId,
+            summary: `Build session ${buildId} executed with status ${runJournal.status}.`,
+            recommendedNextAction: `/build-status ${buildId}`,
+            intake: buildSession.intake,
+            lifecycle: {
+              proposalSet: buildSession.lifecycle.proposalSet,
+              blueprint: buildSession.lifecycle.blueprint,
+              executionProgram: buildSession.lifecycle.executionProgram,
+              auditReport: buildSession.lifecycle.auditReport
+            },
+            runJournal,
+            buildSession,
+            text,
+            details: {
+              buildId,
+              runJournal,
+              buildSession
+            }
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (buildId && buildSession && buildSession.approval.approved) {
+            try {
+              buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
+                if (!existingSession) {
+                  throw new Error(`No build session found for build id: ${buildId}`);
+                }
+
+                return {
+                  ...existingSession,
+                  execution: {
+                    ...existingSession.execution,
+                    status: "blocked",
+                    stopReason: message,
+                    programId: existingSession.execution.programId ?? existingSession.lifecycle.executionProgram.id,
+                    updatedAt: new Date().toISOString()
+                  }
+                };
+              });
+            } catch {
+              // Keep returning a blocked response even if persistence fails while recording the error.
+            }
+          }
+
+          ctx.ui.notify(`build approval blocked: ${message}`, "warning");
+          ctx.ui.setStatus("workflow", "build approval blocked");
+
+          return {
+            status: "blocked",
+            buildId,
+            stopReason: message,
+            summary: "Build approval could not proceed.",
+            text: formatOperatorBuildSessionLookupBlocked({
+              buildId,
+              message
+            }),
+            details: {
+              buildId,
+              stopReason: message
+            }
+          };
+        }
+      }
+    });
+
+    pi.registerCommand("build-status", {
+      description: "Show plain-English build-session status by build id.",
+      handler: async (args, ctx) => {
+        try {
+          const { buildId } = parseBuildSessionIdArgs(args, { commandName: "build-status" });
+          const loadedBuildSession = await resolvedBuildSessionStore.loadBuildSession(buildId);
+
+          if (!loadedBuildSession) {
+            const message = `No persisted build session found for build id: ${buildId}`;
+            ctx.ui.notify(`build status lookup blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build status blocked");
+
+            return {
+              status: "blocked",
+              buildId,
+              stopReason: message,
+              summary: "Build status lookup could not find that session.",
+              text: formatOperatorBuildSessionLookupBlocked({
+                buildId,
+                message
+              }),
+              details: {
+                buildId,
+                stopReason: message
+              }
+            };
+          }
+
+          const syncedState = await syncBuildSessionWithRunStore(loadedBuildSession);
+          const buildSession = syncedState.buildSession;
+          const runJournal = syncedState.runJournal;
+          const text = runJournal
+            ? [
+              formatOperatorBuildSessionStatus(buildSession),
+              formatOperatorApprovalCheckpoint({
+                intake: buildSession.intake,
+                lifecycle: buildSession.lifecycle,
+                approvalRequested: true,
+                runJournal
+              })
+            ].join("\n\n")
+            : formatOperatorBuildSessionStatus(buildSession);
+
+          const recommendedNextAction = buildSession.execution.status === "awaiting_approval" ||
+            buildSession.execution.status === "approved"
+            ? `/build-approve ${buildSession.buildId}`
+            : buildSession.execution.status === "running" && buildSession.execution.programId
+              ? `/resume-program ${buildSession.execution.programId}`
+              : `/build-status ${buildSession.buildId}`;
+
+          const notificationLevel = buildSession.execution.status === "success" ||
+            buildSession.execution.status === "awaiting_approval" ||
+            buildSession.execution.status === "approved"
+            ? "info"
+            : "warning";
+          ctx.ui.notify(`build session ${buildSession.buildId}: ${buildSession.execution.status}`, notificationLevel);
+          ctx.ui.setStatus("workflow", `build session ${buildSession.buildId}: ${buildSession.execution.status}`);
+
+          return {
+            status: buildSession.execution.status,
+            buildId: buildSession.buildId,
+            summary: `Build session ${buildSession.buildId} is ${buildSession.execution.status}.`,
+            recommendedNextAction,
+            intake: buildSession.intake,
+            lifecycle: {
+              proposalSet: buildSession.lifecycle.proposalSet,
+              blueprint: buildSession.lifecycle.blueprint,
+              executionProgram: buildSession.lifecycle.executionProgram,
+              auditReport: buildSession.lifecycle.auditReport
+            },
+            runJournal,
+            buildSession,
+            text,
+            details: {
+              buildSession,
+              runJournal
+            }
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`build status lookup blocked: ${message}`, "warning");
+          ctx.ui.setStatus("workflow", "build status blocked");
+
+          return {
+            status: "blocked",
+            stopReason: message,
+            summary: "Build status lookup failed.",
+            text: formatOperatorBuildSessionLookupBlocked({
+              message
+            }),
+            details: {
+              stopReason: message
+            }
+          };
+        }
       }
     });
 
@@ -808,5 +1465,6 @@ export function createPiExtension({
 }
 
 export default createPiExtension({
-  runStore: createRunStore()
+  runStore: createRunStore(),
+  buildSessionStore: createBuildSessionStore()
 });

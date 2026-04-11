@@ -496,6 +496,16 @@ export async function runAutoWorkflow(input, { runner } = {}) {
     });
   }
 
+  try {
+    assertRepairBudget(normalizedInput.maxRepairLoops);
+  } catch (error) {
+    return blockedInputExecution({
+      goal: normalizedInput.goal,
+      maxRepairLoops: normalizedInput.maxRepairLoops,
+      stopReason: error instanceof Error ? error.message : String(error)
+    });
+  }
+
   return runPlannedWorkflow({
     workflow,
     approvedHighRisk: normalizedInput.approvedHighRisk,

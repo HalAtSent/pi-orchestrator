@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
+import { createExecutionProgram } from "../src/project-contracts.js";
 
 import {
   auditProject,
@@ -56,11 +57,15 @@ test("blueprint freezes repository layout and execution profile", () => {
     "src/project-contracts.js",
     "src/project-workflows.js",
     "src/auto-workflow.js",
+    "src/build-session-store.js",
+    "src/run-evidence.js",
     "src/run-store.js",
     "src/safe-clone.js",
     "src/schema.js"
   ]);
   assert.deepEqual(modulePathsById["pi-adapter"], [
+    "src/operator-formatters.js",
+    "src/operator-intake.js",
     "src/pi-adapter.js",
     "src/pi-extension.js",
     "src/pi-runtime-diagnostics.js"
@@ -99,6 +104,76 @@ test("blueprint preserves guarded autonomy when compiled from a proposal set", (
   assert.equal(blueprint.executionProfile.autonomyMode, "guarded");
   assert.equal(blueprint.executionProfile.humanGatePolicy, "interactive-high-risk-gate");
   assert.equal(blueprint.executionProfile.maxParallelWorkers, 1);
+});
+
+test("ExecutionProgram rejects whitespace-only scopePaths, dependsOn, and completionChecks", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+
+  const whitespaceScopePaths = structuredClone(executionProgram);
+  whitespaceScopePaths.contracts[0].scopePaths[0] = "   ";
+  assert.throws(
+    () => createExecutionProgram(whitespaceScopePaths),
+    /program\.contracts\[\]\.scopePaths\[0\] must be a non-empty string/u
+  );
+
+  const whitespaceDependsOn = structuredClone(executionProgram);
+  whitespaceDependsOn.contracts[1].dependsOn = [" \t "];
+  assert.throws(
+    () => createExecutionProgram(whitespaceDependsOn),
+    /program\.contracts\[\]\.dependsOn\[0\] must be a non-empty string/u
+  );
+
+  const whitespaceCompletionChecks = structuredClone(executionProgram);
+  whitespaceCompletionChecks.completionChecks = ["\n  "];
+  assert.throws(
+    () => createExecutionProgram(whitespaceCompletionChecks),
+    /program\.completionChecks\[0\] must be a non-empty string/u
+  );
+});
+
+test("brief normalization trims and validates autonomyMode and projectType deterministically", () => {
+  const proposalSet = brainstormProject({
+    goal: "Build a service workflow",
+    projectType: "  SERVICE ",
+    autonomyMode: "  GUARDED ",
+    constraints: [" keep control-plane policy in code "]
+  });
+
+  assert.equal(proposalSet.projectType, "service");
+  assert.equal(proposalSet.brief.autonomyMode, "guarded");
+  assert.deepEqual(proposalSet.brief.constraints, ["keep control-plane policy in code"]);
+
+  const blueprint = blueprintProject({
+    proposalSet,
+    autonomyMode: "  autonomous  "
+  });
+  assert.equal(blueprint.projectType, "service");
+  assert.equal(blueprint.executionProfile.autonomyMode, "autonomous");
+  assert.equal(blueprint.executionProfile.humanGatePolicy, "preapprove-high-risk-at-launch");
+
+  assert.throws(
+    () => brainstormProject({
+      goal: "Build a project",
+      projectType: "  unknown-type  "
+    }),
+    /projectType must be one of:/u
+  );
+
+  assert.throws(
+    () => brainstormProject({
+      goal: "Build a project",
+      autonomyMode: "  semi-auto  "
+    }),
+    /autonomyMode must be one of:/u
+  );
+
+  assert.throws(
+    () => blueprintProject({
+      proposalSet,
+      autonomyMode: "   "
+    }),
+    /autonomyMode must be a non-empty string/u
+  );
 });
 
 test("slice returns an execution program with ordered milestone contracts", () => {

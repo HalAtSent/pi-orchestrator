@@ -10,6 +10,7 @@ import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
 import { createPiWorkerRunner } from "../src/pi-worker-runner.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
+import { createBuildSessionStore } from "../src/build-session-store.js";
 import { createRunStore } from "../src/run-store.js";
 
 function loadFixture(name) {
@@ -539,11 +540,29 @@ test("pi extension exposes run-program/resume-program and execution tools", asyn
   assert.equal(registeredCommands.has("run-program"), true);
   assert.equal(registeredCommands.has("resume-program"), true);
   assert.equal(registeredCommands.has("auto"), true);
+  assert.equal(registeredTools.has("plan_workflow"), true);
   assert.equal(registeredTools.has("run_execution_program"), true);
   assert.equal(registeredTools.has("resume_execution_program"), true);
   assert.equal(registeredTools.has("run_auto_workflow"), true);
   assert.equal(registeredTools.get("run_execution_program").parameters.properties.approvedHighRisk.default, false);
   assert.equal(registeredTools.get("resume_execution_program").parameters.properties.approvedHighRisk.default, false);
+
+  await assert.rejects(
+    () => registeredTools.get("plan_workflow").execute("tool-call-plan-empty", {
+      goal: "Rename a helper in one file",
+      allowedFiles: []
+    }),
+    /allowedFiles must contain at least one file path/i
+  );
+
+  await assert.rejects(
+    () => registeredTools.get("plan_workflow").execute("tool-call-plan-overlap", {
+      goal: "Rename a helper in one file",
+      allowedFiles: ["src/foo.js"],
+      forbiddenFiles: ["src/"]
+    }),
+    /must not overlap by scope/i
+  );
 
   const program = buildProjectLifecycleArtifacts(loadFixture("project-brief.json")).executionProgram;
   const uiEvents = [];
@@ -1072,4 +1091,370 @@ test("pi extension auto command runs through an injected Pi-backed runner", asyn
   assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
   assert.match(statuses[0].value, /openai-codex/i);
   assert.match(statuses[0].value, /implementer=gpt-5\.3-codex/i);
+});
+
+test("pi extension build command creates a persisted build session before approval", async () => {
+  await withTempDir("pi-orchestrator-build-session-create-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const uiEvents = [];
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore,
+      contractExecutor: async () => {
+        throw new Error("build should not execute contracts before approval");
+      }
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const result = await registeredCommands.get("build").handler(`
+Build a product onboarding workspace for local shop owners.
+Audience: non-technical shop owners
+Constraints: avoid raw JSON input
+Success: an owner can request their first build in one command
+    `, {
+      ui: {
+        notify(message, tone) {
+          uiEvents.push({ message, tone });
+        },
+        setStatus(scope, value) {
+          uiEvents.push({ scope, value });
+        }
+      }
+    });
+
+    assert.equal(result.status, "awaiting_approval");
+    assert.equal(typeof result.buildId, "string");
+    assert.match(result.text, /Build Session/u);
+    assert.match(result.text, /Intake Summary/u);
+    assert.match(result.text, /Staged Plan/u);
+    assert.match(result.text, /Approval Checkpoint/u);
+    assert.equal(result.recommendedNextAction, `/build-approve ${result.buildId}`);
+    assert.equal(result.lifecycle.executionProgram.contracts.length > 0, true);
+
+    const persisted = await buildSessionStore.loadBuildSession(result.buildId);
+    assert.equal(persisted.buildId, result.buildId);
+    assert.equal(persisted.execution.status, "awaiting_approval");
+    assert.deepEqual(persisted.execution.actionClasses, []);
+    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.validationArtifacts.length, 1);
+    assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
+    assert.equal(persisted.execution.validationArtifacts[0].validationOutcome, "not_run");
+    assert.equal(
+      uiEvents.some((event) => typeof event.message === "string" && /awaiting approval/i.test(event.message)),
+      true
+    );
+  });
+});
+
+test("pi extension build-approve executes a pending build session by build id", async () => {
+  await withTempDir("pi-orchestrator-build-session-approve-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const executedContracts = [];
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore,
+      contractExecutor: async (contract) => {
+        executedContracts.push(contract.id);
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [`contract=${contract.id}`],
+          openQuestions: []
+        };
+      }
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const planned = await registeredCommands.get("build").handler(
+      "Build a lightweight launch planner for product operators",
+      {
+        ui: createUiStub()
+      }
+    );
+
+    const approved = await registeredCommands.get("build-approve").handler(planned.buildId, {
+      ui: createUiStub()
+    });
+
+    assert.equal(approved.status, "success");
+    assert.equal(approved.buildId, planned.buildId);
+    assert.equal(approved.runJournal.status, "success");
+    assert.equal(executedContracts.length, approved.lifecycle.executionProgram.contracts.length);
+    assert.equal(approved.recommendedNextAction, `/build-status ${planned.buildId}`);
+    assert.match(approved.text, /Approval Checkpoint/u);
+    assert.match(approved.text, /Run status: success/u);
+
+    const persisted = await buildSessionStore.loadBuildSession(planned.buildId);
+    assert.equal(persisted.approval.approved, true);
+    assert.equal(persisted.execution.status, "success");
+    assert.deepEqual(persisted.execution.actionClasses, []);
+    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.validationArtifacts.length, 1);
+    assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
+    assert.equal(persisted.execution.validationArtifacts[0].validationOutcome, "pass");
+    assert.equal(persisted.execution.programId, approved.lifecycle.executionProgram.id);
+  });
+});
+
+test("pi extension build-status returns plain-English status and blocks unknown build ids", async () => {
+  await withTempDir("pi-orchestrator-build-session-status-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore
+    });
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const planned = await registeredCommands.get("build").handler(
+      "Build a support ticket triage assistant for local clinics",
+      {
+        ui: createUiStub()
+      }
+    );
+    const status = await registeredCommands.get("build-status").handler(planned.buildId, {
+      ui: createUiStub()
+    });
+
+    assert.equal(status.status, "awaiting_approval");
+    assert.equal(status.buildId, planned.buildId);
+    assert.equal(status.recommendedNextAction, `/build-approve ${planned.buildId}`);
+    assert.match(status.text, /Build Session/u);
+    assert.match(status.text, /Execution status: awaiting_approval/u);
+
+    const missing = await registeredCommands.get("build-status").handler("build-missing-id", {
+      ui: createUiStub()
+    });
+    assert.equal(missing.status, "blocked");
+    assert.equal(missing.buildId, "build-missing-id");
+    assert.match(missing.text, /Build Session Lookup Blocked/u);
+
+    const invalid = await registeredCommands.get("build-status").handler("   ", {
+      ui: createUiStub()
+    });
+    assert.equal(invalid.status, "blocked");
+    assert.match(invalid.text, /Build Session Lookup Blocked/u);
+    assert.match(invalid.stopReason, /Provide a build id string/i);
+  });
+});
+
+test("pi extension build-status syncs session state from persisted run-program journals", async () => {
+  await withTempDir("pi-orchestrator-build-session-runstore-sync-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore,
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [`contract=${contract.id}`],
+        openQuestions: []
+      })
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const planned = await registeredCommands.get("build").handler(
+      "Build an onboarding checklist for product launch operators",
+      {
+        ui: createUiStub()
+      }
+    );
+    const approved = await registeredCommands.get("build-approve").handler(planned.buildId, {
+      ui: createUiStub()
+    });
+    assert.equal(approved.status, "success");
+
+    await runStore.updateRun(approved.lifecycle.executionProgram.id, (existing) => ({
+      ...existing,
+      runJournal: {
+        ...existing.runJournal,
+        status: "running",
+        stopReason: null
+      }
+    }));
+
+    const status = await registeredCommands.get("build-status").handler(planned.buildId, {
+      ui: createUiStub()
+    });
+
+    assert.equal(status.status, "running");
+    assert.equal(status.recommendedNextAction, `/resume-program ${approved.lifecycle.executionProgram.id}`);
+
+    const persisted = await buildSessionStore.loadBuildSession(planned.buildId);
+    assert.equal(persisted.execution.status, "running");
+    assert.deepEqual(persisted.execution.actionClasses, []);
+    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.validationArtifacts.length, 1);
+    assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
+    assert.equal(
+      persisted.execution.validationArtifacts[0].validationOutcome,
+      persisted.execution.validationOutcome
+    );
+  });
+});
+
+test("pi extension build-status sync normalizes unsupported action classes and uncaptured validation claims", async () => {
+  await withTempDir("pi-orchestrator-build-session-runstore-evidence-sync-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const lifecycle = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+    const buildSession = await buildSessionStore.createBuildSession({
+      intake: {
+        goal: "Build a scoped release checklist for operators"
+      },
+      lifecycle: {
+        proposalSet: lifecycle.proposalSet,
+        blueprint: lifecycle.blueprint,
+        executionProgram: lifecycle.executionProgram,
+        auditReport: lifecycle.auditReport
+      },
+      approvalRequested: true
+    });
+
+    await buildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => ({
+      ...existingSession,
+      execution: {
+        ...existingSession.execution,
+        status: "running",
+        stopReason: null,
+        programId: lifecycle.executionProgram.id,
+        completedContracts: 0,
+        pendingContracts: lifecycle.executionProgram.contracts.length,
+        updatedAt: new Date().toISOString()
+      }
+    }));
+
+    const runStore = {
+      async loadRun(programId) {
+        return {
+          programId,
+          runJournal: {
+            programId,
+            status: "blocked",
+            stopReason: "waiting for external dependency",
+            stopReasonCode: null,
+            validationOutcome: "blocked",
+            actionClasses: ["access_secret", "mutate_git_state"],
+            validationArtifacts: [
+              {
+                artifactType: "validation_artifact",
+                reference: null,
+                status: "captured"
+              }
+            ],
+            contractRuns: [
+              {
+                contractId: lifecycle.executionProgram.contracts[0].id,
+                status: "success",
+                summary: "Executed first scoped contract.",
+                evidence: ["run explorer: success"],
+                openQuestions: []
+              }
+            ],
+            completedContractIds: [lifecycle.executionProgram.contracts[0].id],
+            pendingContractIds: lifecycle.executionProgram.contracts
+              .slice(1)
+              .map((contract) => contract.id)
+          }
+        };
+      }
+    };
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore
+    });
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const status = await registeredCommands.get("build-status").handler(buildSession.buildId, {
+      ui: createUiStub()
+    });
+
+    assert.equal(status.status, "blocked");
+    assert.equal(status.buildId, buildSession.buildId);
+
+    const persisted = await buildSessionStore.loadBuildSession(buildSession.buildId);
+    assert.equal(persisted.execution.status, "blocked");
+    assert.deepEqual(persisted.execution.actionClasses, []);
+    assert.deepEqual(persisted.execution.validationArtifacts, [
+      {
+        artifactType: "validation_artifact",
+        reference: null,
+        status: "not_captured",
+        validationOutcome: "blocked"
+      }
+    ]);
+  });
+});
+
+test("pi extension build command returns a plain-English blocked message for invalid input", async () => {
+  await withTempDir("pi-orchestrator-build-session-invalid-input-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore
+    });
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const result = await registeredCommands.get("build").handler("   ", {
+      ui: createUiStub()
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.text, /Build Flow Blocked/u);
+    assert.match(result.text, /Try again with one clear idea sentence/u);
+  });
 });

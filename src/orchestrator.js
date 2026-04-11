@@ -1,4 +1,5 @@
 import { createTaskPacket } from "./contracts.js";
+import { scopesOverlap } from "./path-scopes.js";
 import {
   classifyRisk,
   defaultAcceptanceChecks,
@@ -28,11 +29,16 @@ function findProtectedAllowlistPaths(allowedFiles) {
 }
 
 function findSharedScopePaths(allowedFiles, forbiddenFiles) {
-  const forbiddenSet = new Set(forbiddenFiles);
-  return unique(allowedFiles.filter((path) => forbiddenSet.has(path)));
+  return unique(allowedFiles.filter((allowedPath) => (
+    forbiddenFiles.some((forbiddenPath) => scopesOverlap(allowedPath, forbiddenPath))
+  )));
 }
 
 function validateScopeConfig({ allowedFiles = [], forbiddenFiles = [] }) {
+  if (allowedFiles.length === 0) {
+    throw new Error("allowedFiles must contain at least one file path");
+  }
+
   const protectedAllowlistPaths = findProtectedAllowlistPaths(allowedFiles);
   if (protectedAllowlistPaths.length > 0) {
     throw new Error(`allowedFiles contains protected path(s): ${protectedAllowlistPaths.join(", ")}`);
@@ -40,7 +46,7 @@ function validateScopeConfig({ allowedFiles = [], forbiddenFiles = [] }) {
 
   const sharedScopePaths = findSharedScopePaths(allowedFiles, forbiddenFiles);
   if (sharedScopePaths.length > 0) {
-    throw new Error(`allowedFiles and forbiddenFiles must not contain the same path(s): ${sharedScopePaths.join(", ")}`);
+    throw new Error(`allowedFiles and forbiddenFiles must not overlap by scope: ${sharedScopePaths.join(", ")}`);
   }
 }
 

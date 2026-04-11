@@ -78,7 +78,115 @@ test("process model probe fails closed when Pi script resolution is unavailable"
   assert.equal(probe.probes.length, 0);
 });
 
-test("cached process model probe reuses the first resolved probe result", async () => {
+test("cached process model probe does not reuse bad workspace results for a good workspace", async () => {
+  let runCount = 0;
+  const modelProbe = createCachedProcessModelProbe({
+    providerId: "openai-codex",
+    candidateModels: ["gpt-5.4"],
+    spawnCommandResolver: async ({ workspaceRoot }) => workspaceRoot === "/tmp/bad-workspace"
+      ? {
+        command: "node",
+        argsPrefix: ["/tmp/pi/dist/pi.js"],
+        launcher: "pi_script_via_node",
+        launcherPath: "node",
+        piScriptPath: null,
+        piPackageRoot: "/tmp/pi",
+        resolutionMessage: "unresolved"
+      }
+      : {
+        command: "node",
+        argsPrefix: ["/tmp/pi/dist/pi.js"],
+        launcher: "pi_script_via_node",
+        launcherPath: "node",
+        piScriptPath: "/tmp/pi/dist/pi.js",
+        piPackageRoot: "/tmp/pi",
+        resolutionMessage: "resolved"
+      },
+    runCommandFn: async ({ command, args, cwd }) => {
+      runCount += 1;
+      return {
+        command,
+        args,
+        cwd,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "OK",
+        stderr: "",
+        error: null,
+        durationMs: 5
+      };
+    }
+  });
+
+  const badWorkspaceResult = await modelProbe({ workspaceRoot: "/tmp/bad-workspace" });
+  const goodWorkspaceResult = await modelProbe({ workspaceRoot: "/tmp/good-workspace" });
+
+  assert.match(badWorkspaceResult.blockedReason ?? "", /script path was not resolved/i);
+  assert.equal(goodWorkspaceResult.blockedReason, null);
+  assert.deepEqual(goodWorkspaceResult.supportedModels, ["gpt-5.4"]);
+  assert.equal(runCount, 1);
+});
+
+test("cached process model probe blocked result does not poison later successful probe", async () => {
+  const badSpawnResolver = async () => ({
+    command: "node",
+    argsPrefix: ["/tmp/pi/dist/pi.js"],
+    launcher: "pi_script_via_node",
+    launcherPath: "node",
+    piScriptPath: null,
+    piPackageRoot: "/tmp/pi",
+    resolutionMessage: "unresolved"
+  });
+  const goodSpawnResolver = async () => ({
+    command: "node",
+    argsPrefix: ["/tmp/pi/dist/pi.js"],
+    launcher: "pi_script_via_node",
+    launcherPath: "node",
+    piScriptPath: "/tmp/pi/dist/pi.js",
+    piPackageRoot: "/tmp/pi",
+    resolutionMessage: "resolved"
+  });
+  let successfulRunCount = 0;
+  const successfulRunCommand = async ({ command, args, cwd }) => {
+    successfulRunCount += 1;
+    return {
+      command,
+      args,
+      cwd,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "OK",
+      stderr: "",
+      error: null,
+      durationMs: 5
+    };
+  };
+  const modelProbe = createCachedProcessModelProbe({
+    providerId: "openai-codex",
+    candidateModels: ["gpt-5.4"],
+    workspaceRoot: "/tmp/workspace"
+  });
+
+  const blockedResult = await modelProbe({
+    spawnCommandResolver: badSpawnResolver,
+    runCommandFn: async () => {
+      throw new Error("runCommandFn should not run for blocked resolver");
+    }
+  });
+  const recoveredResult = await modelProbe({
+    spawnCommandResolver: goodSpawnResolver,
+    runCommandFn: successfulRunCommand
+  });
+
+  assert.match(blockedResult.blockedReason ?? "", /script path was not resolved/i);
+  assert.equal(recoveredResult.blockedReason, null);
+  assert.deepEqual(recoveredResult.supportedModels, ["gpt-5.4"]);
+  assert.equal(successfulRunCount, 1);
+});
+
+test("cached process model probe reuses stable repeated calls in the same workspace", async () => {
   let runCount = 0;
   const modelProbe = createCachedProcessModelProbe({
     providerId: "openai-codex",
@@ -109,8 +217,8 @@ test("cached process model probe reuses the first resolved probe result", async 
     }
   });
 
-  const first = await modelProbe();
-  const second = await modelProbe();
+  const first = await modelProbe({ workspaceRoot: "/tmp/workspace" });
+  const second = await modelProbe({ workspaceRoot: "/tmp/workspace" });
 
   assert.deepEqual(first.supportedModels, ["gpt-5.4"]);
   assert.deepEqual(second.supportedModels, ["gpt-5.4"]);

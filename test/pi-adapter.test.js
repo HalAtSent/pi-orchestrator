@@ -138,6 +138,53 @@ test("adapter blocks runtime responses that signal recursive delegation", async 
   assert.match(result.summary, /recursive delegation/i);
 });
 
+test("adapter blocks malformed runtime commandsRun, evidence, and openQuestions payloads", async () => {
+  const malformedCases = [
+    {
+      field: "commandsRun",
+      value: "node --test",
+      reason: /result\.commandsRun must be an array/i
+    },
+    {
+      field: "evidence",
+      value: ["ok", 42],
+      reason: /result\.evidence\[1\] must be a non-empty string/i
+    },
+    {
+      field: "openQuestions",
+      value: null,
+      reason: /result\.openQuestions must be an array/i
+    }
+  ];
+
+  for (const malformedCase of malformedCases) {
+    const adapter = createPiAdapter({
+      supportedRoles: ["implementer"],
+      host: {
+        async runWorker(request) {
+          return {
+            status: "success",
+            summary: `${request.role} completed`,
+            changedFiles: [request.allowedFiles[0]],
+            commandsRun: ["node --check src/helpers.js"],
+            evidence: ["worker evidence"],
+            openQuestions: [],
+            [malformedCase.field]: malformedCase.value
+          };
+        }
+      }
+    });
+
+    const result = await adapter.runWorker(createWorkerRequest("implementer"), {});
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, new RegExp(`malformed ${malformedCase.field}`, "i"));
+    assert.match(result.evidence.join("\n"), malformedCase.reason);
+    assert.deepEqual(result.changedFiles, []);
+    assert.deepEqual(result.commandsRun, []);
+  }
+});
+
 test("adapter can use host.runtime.runWorker when available", async () => {
   const adapter = createPiAdapter({
     supportedRoles: ["implementer"],

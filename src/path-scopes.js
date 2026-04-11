@@ -1,5 +1,19 @@
+function assertPathString(pathValue) {
+  if (typeof pathValue !== "string") {
+    throw new Error("scope path must be a string");
+  }
+}
+
 function normalizeSlashes(pathValue) {
-  return String(pathValue).replace(/\\/g, "/");
+  assertPathString(pathValue);
+  return pathValue.replace(/\\/g, "/");
+}
+
+const WINDOWS_CASE_INSENSITIVE_PATHS = process.platform === "win32";
+
+function toComparableScopedPath(pathValue) {
+  const normalizedPath = normalizeScopedPath(pathValue);
+  return WINDOWS_CASE_INSENSITIVE_PATHS ? normalizedPath.toLowerCase() : normalizedPath;
 }
 
 export function normalizeScopedPath(pathValue) {
@@ -45,31 +59,35 @@ function isDirectoryScope(scopeEntry) {
 export function isPathWithinScope(changedPath, scopeEntry) {
   const normalizedChangedPath = normalizeScopedPath(changedPath);
   const normalizedScopeEntry = normalizeScopedPath(scopeEntry);
+  const comparableChangedPath = toComparableScopedPath(normalizedChangedPath);
+  const comparableScopeEntry = toComparableScopedPath(normalizedScopeEntry);
 
   if (isDirectoryScope(normalizedScopeEntry)) {
-    return normalizedChangedPath.startsWith(normalizedScopeEntry);
+    return comparableChangedPath.startsWith(comparableScopeEntry);
   }
 
-  return normalizedChangedPath === normalizedScopeEntry;
+  return comparableChangedPath === comparableScopeEntry;
 }
 
 export function scopesOverlap(a, b) {
   const normalizedA = normalizeScopedPath(a);
   const normalizedB = normalizeScopedPath(b);
+  const comparableA = toComparableScopedPath(normalizedA);
+  const comparableB = toComparableScopedPath(normalizedB);
   const aIsDirectory = isDirectoryScope(normalizedA);
   const bIsDirectory = isDirectoryScope(normalizedB);
 
   if (!aIsDirectory && !bIsDirectory) {
-    return normalizedA === normalizedB;
+    return comparableA === comparableB;
   }
 
   if (aIsDirectory && bIsDirectory) {
-    return normalizedA.startsWith(normalizedB) || normalizedB.startsWith(normalizedA);
+    return comparableA.startsWith(comparableB) || comparableB.startsWith(comparableA);
   }
 
   if (aIsDirectory) {
-    return normalizedB.startsWith(normalizedA);
+    return comparableB.startsWith(comparableA);
   }
 
-  return normalizedA.startsWith(normalizedB);
+  return comparableA.startsWith(comparableB);
 }

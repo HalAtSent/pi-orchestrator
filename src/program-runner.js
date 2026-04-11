@@ -3,6 +3,7 @@ import {
   createRunJournal,
   validateExecutionProgram
 } from "./project-contracts.js";
+import { normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
 
 const TERMINAL_STOP_STATUSES = new Set(["blocked", "failed", "repair_required"]);
 // Only journals that still represent in-progress work are resumable.
@@ -36,6 +37,15 @@ function describeError(error) {
 
   const message = String(error);
   return message.trim().length > 0 ? message : "Unknown error";
+}
+
+function createInvalidExecutorResult(message) {
+  return {
+    status: "blocked",
+    summary: message,
+    evidence: [],
+    openQuestions: []
+  };
 }
 
 function normalizeProgramId(programId) {
@@ -168,6 +178,13 @@ function createRunJournalSnapshot({
     programId: program.id,
     status,
     stopReason,
+    stopReasonCode: normalizeStopReasonCode(null, {
+      status,
+      stopReason
+    }),
+    validationOutcome: normalizeValidationOutcome(null, {
+      status
+    }),
     contractRuns,
     completedContractIds,
     pendingContractIds: pendingContractIds(program, completedContractIds)
@@ -195,6 +212,13 @@ function createBlockedRunJournal(programId, stopReason) {
     programId,
     status: "blocked",
     stopReason,
+    stopReasonCode: normalizeStopReasonCode(null, {
+      status: "blocked",
+      stopReason
+    }),
+    validationOutcome: normalizeValidationOutcome(null, {
+      status: "blocked"
+    }),
     contractRuns: [],
     completedContractIds: [],
     pendingContractIds: []
@@ -215,8 +239,16 @@ function createTerminalResumeRejectedJournal(program, runJournal) {
   });
 }
 
+export function getRunJournalResumePolicy(status) {
+  if (typeof status !== "string") {
+    return null;
+  }
+
+  return RUN_JOURNAL_RESUME_POLICY[status] ?? null;
+}
+
 function resolveRunJournalResumePolicy(runJournal) {
-  const policy = RUN_JOURNAL_RESUME_POLICY[runJournal.status];
+  const policy = getRunJournalResumePolicy(runJournal.status);
   assert(policy, `Unexpected run journal status: ${runJournal.status}`);
   return policy;
 }
@@ -495,7 +527,7 @@ async function runProgramFromState(program, {
     }
 
     let rawResult;
-    let executionErrorMessage = null;
+    let executionFailure = null;
     try {
       rawResult = await executeContract(clone(contract), {
         programId: program.id,
@@ -504,16 +536,27 @@ async function runProgramFromState(program, {
         contractRuns: clone(contractRuns)
       });
     } catch (error) {
-      executionErrorMessage = describeError(error);
-      rawResult = {
-        status: "blocked",
-        summary: `Contract executor threw: ${executionErrorMessage}`,
-        evidence: [],
-        openQuestions: []
+      const message = describeError(error);
+      executionFailure = {
+        kind: "threw",
+        message
       };
+      rawResult = createInvalidExecutorResult(`Contract executor threw: ${message}`);
     }
 
-    const result = createContractExecutionResult(rawResult);
+    let result;
+    try {
+      result = createContractExecutionResult(rawResult);
+    } catch (error) {
+      const message = describeError(error);
+      executionFailure = {
+        kind: "malformed_result",
+        message
+      };
+      result = createContractExecutionResult(
+        createInvalidExecutorResult(`Contract executor returned an invalid result: ${message}`)
+      );
+    }
 
     pendingContractIdSet.delete(contract.id);
     contractRuns.push({
@@ -521,7 +564,10 @@ async function runProgramFromState(program, {
       status: result.status,
       summary: result.summary,
       evidence: result.evidence,
-      openQuestions: result.openQuestions
+      openQuestions: result.openQuestions,
+      validationOutcome: normalizeValidationOutcome(null, {
+        status: result.status
+      })
     });
 
     if (result.status === "success") {
@@ -559,9 +605,11 @@ async function runProgramFromState(program, {
       `Unexpected terminal contract result status: ${result.status}`
     );
 
-    const terminalStopReason = executionErrorMessage === null
+    const terminalStopReason = executionFailure === null
       ? `Contract ${contract.id} returned ${result.status}: ${result.summary}`
-      : `Contract ${contract.id} execution threw: ${executionErrorMessage}`;
+      : executionFailure.kind === "threw"
+        ? `Contract ${contract.id} execution threw: ${executionFailure.message}`
+        : `Contract ${contract.id} execution returned an invalid result: ${executionFailure.message}`;
 
     const terminalJournal = stopProgram({
       program,
@@ -671,10 +719,19 @@ export async function resumeExecutionProgram(programIdInput, {
 }
 
 export function formatProgramRunJournal(journal) {
+  const journalStopReasonCode = journal.stopReasonCode ?? normalizeStopReasonCode(null, {
+    status: journal.status,
+    stopReason: journal.stopReason
+  });
+  const journalValidationOutcome = journal.validationOutcome ?? normalizeValidationOutcome(null, {
+    status: journal.status
+  });
   const lines = [
     `program: ${journal.programId}`,
     `status: ${journal.status}`,
     `stop_reason: ${journal.stopReason ?? "none"}`,
+    `stop_reason_code: ${journalStopReasonCode ?? "none"}`,
+    `validation_outcome: ${journalValidationOutcome}`,
     `completed: ${journal.completedContractIds.length}`,
     `pending: ${journal.pendingContractIds.length}`,
     "contracts:"
@@ -684,7 +741,11 @@ export function formatProgramRunJournal(journal) {
     lines.push("- none");
   } else {
     for (const entry of journal.contractRuns) {
+      const entryValidationOutcome = entry.validationOutcome ?? normalizeValidationOutcome(null, {
+        status: entry.status
+      });
       lines.push(`- ${entry.contractId} (${entry.status}): ${entry.summary}`);
+      lines.push(`  validation_outcome: ${entryValidationOutcome}`);
       if (entry.evidence.length > 0) {
         lines.push("  evidence:");
         for (const evidence of entry.evidence) {

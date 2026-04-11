@@ -256,6 +256,85 @@ test("auto workflow blocks empty allowlists during input normalization", async (
   assert.match(execution.stopReason, /allowedFiles must contain at least one file path/i);
 });
 
+test("auto workflow blocks non-string allowedFiles entries during input normalization", async () => {
+  const runner = createScriptedWorkerRunner([]);
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: [{}]
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /scope path must be a string/i);
+});
+
+test("auto workflow blocks non-string forbiddenFiles entries during input normalization", async () => {
+  const runner = createScriptedWorkerRunner([]);
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    forbiddenFiles: [{}]
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /scope path must be a string/i);
+});
+
+test("auto workflow blocks non-string contextFiles entries during input normalization", async () => {
+  const runner = createScriptedWorkerRunner([]);
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    contextFiles: [{}]
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /scope path must be a string/i);
+});
+
+test("auto workflow still accepts valid string scope paths", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Patched the scoped helper.",
+        changedFiles: ["web/src/utils/format.js"],
+        commandsRun: ["node --check web/src/utils/format.js"],
+        evidence: ["Patch applied in scoped file."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified scoped helper changes.",
+        changedFiles: [],
+        commandsRun: ["node --check web/src/utils/format.js"],
+        evidence: ["Scoped verification passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["./web/src/utils/format.js"],
+    forbiddenFiles: ["./web/src/utils/generated.js"],
+    contextFiles: ["./README.md"]
+  }, { runner });
+
+  assert.equal(execution.status, "success");
+  assert.equal(execution.runs.length, 2);
+  assert.deepEqual(execution.runs.map((run) => run.packet.role), ["implementer", "verifier"]);
+});
+
 test("auto workflow stops with a structured failure when a role reports an out-of-scope file", async () => {
   const runner = createScriptedWorkerRunner([
     {
@@ -308,11 +387,11 @@ test("auto workflow blocks planner failures when allow and forbidden paths match
   assert.equal(execution.status, "blocked");
   assert.equal(execution.runs.length, 0);
   assert.equal(runner.getCalls().length, 0);
-  assert.match(execution.stopReason, /must not contain the same path/i);
+  assert.match(execution.stopReason, /must not overlap by scope/i);
   assert.match(execution.stopReason, /web\/src\/utils\/format\.js/i);
 });
 
-test("auto workflow stops with a structured failure when a role reports a forbidden file", async () => {
+test("auto workflow blocks planner failures when allow and forbidden scopes overlap", async () => {
   const runner = createScriptedWorkerRunner([
     {
       role: "implementer",
@@ -333,12 +412,65 @@ test("auto workflow stops with a structured failure when a role reports a forbid
     forbiddenFiles: ["web/src/utils/"]
   }, { runner });
 
-  assert.equal(execution.status, "failed");
-  assert.equal(execution.runs.length, 1);
-  assert.equal(execution.runs[0].packet.role, "implementer");
-  assert.equal(execution.runs[0].result.status, "failed");
-  assert.match(execution.stopReason, /reported a forbidden file/i);
-  assert.match(execution.stopReason, /web\/src\/utils\/format\.js/i);
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /must not overlap by scope/i);
+  assert.match(execution.stopReason, /web\/src\/utils\//i);
+});
+
+test("auto workflow blocks when maxRepairLoops is negative", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "This step should never run.",
+        changedFiles: [],
+        commandsRun: [],
+        evidence: [],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    maxRepairLoops: -1
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /maxRepairLoops must be a non-negative integer/i);
+});
+
+test("auto workflow blocks when maxRepairLoops is not an integer", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "This step should never run.",
+        changedFiles: [],
+        commandsRun: [],
+        evidence: [],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    maxRepairLoops: 1.5
+  }, { runner });
+
+  assert.equal(execution.status, "blocked");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+  assert.match(execution.stopReason, /maxRepairLoops must be a non-negative integer/i);
 });
 
 test("auto workflow blocks planner failures when allowlist includes protected paths", async () => {

@@ -1,13 +1,24 @@
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createExecutionProgram, createRunJournal } from "./project-contracts.js";
+import {
+  normalizeActionClasses,
+  normalizeLineageDepth,
+  normalizePolicyProfile,
+  normalizeSourceArtifactIds,
+  normalizeValidationArtifacts,
+  toArtifactReference
+} from "./run-evidence.js";
 
 export const RUN_STORE_FORMAT_VERSION = 1;
 const DEFAULT_RUN_DIRECTORY = ".pi/runs";
 const RUN_UPDATE_LOCK_RETRY_DELAY_MS = 25;
 const RUN_UPDATE_LOCK_TIMEOUT_MS = 5000;
 const RUN_UPDATE_LOCK_STALE_MS = 30000;
+const RUN_UPDATE_LOCK_HEARTBEAT_INTERVAL_MS = Math.floor(RUN_UPDATE_LOCK_STALE_MS / 3);
+const PERSISTED_RUN_RECORD_ARTIFACT_TYPE = "persisted_run_record";
+const RUN_JOURNAL_ARTIFACT_TYPE = "run_journal";
 
 function assert(condition, message) {
   if (!condition) {
@@ -47,10 +58,14 @@ function stringArraysEqual(left, right) {
   return true;
 }
 
-function normalizePersistedRunRecord(recordInput, { existingCreatedAt } = {}) {
+function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositoryRoot } = {}) {
   assertPlainObject("persistedRun", recordInput);
   assertPlainObject("persistedRun.program", recordInput.program);
   assertPlainObject("persistedRun.runJournal", recordInput.runJournal);
+  assert(
+    typeof repositoryRoot === "string" && repositoryRoot.trim().length > 0,
+    "repositoryRoot must be a non-empty string"
+  );
 
   const nowIso = new Date().toISOString();
   const program = createExecutionProgram(clone(recordInput.program));
@@ -88,20 +103,96 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt } = {}) {
     );
   }
 
+  const normalizedStopReasonCode = runJournal.stopReasonCode ?? null;
+  if (recordInput.stopReasonCode !== undefined) {
+    assert(
+      (recordInput.stopReasonCode ?? null) === normalizedStopReasonCode,
+      "persistedRun.stopReasonCode must match runJournal.stopReasonCode"
+    );
+  }
+
+  if (recordInput.validationOutcome !== undefined) {
+    assert(
+      recordInput.validationOutcome === runJournal.validationOutcome,
+      "persistedRun.validationOutcome must match runJournal.validationOutcome"
+    );
+  }
+
+  const normalizedRunJournalSourceArtifactIds = normalizeSourceArtifactIds(runJournal.sourceArtifactIds, {
+    fallback: [toArtifactReference("execution_program", programId)].filter(Boolean)
+  });
+  const normalizedRunJournalLineageDepth = normalizeLineageDepth(runJournal.lineageDepth, {
+    fallback: 1
+  });
+  const normalizedRunJournalActionClasses = normalizeActionClasses(runJournal.actionClasses, {
+    contractRuns: runJournal.contractRuns,
+    stopReasonCode: normalizedStopReasonCode
+  });
+  const normalizedRunJournalPolicyProfile = normalizePolicyProfile(runJournal.policyProfile);
+  const normalizedRunJournalValidationArtifacts = normalizeValidationArtifacts(runJournal.validationArtifacts, {
+    validationOutcome: runJournal.validationOutcome
+  });
+
+  const normalizedRunJournal = {
+    ...runJournal,
+    artifactType: typeof runJournal.artifactType === "string" && runJournal.artifactType.trim().length > 0
+      ? runJournal.artifactType.trim()
+      : RUN_JOURNAL_ARTIFACT_TYPE,
+    sourceArtifactIds: normalizedRunJournalSourceArtifactIds,
+    lineageDepth: normalizedRunJournalLineageDepth,
+    actionClasses: normalizedRunJournalActionClasses,
+    policyProfile: normalizedRunJournalPolicyProfile,
+    validationArtifacts: normalizedRunJournalValidationArtifacts
+  };
+
+  const defaultSourceArtifactIds = [
+    toArtifactReference("execution_program", programId),
+    toArtifactReference("run_journal", programId)
+  ].filter(Boolean);
+  const sourceArtifactIds = normalizeSourceArtifactIds(recordInput.sourceArtifactIds, {
+    fallback: defaultSourceArtifactIds
+  });
+  const lineageDepth = normalizeLineageDepth(recordInput.lineageDepth, {
+    fallback: normalizedRunJournalLineageDepth + 1
+  });
+  const actionClasses = normalizeActionClasses(recordInput.actionClasses, {
+    contractRuns: normalizedRunJournal.contractRuns,
+    stopReasonCode: normalizedStopReasonCode
+  });
+  const policyProfile = normalizePolicyProfile(recordInput.policyProfile ?? normalizedRunJournalPolicyProfile);
+  const validationArtifacts = normalizeValidationArtifacts(recordInput.validationArtifacts, {
+    validationOutcome: runJournal.validationOutcome
+  });
+  const normalizedRepositoryRoot = typeof recordInput.repositoryRoot === "string" && recordInput.repositoryRoot.trim().length > 0
+    ? recordInput.repositoryRoot.trim()
+    : repositoryRoot;
+  const artifactType = typeof recordInput.artifactType === "string" && recordInput.artifactType.trim().length > 0
+    ? recordInput.artifactType.trim()
+    : PERSISTED_RUN_RECORD_ARTIFACT_TYPE;
+
   const createdAt = recordInput.createdAt ?? existingCreatedAt ?? nowIso;
   const updatedAt = recordInput.updatedAt ?? nowIso;
   assertIsoTimestamp("persistedRun.createdAt", createdAt);
   assertIsoTimestamp("persistedRun.updatedAt", updatedAt);
 
   return {
+    artifactType,
     formatVersion: RUN_STORE_FORMAT_VERSION,
+    repositoryRoot: normalizedRepositoryRoot,
     programId,
+    sourceArtifactIds,
+    lineageDepth,
     program,
-    runJournal,
-    completedContractIds: [...runJournal.completedContractIds],
-    pendingContractIds: [...runJournal.pendingContractIds],
-    lastStatus: runJournal.status,
+    runJournal: normalizedRunJournal,
+    completedContractIds: [...normalizedRunJournal.completedContractIds],
+    pendingContractIds: [...normalizedRunJournal.pendingContractIds],
+    lastStatus: normalizedRunJournal.status,
     stopReason: normalizedStopReason,
+    stopReasonCode: normalizedStopReasonCode,
+    validationOutcome: runJournal.validationOutcome,
+    actionClasses,
+    policyProfile,
+    validationArtifacts,
     createdAt,
     updatedAt
   };
@@ -117,12 +208,60 @@ function wait(ms) {
   });
 }
 
+function parseRunUpdateLockPayload(rawLockPayload) {
+  try {
+    const parsed = JSON.parse(rawLockPayload);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    const lockId = typeof parsed.lockId === "string" && parsed.lockId.trim().length > 0
+      ? parsed.lockId.trim()
+      : null;
+    if (!lockId) {
+      return null;
+    }
+
+    return {
+      ...parsed,
+      lockId
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function createRunStore({
   rootDir = process.cwd(),
-  runsDirectory = DEFAULT_RUN_DIRECTORY
+  runsDirectory = DEFAULT_RUN_DIRECTORY,
+  runUpdateLockRetryDelayMs = RUN_UPDATE_LOCK_RETRY_DELAY_MS,
+  runUpdateLockTimeoutMs = RUN_UPDATE_LOCK_TIMEOUT_MS,
+  runUpdateLockStaleMs = RUN_UPDATE_LOCK_STALE_MS,
+  runUpdateLockHeartbeatIntervalMs = RUN_UPDATE_LOCK_HEARTBEAT_INTERVAL_MS,
+  onStaleLockObserved = null
 } = {}) {
   const normalizedRootDir = resolve(rootDir);
   const resolvedRunsDirectory = resolve(normalizedRootDir, runsDirectory);
+  const lockRetryDelayMs = runUpdateLockRetryDelayMs;
+  const lockTimeoutMs = runUpdateLockTimeoutMs;
+  const lockStaleMs = runUpdateLockStaleMs;
+  const lockHeartbeatIntervalMs = runUpdateLockHeartbeatIntervalMs;
+
+  assert(Number.isFinite(lockRetryDelayMs) && lockRetryDelayMs > 0, "runUpdateLockRetryDelayMs must be > 0");
+  assert(Number.isFinite(lockTimeoutMs) && lockTimeoutMs > 0, "runUpdateLockTimeoutMs must be > 0");
+  assert(Number.isFinite(lockStaleMs) && lockStaleMs > 0, "runUpdateLockStaleMs must be > 0");
+  assert(
+    Number.isFinite(lockHeartbeatIntervalMs) && lockHeartbeatIntervalMs > 0,
+    "runUpdateLockHeartbeatIntervalMs must be > 0"
+  );
+  assert(
+    lockHeartbeatIntervalMs < lockStaleMs,
+    "runUpdateLockHeartbeatIntervalMs must be less than runUpdateLockStaleMs"
+  );
+  assert(
+    onStaleLockObserved === null || typeof onStaleLockObserved === "function",
+    "onStaleLockObserved must be a function when provided"
+  );
 
   async function ensureRunsDirectory() {
     await mkdir(resolvedRunsDirectory, { recursive: true });
@@ -144,17 +283,37 @@ export function createRunStore({
     await ensureRunsDirectory();
 
     while (true) {
+      const lockId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const lockPayload = `${JSON.stringify({ pid: process.pid, lockId, acquiredAt: new Date().toISOString() })}\n`;
       try {
-        await writeFile(
-          lockPath,
-          `${JSON.stringify({ pid: process.pid, acquiredAt: new Date().toISOString() })}\n`,
-          {
-            encoding: "utf8",
-            flag: "wx"
-          }
-        );
+        await writeFile(lockPath, lockPayload, {
+          encoding: "utf8",
+          flag: "wx"
+        });
+        const heartbeatTimer = setInterval(() => {
+          const now = new Date();
+          void utimes(lockPath, now, now).catch((heartbeatError) => {
+            if (heartbeatError && heartbeatError.code === "ENOENT") {
+              return;
+            }
+          });
+        }, lockHeartbeatIntervalMs);
+        if (typeof heartbeatTimer.unref === "function") {
+          heartbeatTimer.unref();
+        }
+        let released = false;
         return async () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          clearInterval(heartbeatTimer);
           try {
+            const rawLock = await readFile(lockPath, "utf8");
+            const parsedLock = parseRunUpdateLockPayload(rawLock);
+            if (!parsedLock || parsedLock.lockId !== lockId) {
+              return;
+            }
             await unlink(lockPath);
           } catch (error) {
             if (error && error.code === "ENOENT") {
@@ -172,15 +331,40 @@ export function createRunStore({
       let staleLockRemoved = false;
       try {
         const lockStats = await stat(lockPath);
-        if (Date.now() - lockStats.mtimeMs > RUN_UPDATE_LOCK_STALE_MS) {
+        if (Date.now() - lockStats.mtimeMs > lockStaleMs) {
+          let observedStaleLockId = null;
           try {
-            await unlink(lockPath);
-            staleLockRemoved = true;
+            const observedRawLock = await readFile(lockPath, "utf8");
+            observedStaleLockId = parseRunUpdateLockPayload(observedRawLock)?.lockId ?? null;
           } catch (error) {
             if (error && error.code === "ENOENT") {
               staleLockRemoved = true;
             } else {
               throw error;
+            }
+          }
+
+          if (!staleLockRemoved && observedStaleLockId) {
+            if (typeof onStaleLockObserved === "function") {
+              await onStaleLockObserved({
+                lockPath,
+                lockId: observedStaleLockId
+              });
+            }
+
+            try {
+              const currentRawLock = await readFile(lockPath, "utf8");
+              const currentLockId = parseRunUpdateLockPayload(currentRawLock)?.lockId ?? null;
+              if (currentLockId === observedStaleLockId) {
+                await unlink(lockPath);
+                staleLockRemoved = true;
+              }
+            } catch (error) {
+              if (error && error.code === "ENOENT") {
+                staleLockRemoved = true;
+              } else {
+                throw error;
+              }
             }
           }
         }
@@ -196,11 +380,11 @@ export function createRunStore({
         continue;
       }
 
-      if (Date.now() - startedAt >= RUN_UPDATE_LOCK_TIMEOUT_MS) {
+      if (Date.now() - startedAt >= lockTimeoutMs) {
         throw new Error(`Timed out acquiring run update lock for programId: ${normalizedProgramId}`);
       }
 
-      await wait(RUN_UPDATE_LOCK_RETRY_DELAY_MS);
+      await wait(lockRetryDelayMs);
     }
   }
 
@@ -216,9 +400,10 @@ export function createRunStore({
     rootDir: normalizedRootDir,
     runsDirectory: resolvedRunsDirectory,
     async saveRun(recordInput) {
-      const record = normalizePersistedRunRecord(recordInput);
-      await writeRecord(record);
-      return clone(record);
+      assertPlainObject("persistedRun", recordInput);
+      const normalizedProgramId = normalizeProgramId(recordInput.programId ?? recordInput.program?.id);
+      const nextValue = clone(recordInput);
+      return this.updateRun(normalizedProgramId, () => nextValue);
     },
     async loadRun(programId) {
       const normalizedProgramId = normalizeProgramId(programId);
@@ -241,7 +426,9 @@ export function createRunStore({
         throw new Error(`Persisted run file is not valid JSON (${runPath}): ${error.message}`);
       }
 
-      const record = normalizePersistedRunRecord(parsed);
+      const record = normalizePersistedRunRecord(parsed, {
+        repositoryRoot: normalizedRootDir
+      });
       assert(record.programId === normalizedProgramId, "Persisted run programId does not match requested programId");
       return record;
     },
@@ -258,6 +445,15 @@ export function createRunStore({
           pendingContractIds: _ignoredPendingContractIds,
           lastStatus: _ignoredLastStatus,
           stopReason: _ignoredStopReason,
+          stopReasonCode: _ignoredStopReasonCode,
+          validationOutcome: _ignoredValidationOutcome,
+          artifactType: _ignoredArtifactType,
+          repositoryRoot: _ignoredRepositoryRoot,
+          sourceArtifactIds: _ignoredSourceArtifactIds,
+          lineageDepth: _ignoredLineageDepth,
+          actionClasses: _ignoredActionClasses,
+          policyProfile: _ignoredPolicyProfile,
+          validationArtifacts: _ignoredValidationArtifacts,
           ...nextRecordInput
         } = nextValue;
 
@@ -266,7 +462,8 @@ export function createRunStore({
           programId: normalizedProgramId,
           updatedAt: new Date().toISOString()
         }, {
-          existingCreatedAt: existing?.createdAt
+          existingCreatedAt: existing?.createdAt,
+          repositoryRoot: normalizedRootDir
         });
         await writeRecord(record);
         return clone(record);

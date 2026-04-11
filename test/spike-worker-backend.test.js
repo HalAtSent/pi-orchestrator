@@ -10,8 +10,10 @@ import {
   createPiCliLauncher
 } from "../src/spike-worker-backend.js";
 import {
+  createProcessRoleArgsBuilder,
   createProcessWorkerBackend,
-  PROCESS_WORKER_PROVIDER_ID
+  PROCESS_WORKER_PROVIDER_ID,
+  PROCESS_WORKER_ROLE_PROFILES
 } from "../src/process-worker-backend.js";
 
 function createPacket(role = "implementer", overrides = {}) {
@@ -43,6 +45,27 @@ async function exists(pathValue) {
 
 function normalizeFilePath(pathValue) {
   return String(pathValue).replace(/\\/g, "/");
+}
+
+function createRoleProfilesWithOverrides(overrides = {}) {
+  return {
+    explorer: {
+      ...PROCESS_WORKER_ROLE_PROFILES.explorer,
+      ...(overrides.explorer ?? {})
+    },
+    implementer: {
+      ...PROCESS_WORKER_ROLE_PROFILES.implementer,
+      ...(overrides.implementer ?? {})
+    },
+    reviewer: {
+      ...PROCESS_WORKER_ROLE_PROFILES.reviewer,
+      ...(overrides.reviewer ?? {})
+    },
+    verifier: {
+      ...PROCESS_WORKER_ROLE_PROFILES.verifier,
+      ...(overrides.verifier ?? {})
+    }
+  };
 }
 
 test("process backend blocks cleanly for unsupported roles", async () => {
@@ -621,6 +644,83 @@ test("explorer launcher prompt treats a missing target file as inspectable conte
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }
+});
+
+test("process role args builder probes custom preferred models and selects a custom preferred model", async () => {
+  const customPreferredModel = "gpt-5.5-custom-implementer";
+  const customFallbackModel = "gpt-5.5-custom-fallback";
+  const roleProfiles = createRoleProfilesWithOverrides({
+    implementer: {
+      preferredModel: customPreferredModel
+    }
+  });
+  const expectedPreferredModels = Object.values(roleProfiles).map((profile) => profile.preferredModel);
+  const probeRequests = [];
+  const argsBuilder = createProcessRoleArgsBuilder({
+    roleProfiles,
+    fallbackModel: customFallbackModel,
+    modelProbe: async ({ providerId, candidateModels }) => {
+      probeRequests.push({
+        providerId,
+        candidateModels: [...candidateModels]
+      });
+      return {
+        providerId,
+        supportedModels: [customPreferredModel, customFallbackModel],
+        blockedReason: null
+      };
+    }
+  });
+
+  const { args, launchSelection } = await argsBuilder({
+    packet: createPacket("implementer"),
+    prompt: "Custom preferred probe selection",
+    workspaceRoot: "/tmp/work"
+  });
+
+  assert.equal(probeRequests.length, 1);
+  for (const model of expectedPreferredModels) {
+    assert.equal(probeRequests[0].candidateModels.includes(model), true);
+  }
+  assert.equal(probeRequests[0].candidateModels.includes(customFallbackModel), true);
+  assert.equal(args[args.indexOf("--model") + 1], customPreferredModel);
+  assert.equal(launchSelection.selectedModel, customPreferredModel);
+  assert.equal(launchSelection.modelSelectionMode, "direct");
+});
+
+test("process role args builder probes custom fallback model and selects fallback when preferred is unavailable", async () => {
+  const customPreferredModel = "gpt-5.5-custom-unavailable";
+  const customFallbackModel = "gpt-5.5-custom-fallback";
+  const roleProfiles = createRoleProfilesWithOverrides({
+    implementer: {
+      preferredModel: customPreferredModel
+    }
+  });
+  let observedCandidateModels = [];
+  const argsBuilder = createProcessRoleArgsBuilder({
+    roleProfiles,
+    fallbackModel: customFallbackModel,
+    modelProbe: async ({ providerId, candidateModels }) => {
+      observedCandidateModels = [...candidateModels];
+      return {
+        providerId,
+        supportedModels: [customFallbackModel],
+        blockedReason: null
+      };
+    }
+  });
+
+  const { args, launchSelection } = await argsBuilder({
+    packet: createPacket("implementer"),
+    prompt: "Custom fallback probe selection",
+    workspaceRoot: "/tmp/work"
+  });
+
+  assert.equal(observedCandidateModels.includes(customPreferredModel), true);
+  assert.equal(observedCandidateModels.includes(customFallbackModel), true);
+  assert.equal(args[args.indexOf("--model") + 1], customFallbackModel);
+  assert.equal(launchSelection.selectedModel, customFallbackModel);
+  assert.equal(launchSelection.modelSelectionMode, "fallback");
 });
 
 test("pi launcher command evidence uses resolved pi script path in non-interactive mode", async () => {

@@ -317,30 +317,63 @@ export async function probeProcessModels({
 
 export function createCachedProcessModelProbe(options = {}) {
   const cache = new Map();
-  const cacheKeyInput = {
-    providerId: options.providerId ?? PROCESS_MODEL_PROBE_DEFAULT_PROVIDER,
-    candidateModels: normalizeModelCandidates(options.candidateModels ?? PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES)
-  };
-  const cacheKey = JSON.stringify(cacheKeyInput);
+  const functionIdentityCache = new WeakMap();
+  let nextFunctionIdentity = 1;
+
+  function getFunctionIdentity(value) {
+    if (typeof value !== "function") {
+      return null;
+    }
+
+    if (!functionIdentityCache.has(value)) {
+      functionIdentityCache.set(value, nextFunctionIdentity);
+      nextFunctionIdentity += 1;
+    }
+
+    return functionIdentityCache.get(value);
+  }
+
+  function buildCacheKey(mergedOptions) {
+    return JSON.stringify({
+      providerId: mergedOptions.providerId,
+      candidateModels: normalizeModelCandidates(mergedOptions.candidateModels),
+      prompt: mergedOptions.prompt,
+      timeoutMs: mergedOptions.timeoutMs,
+      workspaceRoot: mergedOptions.workspaceRoot,
+      spawnCommandResolverId: getFunctionIdentity(mergedOptions.spawnCommandResolver),
+      runCommandFnId: getFunctionIdentity(mergedOptions.runCommandFn)
+    });
+  }
 
   return async function cachedProcessModelProbe(requestOptions = {}) {
     const mergedOptions = {
       ...options,
       ...requestOptions,
       providerId: requestOptions.providerId ?? options.providerId ?? PROCESS_MODEL_PROBE_DEFAULT_PROVIDER,
-      candidateModels: requestOptions.candidateModels ?? options.candidateModels ?? PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+      candidateModels: requestOptions.candidateModels ?? options.candidateModels ?? PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES,
+      prompt: requestOptions.prompt ?? options.prompt ?? PROCESS_MODEL_PROBE_DEFAULT_PROMPT,
+      timeoutMs: requestOptions.timeoutMs ?? options.timeoutMs ?? PROCESS_MODEL_PROBE_DEFAULT_TIMEOUT_MS,
+      workspaceRoot: requestOptions.workspaceRoot ?? options.workspaceRoot ?? process.cwd(),
+      spawnCommandResolver: requestOptions.spawnCommandResolver ?? options.spawnCommandResolver ?? getPiSpawnCommand,
+      runCommandFn: requestOptions.runCommandFn ?? options.runCommandFn ?? runCommand
     };
+    const cacheKey = buildCacheKey(mergedOptions);
 
-    const currentKey = JSON.stringify({
-      providerId: mergedOptions.providerId,
-      candidateModels: normalizeModelCandidates(mergedOptions.candidateModels)
-    });
-    const resolvedKey = currentKey === cacheKey ? cacheKey : currentKey;
-
-    if (!cache.has(resolvedKey)) {
-      cache.set(resolvedKey, probeProcessModels(mergedOptions));
+    if (!cache.has(cacheKey)) {
+      const probePromise = probeProcessModels(mergedOptions)
+        .then((probeResult) => {
+          if (probeResult?.blockedReason) {
+            cache.delete(cacheKey);
+          }
+          return probeResult;
+        })
+        .catch((error) => {
+          cache.delete(cacheKey);
+          throw error;
+        });
+      cache.set(cacheKey, probePromise);
     }
 
-    return cache.get(resolvedKey);
+    return cache.get(cacheKey);
   };
 }

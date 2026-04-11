@@ -14,6 +14,13 @@ test("normalizeScopedPath collapses dot segments while keeping relative paths", 
   assert.equal(normalizeScopedPath("./docs/specs/"), "docs/specs/");
 });
 
+test("normalizeScopedPath rejects non-string values", () => {
+  assert.throws(
+    () => normalizeScopedPath({}),
+    /scope path must be a string/u
+  );
+});
+
 test("isPathWithinScope rejects traversal escapes from directory scopes", () => {
   assert.equal(isPathWithinScope("src/../secrets.txt", "src/"), false);
   assert.equal(isPathWithinScope("./src/a.js", "src/"), true);
@@ -26,4 +33,16 @@ test("scopesOverlap does not treat traversal forms as nested directory files", (
   assert.equal(scopesOverlap("src/", "src/../secrets.txt"), false);
   assert.equal(scopesOverlap("src/../secrets.txt", "src/"), false);
   assert.equal(scopesOverlap("docs/", "docs/guide.md"), true);
+});
+
+test("isPathWithinScope compares path casing case-insensitively on Windows", {
+  skip: process.platform !== "win32"
+}, () => {
+  assert.equal(isPathWithinScope("SRC/File.js", "src/"), true);
+});
+
+test("scopesOverlap compares scope casing case-insensitively on Windows", {
+  skip: process.platform !== "win32"
+}, () => {
+  assert.equal(scopesOverlap("src/file.js", "SRC/file.js"), true);
 });

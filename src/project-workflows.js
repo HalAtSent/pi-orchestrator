@@ -10,6 +10,9 @@ import {
   validateProposalSet
 } from "./project-contracts.js";
 
+const SUPPORTED_PROJECT_TYPES = Object.freeze(["automation-package", "service", "application", "library"]);
+const SUPPORTED_AUTONOMY_MODES = Object.freeze(["autonomous", "guarded"]);
+
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
@@ -35,6 +38,24 @@ function normalizeStringArray(value) {
 
   assert(Array.isArray(value), "expected an array of strings");
   return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function normalizeEnumString(name, value, supportedValues) {
+  const normalized = String(value).trim().toLowerCase();
+  assert(normalized.length > 0, `${name} must be a non-empty string`);
+  assert(
+    supportedValues.includes(normalized),
+    `${name} must be one of: ${supportedValues.join(", ")}`
+  );
+  return normalized;
+}
+
+function normalizeProjectType(value) {
+  return normalizeEnumString("projectType", value, SUPPORTED_PROJECT_TYPES);
+}
+
+function normalizeAutonomyMode(value) {
+  return normalizeEnumString("autonomyMode", value, SUPPORTED_AUTONOMY_MODES);
 }
 
 function inferProjectType(goal) {
@@ -76,7 +97,9 @@ function normalizeBrief(input) {
   assert(typeof input.goal === "string" && input.goal.trim().length > 0, "goal must be a non-empty string");
 
   const goal = input.goal.trim();
-  const projectType = input.projectType ? String(input.projectType) : inferProjectType(goal);
+  const projectType = input.projectType === undefined || input.projectType === null
+    ? normalizeProjectType(inferProjectType(goal))
+    : normalizeProjectType(input.projectType);
   const projectName = input.projectName
     ? String(input.projectName).trim()
     : slugify(input.repositoryName ? String(input.repositoryName) : goal) || "project";
@@ -90,7 +113,9 @@ function normalizeBrief(input) {
     targetUsers: normalizeStringArray(input.targetUsers),
     stackPreferences: normalizeStringArray(input.stackPreferences),
     successCriteria: normalizeStringArray(input.successCriteria),
-    autonomyMode: input.autonomyMode ? String(input.autonomyMode) : "autonomous"
+    autonomyMode: input.autonomyMode === undefined || input.autonomyMode === null
+      ? "autonomous"
+      : normalizeAutonomyMode(input.autonomyMode)
   };
 }
 
@@ -343,6 +368,8 @@ function modulesFor(projectType) {
           "src/project-contracts.js",
           "src/project-workflows.js",
           "src/auto-workflow.js",
+          "src/build-session-store.js",
+          "src/run-evidence.js",
           "src/run-store.js",
           "src/safe-clone.js",
           "src/schema.js"
@@ -354,6 +381,8 @@ function modulesFor(projectType) {
         name: "Pi Adapter",
         purpose: "Exposes the control plane through Pi commands and tools.",
         paths: [
+          "src/operator-formatters.js",
+          "src/operator-intake.js",
           "src/pi-adapter.js",
           "src/pi-extension.js",
           "src/pi-runtime-diagnostics.js"
@@ -633,7 +662,7 @@ export function blueprintProject({ proposalSet, selectedAlternativeId, autonomyM
     goal: proposalSet.goal,
     projectName: proposalSet.projectName,
     projectType: proposalSet.projectType,
-    autonomyMode: autonomyMode || proposalSet.brief.autonomyMode,
+    autonomyMode: autonomyMode ?? proposalSet.brief.autonomyMode,
     constraints: proposalSet.brief.constraints,
     nonGoals: proposalSet.brief.nonGoals,
     targetUsers: proposalSet.brief.targetUsers,
@@ -645,18 +674,18 @@ export function blueprintProject({ proposalSet, selectedAlternativeId, autonomyM
     id: `blueprint-${brief.projectName}`,
     goal: proposalSet.goal,
     projectName: proposalSet.projectName,
-    projectType: proposalSet.projectType,
+    projectType: brief.projectType,
     selectedAlternativeId: alternativeId,
-    summary: `Blueprint for a ${formatProjectLabel(proposalSet.projectType)} following the ${alternativeId} path.`,
+    summary: `Blueprint for a ${formatProjectLabel(brief.projectType)} following the ${alternativeId} path.`,
     brief: createBriefContext(brief),
     architectureDecisions: [
       "Keep control-plane policy in code rather than prompt text.",
       "Use structured artifacts to move from brainstorming into execution.",
       "Preserve isolated worker contexts with explicit ownership and bounded repair loops."
     ],
-    repositoryLayout: repositoryLayoutFor(proposalSet.projectType),
-    modules: modulesFor(proposalSet.projectType),
-    qualityGates: qualityGatesFor(proposalSet.projectType),
+    repositoryLayout: repositoryLayoutFor(brief.projectType),
+    modules: modulesFor(brief.projectType),
+    qualityGates: qualityGatesFor(brief.projectType),
     executionProfile: executionProfileFor(brief)
   });
 }

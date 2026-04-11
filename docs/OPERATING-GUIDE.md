@@ -1,6 +1,9 @@
 # Operating Guide
 
-This repository is building a personal Pi package for autonomous coding workflows.
+This repository is a personal Pi package for autonomous coding workflows, and the current live runtime uses a process-backed worker path when native Pi worker execution is unavailable or unreliable.
+
+For the design doctrine behind those choices, see [`HARNESS-PRINCIPLES.md`](./HARNESS-PRINCIPLES.md).
+For normative behavior and evidence requirements, see [`HARNESS-CONTRACT.md`](./HARNESS-CONTRACT.md) and [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md).
 
 The design intent is:
 
@@ -38,7 +41,20 @@ The hard rules are:
 
 ## Workflow Stages
 
-The package currently exposes six top-level workflow stages.
+The package currently exposes six core lifecycle stages plus one operator shell stage.
+
+### `build`
+
+Use when a non-technical operator wants to start from plain-English intent.
+
+Output:
+
+- persisted build session id (`buildId`)
+- plain-English intake summary
+- plain-English staged plan
+- explicit approval checkpoint before execution
+- plain-English status lookup by `buildId`
+- routing into the existing lifecycle and execution runner when approved
 
 ### `brainstorm`
 
@@ -109,12 +125,36 @@ Current state:
 - plans a bounded workflow
 - runs it through the configured worker runner
 - defaults to `pi_runtime`; process backend routing is only used when `processWorkerBackend` and `autoBackendMode` are explicitly configured
+- the local Pi shim currently pins `process_subagents`, so local live `/auto` execution runs through the process backend by default
 - supports `low_risk_process_implementer`, which routes low-risk `implementer` and `verifier` packets to the process backend
 - supports `process_subagents`, which routes `explorer`, `implementer`, `reviewer`, and `verifier` packets to the process backend
 - enforces read-only roles and repair-loop budget
 - in process backend mode, `explorer`, `reviewer`, and `verifier` are read-only; `implementer` can write only inside packet allowlists and still respects forbidden paths
 - uses the Pi-backed runner by default when the host exposes worker execution
 - cleanly blocks if the live Pi runtime surface is missing or unsafe
+- surfaces selected provider/model information in the workflow summary when process-backed execution runs
+
+## Live Local Runtime
+
+Local live execution is currently proven through the process backend in `src/process-worker-backend.js`.
+
+Working live in Pi now:
+
+- low-risk `/auto`
+- high-risk `/auto`
+- multi-contract `run-program`
+- explorer, implementer, reviewer, and verifier running through the process backend
+- approval gating for high-risk work
+- persisted resume flow for program runs
+- UI launch summaries that show provider/model selection
+
+Current live provider/model selection:
+
+- provider: `openai-codex`
+- explorer: `gpt-5.4`
+- implementer: `gpt-5.3-codex`
+- reviewer: `gpt-5.4`
+- verifier: `gpt-5.4-mini`
 
 ## Recommended Operating Loop
 
@@ -135,18 +175,20 @@ For a well-scoped implementation task:
 
 For zero-to-project work:
 
-1. Start with `brainstorm`
-2. Freeze with `blueprint`
-3. Produce milestone contracts with `slice`
-4. Use `bootstrap` for the first setup contract
-5. Execute contracts in sequence with `run-program`
-6. Resume interrupted runs with `resume-program`
+1. Start with `build` for operator intake and plan review
+2. Approve the stored session with `build-approve <buildId>` when the plan looks correct
+3. Inspect status any time with `build-status <buildId>`
+4. Resume only in-progress (`running`) journals with `resume-program`; terminal `blocked`, `failed`, and `repair_required` journals require a new `build` run
+5. Use `brainstorm`, `blueprint`, `slice`, `bootstrap`, and `audit` directly when deeper control is needed
 
 ## Pi Commands
 
 Available commands inside Pi:
 
 - `/workflow-status`
+- `/build`
+- `/build-approve`
+- `/build-status`
 - `/brainstorm`
 - `/blueprint`
 - `/slice`
@@ -188,16 +230,20 @@ Working now:
 - Pi extension loads locally
 - lifecycle planning commands return structured artifacts
 - `audit` validates artifact consistency
-- `auto` runs through the Pi-backed runner when the host exposes worker execution
+- `auto` runs through the process backend in the local Pi shim and can still use the Pi-backed runner when the host exposes worker execution
+- low-risk and high-risk `/auto` runs are proven live in Pi
 - `run-program` executes an `ExecutionProgram` sequentially
+- multi-contract `run-program` runs are proven live in Pi
+- explorer, implementer, reviewer, and verifier all execute through the live process backend
+- approval gating works for high-risk execution
 - persisted run journals are written locally and can be resumed
 - blocked execution is surfaced cleanly when the runtime surface is missing or unsafe
+- workflow summaries expose the selected provider/model during process-backed runs
 
 Not implemented yet:
 
 - guaranteed live worker invocation in every Pi host
 - broader live diagnostics for runtime capability mismatches
-- proven end-to-end live medium/high-risk runs in Pi
 - end-to-end autonomous project delivery
 
 ## Evidence Expectations
@@ -216,10 +262,10 @@ That means:
 
 The next highest-value work is:
 
-1. harden live Pi runtime diagnostics and capability detection
-2. prove live low-risk, then medium/high-risk runs in Pi
-3. expand on-disk evidence and operator controls
-4. add stronger execution-profile controls for budgets and approvals
+1. harden live Pi runtime diagnostics and capability detection across hosts
+2. expand on-disk evidence and operator controls
+3. add stronger execution-profile controls for budgets and approvals
+4. grow regression coverage from real day-to-day task runs
 
 ## Local Verification
 
