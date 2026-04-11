@@ -108,8 +108,11 @@ Current state:
 
 - plans a bounded workflow
 - runs it through the configured worker runner
-- can opt in to a low-risk implementer process backend for `/auto` while keeping verifier/review paths on the default runner
+- defaults to `pi_runtime`; process backend routing is only used when `processWorkerBackend` and `autoBackendMode` are explicitly configured
+- supports `low_risk_process_implementer`, which routes low-risk `implementer` and `verifier` packets to the process backend
+- supports `process_subagents`, which routes `explorer`, `implementer`, `reviewer`, and `verifier` packets to the process backend
 - enforces read-only roles and repair-loop budget
+- in process backend mode, `explorer`, `reviewer`, and `verifier` are read-only; `implementer` can write only inside packet allowlists and still respects forbidden paths
 - uses the Pi-backed runner by default when the host exposes worker execution
 - cleanly blocks if the live Pi runtime surface is missing or unsafe
 

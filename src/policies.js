@@ -1,3 +1,5 @@
+import { normalizeScopedPath } from "./path-scopes.js";
+
 const HIGH_RISK_KEYWORDS = [
   "migration",
   "schema",
@@ -35,7 +37,11 @@ const PROTECTED_PATH_PATTERNS = [
 ];
 
 function normalizePath(value) {
-  return value.replace(/\\/g, "/");
+  return normalizeScopedPath(value);
+}
+
+function isDirectoryScope(path) {
+  return normalizePath(path).endsWith("/");
 }
 
 export function isProtectedPath(path) {
@@ -53,6 +59,10 @@ export function classifyRisk({ goal, allowedFiles = [] }) {
 
   if (HIGH_RISK_KEYWORDS.some((keyword) => normalizedGoal.includes(keyword))) {
     return "high";
+  }
+
+  if (normalizedFiles.some((path) => isDirectoryScope(path))) {
+    return "medium";
   }
 
   if (normalizedFiles.length > 6) {

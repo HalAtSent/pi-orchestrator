@@ -3,6 +3,7 @@ import {
   AUTO_BACKEND_MODES,
   createAutoBackendRunner
 } from "./auto-backend-runner.js";
+import { parseBooleanFlag } from "./boolean-flags.js";
 import { validateWorkerResult } from "./contracts.js";
 import { createInitialWorkflow } from "./orchestrator.js";
 import {
@@ -76,12 +77,20 @@ const runExecutionProgramSchema = Type.Object({
   program: Type.Object({}, {
     description: "ExecutionProgram artifact to execute contract-by-contract.",
     additionalProperties: true
+  }),
+  approvedHighRisk: Type.Boolean({
+    description: "Whether a human explicitly approved high-risk contract execution.",
+    default: false
   })
 });
 
 const resumeExecutionProgramSchema = Type.Object({
   programId: Type.String({
     description: "ExecutionProgram id to resume from local persisted run state."
+  }),
+  approvedHighRisk: Type.Boolean({
+    description: "Whether a human explicitly approved high-risk contract execution.",
+    default: false
   })
 });
 
@@ -213,7 +222,10 @@ function parseAutoArgs(args) {
     allowedFiles: normalizeStringArray(parsed.allowedFiles),
     forbiddenFiles: normalizeStringArray(parsed.forbiddenFiles),
     contextFiles: normalizeStringArray(parsed.contextFiles),
-    approvedHighRisk: Boolean(parsed.approvedHighRisk),
+    approvedHighRisk: parseBooleanFlag(parsed.approvedHighRisk, {
+      flagName: "approvedHighRisk",
+      defaultValue: false
+    }),
     maxRepairLoops: parsed.maxRepairLoops ?? 1
   };
 }
@@ -248,17 +260,23 @@ function createBlockedAutoExecution({ goal, maxRepairLoops, stopReason }) {
 
 function parseRunProgramArgs(args) {
   const parsed = parseJsonArgs(args);
+  const approvedHighRisk = parseBooleanFlag(parsed.approvedHighRisk, {
+    flagName: "approvedHighRisk",
+    defaultValue: false
+  });
 
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     if (parsed.program && typeof parsed.program === "object" && !Array.isArray(parsed.program)) {
       return {
-        program: parsed.program
+        program: parsed.program,
+        approvedHighRisk
       };
     }
 
     if (Array.isArray(parsed.contracts)) {
       return {
-        program: parsed
+        program: parsed,
+        approvedHighRisk
       };
     }
   }
@@ -278,7 +296,8 @@ function parseResumeProgramArgs(args) {
     }
 
     return {
-      programId: raw
+      programId: raw,
+      approvedHighRisk: false
     };
   }
 
@@ -289,7 +308,11 @@ function parseResumeProgramArgs(args) {
   if (args && typeof args === "object" && !Array.isArray(args)) {
     if (typeof args.programId === "string" && args.programId.trim().length > 0) {
       return {
-        programId: args.programId.trim()
+        programId: args.programId.trim(),
+        approvedHighRisk: parseBooleanFlag(args.approvedHighRisk, {
+          flagName: "approvedHighRisk",
+          defaultValue: false
+        })
       };
     }
   }
@@ -301,6 +324,22 @@ function buildLifecycleFromParams(params) {
   return buildProjectLifecycleArtifacts(params, {
     selectedAlternativeId: params.selectedAlternativeId
   });
+}
+
+function resolveContractExecutorInvoker(contractExecutor) {
+  if (typeof contractExecutor === "function") {
+    return contractExecutor;
+  }
+
+  if (contractExecutor && typeof contractExecutor.runContract === "function") {
+    return contractExecutor.runContract.bind(contractExecutor);
+  }
+
+  if (contractExecutor && typeof contractExecutor.run === "function") {
+    return contractExecutor.run.bind(contractExecutor);
+  }
+
+  throw new Error("contractExecutor(contract, context) is required");
 }
 
 export function createPiExtension({
@@ -328,9 +367,27 @@ export function createPiExtension({
       processBackend: processWorkerBackend,
       mode: autoBackendMode
     });
-    const resolvedContractExecutor = contractExecutor ?? createProgramContractExecutor({
-      runner: resolvedWorkerRunner
-    });
+    const configuredContractExecutor = contractExecutor
+      ? resolveContractExecutorInvoker(contractExecutor)
+      : null;
+    const createExecutionProgramExecutor = ({ approvedHighRisk = false } = {}) => {
+      const resolvedApproval = parseBooleanFlag(approvedHighRisk, {
+        flagName: "approvedHighRisk",
+        defaultValue: false
+      });
+
+      if (configuredContractExecutor) {
+        return async (contract, context = {}) => configuredContractExecutor(contract, {
+          ...(context && typeof context === "object" && !Array.isArray(context) ? context : {}),
+          approvedHighRisk: resolvedApproval
+        });
+      }
+
+      return createProgramContractExecutor({
+        runner: resolvedAutoRunner,
+        approvedHighRisk: resolvedApproval
+      });
+    };
 
     pi.registerCommand("workflow-status", {
       description: "Show whether the orchestration package is loaded.",
@@ -423,7 +480,11 @@ export function createPiExtension({
           });
           ctx.ui.notify(`auto workflow ${execution.status}: ${execution.stopReason}`, "warning");
           ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
-          return execution;
+          return {
+            ...execution,
+            text: formatWorkflowExecution(execution),
+            details: execution
+          };
         }
 
         const execution = await runAutoWorkflow(input, {
@@ -437,39 +498,51 @@ export function createPiExtension({
         ctx.ui.notify(notification, execution.status === "success" ? "info" : "warning");
         ctx.ui.setStatus("workflow", `${execution.status}: ${execution.workflow.workflowId}`);
 
-        return execution;
+        return {
+          ...execution,
+          text: formatWorkflowExecution(execution),
+          details: execution
+        };
       }
     });
 
     pi.registerCommand("run-program", {
       description: "Execute an ExecutionProgram contract-by-contract with a configured contract executor.",
       handler: async (args, ctx) => {
-        const { program } = parseRunProgramArgs(args);
+        const { program, approvedHighRisk } = parseRunProgramArgs(args);
         const runJournal = await runExecutionProgram(program, {
-          contractExecutor: resolvedContractExecutor,
+          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk }),
           runStore
         });
 
         ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");
         ctx.ui.setStatus("workflow", `${runJournal.status}: ${runJournal.programId}`);
 
-        return runJournal;
+        return {
+          ...runJournal,
+          text: formatProgramRunJournal(runJournal),
+          details: runJournal
+        };
       }
     });
 
     pi.registerCommand("resume-program", {
       description: "Resume a persisted ExecutionProgram run from local run-state snapshots.",
       handler: async (args, ctx) => {
-        const { programId } = parseResumeProgramArgs(args);
+        const { programId, approvedHighRisk } = parseResumeProgramArgs(args);
         const runJournal = await resumeExecutionProgram(programId, {
-          contractExecutor: resolvedContractExecutor,
+          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk }),
           runStore
         });
 
         ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");
         ctx.ui.setStatus("workflow", `${runJournal.status}: ${runJournal.programId}`);
 
-        return runJournal;
+        return {
+          ...runJournal,
+          text: formatProgramRunJournal(runJournal),
+          details: runJournal
+        };
       }
     });
 
@@ -634,7 +707,12 @@ export function createPiExtension({
       parameters: runExecutionProgramSchema,
       async execute(_toolCallId, params) {
         const runJournal = await runExecutionProgram(params.program, {
-          contractExecutor: resolvedContractExecutor,
+          contractExecutor: createExecutionProgramExecutor({
+            approvedHighRisk: parseBooleanFlag(params.approvedHighRisk, {
+              flagName: "approvedHighRisk",
+              defaultValue: false
+            })
+          }),
           runStore
         });
 
@@ -652,7 +730,12 @@ export function createPiExtension({
       parameters: resumeExecutionProgramSchema,
       async execute(_toolCallId, params) {
         const runJournal = await resumeExecutionProgram(params.programId, {
-          contractExecutor: resolvedContractExecutor,
+          contractExecutor: createExecutionProgramExecutor({
+            approvedHighRisk: parseBooleanFlag(params.approvedHighRisk, {
+              flagName: "approvedHighRisk",
+              defaultValue: false
+            })
+          }),
           runStore
         });
 

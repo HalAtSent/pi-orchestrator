@@ -1,7 +1,8 @@
 import { createWorkerResult } from "./contracts.js";
+import { safeClone } from "./safe-clone.js";
 
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  return safeClone(value);
 }
 
 function blockedResult(role) {

@@ -23,6 +23,27 @@ function unique(values) {
   return [...new Set(values)];
 }
 
+function findProtectedAllowlistPaths(allowedFiles) {
+  return unique(allowedFiles.filter((path) => isProtectedPath(path)));
+}
+
+function findSharedScopePaths(allowedFiles, forbiddenFiles) {
+  const forbiddenSet = new Set(forbiddenFiles);
+  return unique(allowedFiles.filter((path) => forbiddenSet.has(path)));
+}
+
+function validateScopeConfig({ allowedFiles = [], forbiddenFiles = [] }) {
+  const protectedAllowlistPaths = findProtectedAllowlistPaths(allowedFiles);
+  if (protectedAllowlistPaths.length > 0) {
+    throw new Error(`allowedFiles contains protected path(s): ${protectedAllowlistPaths.join(", ")}`);
+  }
+
+  const sharedScopePaths = findSharedScopePaths(allowedFiles, forbiddenFiles);
+  if (sharedScopePaths.length > 0) {
+    throw new Error(`allowedFiles and forbiddenFiles must not contain the same path(s): ${sharedScopePaths.join(", ")}`);
+  }
+}
+
 export function makeRoleSequence(risk) {
   if (risk === "high") {
     return ["explorer", "implementer", "reviewer", "verifier"];
@@ -92,11 +113,12 @@ export function buildTaskPacket({
   risk,
   contextFiles = []
 }) {
-  const normalizedAllowedFiles = normalizeFiles(allowedFiles);
-  const normalizedForbiddenFiles = unique([
-    ...normalizeFiles(forbiddenFiles),
-    ...normalizedAllowedFiles.filter((path) => isProtectedPath(path))
-  ]);
+  const normalizedAllowedFiles = unique(normalizeFiles(allowedFiles));
+  const normalizedForbiddenFiles = unique(normalizeFiles(forbiddenFiles));
+  validateScopeConfig({
+    allowedFiles: normalizedAllowedFiles,
+    forbiddenFiles: normalizedForbiddenFiles
+  });
   const packetId = `${role}-${slugify(goal) || "task"}`;
 
   return createTaskPacket({
@@ -121,7 +143,12 @@ export function createInitialWorkflow({
   forbiddenFiles = [],
   contextFiles = []
 }) {
-  const normalizedAllowedFiles = normalizeFiles(allowedFiles);
+  const normalizedAllowedFiles = unique(normalizeFiles(allowedFiles));
+  const normalizedForbiddenFiles = unique(normalizeFiles(forbiddenFiles));
+  validateScopeConfig({
+    allowedFiles: normalizedAllowedFiles,
+    forbiddenFiles: normalizedForbiddenFiles
+  });
   const risk = classifyRisk({ goal, allowedFiles: normalizedAllowedFiles });
   const roleSequence = makeRoleSequence(risk);
   const humanGate = requiresHumanGate({ goal, allowedFiles: normalizedAllowedFiles });
@@ -131,7 +158,7 @@ export function createInitialWorkflow({
     goal,
     role,
     allowedFiles: normalizedAllowedFiles,
-    forbiddenFiles,
+    forbiddenFiles: normalizedForbiddenFiles,
     parentTaskId: workflowId,
     risk,
     contextFiles

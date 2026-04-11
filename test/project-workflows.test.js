@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 
 import {
   auditProject,
@@ -33,7 +33,57 @@ test("blueprint freezes repository layout and execution profile", () => {
   assert.equal(blueprint.selectedAlternativeId, "control-plane-first");
   assert.equal(blueprint.executionProfile.autonomyMode, "autonomous");
   assert.equal(blueprint.executionProfile.humanGatePolicy, "preapprove-high-risk-at-launch");
-  assert.ok(blueprint.modules.some((module) => module.id === "control-plane"));
+  assert.equal(blueprint.executionProfile.maxParallelWorkers, 1);
+  assert.deepEqual(blueprint.modules.map((module) => module.id), [
+    "control-plane",
+    "pi-adapter",
+    "worker-plane",
+    "verification-surface"
+  ]);
+  const modulePathsById = Object.fromEntries(
+    blueprint.modules.map((module) => [module.id, module.paths])
+  );
+  assert.deepEqual(modulePathsById["control-plane"], [
+    "src/contracts.js",
+    "src/boolean-flags.js",
+    "src/helpers.js",
+    "src/orchestrator.js",
+    "src/path-scopes.js",
+    "src/policies.js",
+    "src/program-compiler.js",
+    "src/program-contract-executor.js",
+    "src/program-runner.js",
+    "src/project-contracts.js",
+    "src/project-workflows.js",
+    "src/auto-workflow.js",
+    "src/run-store.js",
+    "src/safe-clone.js",
+    "src/schema.js"
+  ]);
+  assert.deepEqual(modulePathsById["pi-adapter"], [
+    "src/pi-adapter.js",
+    "src/pi-extension.js",
+    "src/pi-runtime-diagnostics.js"
+  ]);
+  assert.deepEqual(modulePathsById["worker-plane"], [
+    "src/auto-backend-runner.js",
+    "src/process-model-probe.js",
+    "src/pi-spawn.js",
+    "src/pi-worker-runner.js",
+    "src/process-worker-backend.js",
+    "src/spike-worker-backend.js",
+    "src/worker-runner.js",
+    "skills/"
+  ]);
+  assert.deepEqual(modulePathsById["verification-surface"], ["test/", "examples/", "docs/"]);
+  const mappedSourcePaths = [...new Set(
+    blueprint.modules.flatMap((module) => module.paths.filter((path) => path.startsWith("src/") && path.endsWith(".js")))
+  )].sort();
+  const currentSourcePaths = readdirSync(new URL("../src/", import.meta.url), { withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".js"))
+    .map((entry) => `src/${entry.name}`)
+    .sort();
+  assert.deepEqual(mappedSourcePaths, currentSourcePaths);
   assert.ok(blueprint.repositoryLayout.some((entry) => entry.path === "skills/"));
 });
 
@@ -48,6 +98,7 @@ test("blueprint preserves guarded autonomy when compiled from a proposal set", (
   assert.equal(blueprint.brief.autonomyMode, "guarded");
   assert.equal(blueprint.executionProfile.autonomyMode, "guarded");
   assert.equal(blueprint.executionProfile.humanGatePolicy, "interactive-high-risk-gate");
+  assert.equal(blueprint.executionProfile.maxParallelWorkers, 1);
 });
 
 test("slice returns an execution program with ordered milestone contracts", () => {

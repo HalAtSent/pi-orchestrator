@@ -330,21 +330,50 @@ function modulesFor(projectType) {
         id: "control-plane",
         name: "Control Plane",
         purpose: "Owns planning, policy, orchestration, and integration decisions.",
-        paths: ["src/project-contracts.js", "src/project-workflows.js", "src/orchestrator.js", "src/auto-workflow.js", "src/policies.js"],
+        paths: [
+          "src/contracts.js",
+          "src/boolean-flags.js",
+          "src/helpers.js",
+          "src/orchestrator.js",
+          "src/path-scopes.js",
+          "src/policies.js",
+          "src/program-compiler.js",
+          "src/program-contract-executor.js",
+          "src/program-runner.js",
+          "src/project-contracts.js",
+          "src/project-workflows.js",
+          "src/auto-workflow.js",
+          "src/run-store.js",
+          "src/safe-clone.js",
+          "src/schema.js"
+        ],
         dependsOn: []
       },
       {
         id: "pi-adapter",
         name: "Pi Adapter",
         purpose: "Exposes the control plane through Pi commands and tools.",
-        paths: ["src/pi-extension.js"],
+        paths: [
+          "src/pi-adapter.js",
+          "src/pi-extension.js",
+          "src/pi-runtime-diagnostics.js"
+        ],
         dependsOn: ["control-plane"]
       },
       {
         id: "worker-plane",
         name: "Worker Plane",
         purpose: "Hosts bounded worker runner abstractions and leaf skills.",
-        paths: ["src/worker-runner.js", "skills/"],
+        paths: [
+          "src/auto-backend-runner.js",
+          "src/process-model-probe.js",
+          "src/pi-spawn.js",
+          "src/pi-worker-runner.js",
+          "src/process-worker-backend.js",
+          "src/spike-worker-backend.js",
+          "src/worker-runner.js",
+          "skills/"
+        ],
         dependsOn: ["control-plane"]
       },
       {
@@ -381,7 +410,7 @@ function executionProfileFor(brief) {
     humanGatePolicy: brief.autonomyMode === "autonomous" ? "preapprove-high-risk-at-launch" : "interactive-high-risk-gate",
     verificationDepth: "targeted-by-default",
     maxRepairLoops: 1,
-    maxParallelWorkers: brief.projectType === "automation-package" ? 2 : 3
+    maxParallelWorkers: 1
   };
 }
 

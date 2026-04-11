@@ -1,7 +1,13 @@
 import { RISK_LEVELS, createTaskPacket } from "./contracts.js";
 import { buildTaskPacket, makeRoleSequence } from "./orchestrator.js";
-import { requiresHumanGate } from "./policies.js";
+import { classifyRisk } from "./policies.js";
 import { createCompiledContractExecutionPlan } from "./project-contracts.js";
+
+const RISK_RANK = Object.freeze({
+  low: 0,
+  medium: 1,
+  high: 2
+});
 
 function assert(condition, message) {
   if (!condition) {
@@ -22,6 +28,12 @@ function unique(values) {
   return [...new Set(values)];
 }
 
+function maxRisk(left, right) {
+  assert(RISK_LEVELS.includes(left), `risk must be one of: ${RISK_LEVELS.join(", ")}`);
+  assert(RISK_LEVELS.includes(right), `risk must be one of: ${RISK_LEVELS.join(", ")}`);
+  return RISK_RANK[left] >= RISK_RANK[right] ? left : right;
+}
+
 function slugify(value) {
   return value
     .toLowerCase()
@@ -35,11 +47,17 @@ function validateExecutionContract(contract) {
   assert(typeof contract.id === "string" && contract.id.trim().length > 0, "contract.id must be a non-empty string");
   assert(typeof contract.goal === "string" && contract.goal.trim().length > 0, "contract.goal must be a non-empty string");
   assert(RISK_LEVELS.includes(contract.risk), `contract.risk must be one of: ${RISK_LEVELS.join(", ")}`);
+  const scopePaths = normalizeStringArray("contract.scopePaths", contract.scopePaths)
+    .map((path) => normalizePath(path).trim());
+  assert(scopePaths.length > 0, "contract.scopePaths must contain at least one file path");
+  for (const [index, scopePath] of scopePaths.entries()) {
+    assert(scopePath.length > 0, `contract.scopePaths[${index}] must be a non-empty string`);
+  }
 
   return {
     id: contract.id.trim(),
     goal: contract.goal.trim(),
-    scopePaths: normalizeStringArray("contract.scopePaths", contract.scopePaths).map(normalizePath),
+    scopePaths,
     constraints: normalizeStringArray("contract.constraints", contract.constraints),
     nonGoals: normalizeStringArray("contract.nonGoals", contract.nonGoals),
     acceptanceChecks: normalizeStringArray("contract.acceptanceChecks", contract.acceptanceChecks),
@@ -76,7 +94,12 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
   const contract = validateExecutionContract(structuredClone(contractInput));
   const allowedFileScope = unique(contract.scopePaths);
   const normalizedContextFiles = unique(normalizeStringArray("contextFiles", contextFiles).map(normalizePath));
-  const intendedRoleSequence = makeRoleSequence(contract.risk);
+  const heuristicRisk = classifyRisk({
+    goal: contract.goal,
+    allowedFiles: allowedFileScope
+  });
+  const effectiveRisk = maxRisk(contract.risk, heuristicRisk);
+  const intendedRoleSequence = makeRoleSequence(effectiveRisk);
   const boundedGoal = deriveBoundedGoal(contract);
   const workflowId = `contract-${slugify(contract.id) || "task"}`;
   const packets = intendedRoleSequence.map((role) => mergePacketPolicy(
@@ -86,7 +109,7 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
       allowedFiles: allowedFileScope,
       forbiddenFiles: [],
       parentTaskId: workflowId,
-      risk: contract.risk,
+      risk: effectiveRisk,
       contextFiles: normalizedContextFiles
     }),
     contract
@@ -99,7 +122,8 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
     allowedFileScope,
     contextFiles: normalizedContextFiles,
     intendedRoleSequence,
-    risk: contract.risk,
+    risk: effectiveRisk,
+    declaredRisk: contract.risk,
     constraints: [...contract.constraints],
     nonGoals: [...contract.nonGoals],
     acceptanceChecks: [...contract.acceptanceChecks],
@@ -107,11 +131,8 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
     workflow: {
       workflowId,
       goal: boundedGoal,
-      risk: contract.risk,
-      humanGate: contract.risk === "high" || requiresHumanGate({
-        goal: boundedGoal,
-        allowedFiles: allowedFileScope
-      }),
+      risk: effectiveRisk,
+      humanGate: effectiveRisk === "high",
       roleSequence: intendedRoleSequence,
       packets
     }

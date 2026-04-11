@@ -39,7 +39,7 @@ test("compiler preserves contract scope, constraints, and contract guards", () =
   }
 });
 
-test("compiler derives role sequence from contract risk policy", () => {
+test("compiler derives role sequence from effective risk policy", () => {
   const contract = {
     id: "risk-high-contract",
     goal: "Apply a schema migration for billing events",
@@ -58,4 +58,96 @@ test("compiler derives role sequence from contract risk policy", () => {
   assert.deepEqual(compiled.intendedRoleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
   assert.deepEqual(compiled.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
   assert.equal(compiled.workflow.humanGate, true);
+});
+
+test("compiler does not downgrade declared high risk when heuristics are low", () => {
+  const contract = {
+    id: "declared-high-benign-contract",
+    goal: "Rename a helper constant in one file",
+    scopePaths: ["src/helpers.js"],
+    constraints: ["Do not widen scope."],
+    nonGoals: ["Do not edit files outside src/helpers.js."],
+    acceptanceChecks: ["Change remains scoped and reviewable."],
+    stopConditions: ["Stop if another file needs edits."],
+    deliverables: ["Renamed helper constant"],
+    risk: "high"
+  };
+
+  const compiled = compileExecutionContract(contract);
+
+  assert.equal(compiled.declaredRisk, "high");
+  assert.equal(compiled.risk, "high");
+  assert.deepEqual(compiled.intendedRoleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  assert.equal(compiled.workflow.risk, "high");
+  assert.deepEqual(compiled.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  assert.equal(compiled.workflow.humanGate, true);
+  for (const packet of compiled.workflow.packets) {
+    assert.equal(packet.risk, "high");
+  }
+});
+
+test("compiler ignores declared low risk when scope is sensitive", () => {
+  const contract = {
+    id: "declared-low-sensitive-scope",
+    goal: "Update deployment plan inputs",
+    scopePaths: ["infra/main.tf"],
+    constraints: ["Do not widen file scope."],
+    nonGoals: ["Do not touch app source files."],
+    acceptanceChecks: ["Plan changes are explicit and reviewable."],
+    stopConditions: ["Stop if scope expansion is needed."],
+    deliverables: ["Updated deployment plan"],
+    risk: "low"
+  };
+
+  const compiled = compileExecutionContract(contract);
+
+  assert.equal(compiled.declaredRisk, "low");
+  assert.equal(compiled.risk, "high");
+  assert.deepEqual(compiled.intendedRoleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  assert.equal(compiled.workflow.risk, "high");
+  assert.deepEqual(compiled.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  assert.equal(compiled.workflow.humanGate, true);
+  for (const packet of compiled.workflow.packets) {
+    assert.equal(packet.risk, "high");
+  }
+});
+
+test("compiler rejects contracts with an empty scopePaths allowlist", () => {
+  const contract = {
+    id: "empty-scope-contract",
+    goal: "Rename a helper constant in one file",
+    scopePaths: [],
+    constraints: ["Do not widen scope."],
+    nonGoals: ["Do not edit files outside the contract scope."],
+    acceptanceChecks: ["Change remains scoped and reviewable."],
+    stopConditions: ["Stop if another file needs edits."],
+    deliverables: ["Renamed helper constant"],
+    risk: "low"
+  };
+
+  assert.throws(
+    () => compileExecutionContract(contract),
+    /scopePaths must contain at least one file path/i
+  );
+});
+
+test("compiler always emits packets with non-empty allowedFiles", () => {
+  const contract = {
+    id: "non-empty-allowed-files-contract",
+    goal: "Rename helper constant in one file",
+    scopePaths: ["src/helpers.js"],
+    constraints: ["Do not widen scope."],
+    nonGoals: ["Do not edit files outside src/helpers.js."],
+    acceptanceChecks: ["Change remains scoped and reviewable."],
+    stopConditions: ["Stop if another file needs edits."],
+    deliverables: ["Renamed helper constant"],
+    risk: "low"
+  };
+
+  const compiled = compileExecutionContract(contract);
+
+  assert.equal(compiled.workflow.packets.length > 0, true);
+  for (const packet of compiled.workflow.packets) {
+    assert.equal(packet.allowedFiles.length > 0, true);
+  }
 });

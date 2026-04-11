@@ -1,4 +1,7 @@
 import { buildTaskPacket, createInitialWorkflow } from "./orchestrator.js";
+import { parseBooleanFlag } from "./boolean-flags.js";
+import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import { safeClone } from "./safe-clone.js";
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 
@@ -9,7 +12,7 @@ function assert(condition, message) {
 }
 
 function normalizePath(path) {
-  return path.replace(/\\/g, "/");
+  return normalizeScopedPath(path);
 }
 
 function unique(values) {
@@ -17,7 +20,7 @@ function unique(values) {
 }
 
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  return safeClone(value);
 }
 
 function coerceGoal(value) {
@@ -62,7 +65,10 @@ function normalizeWorkflowInput(input) {
     allowedFiles,
     forbiddenFiles: Array.isArray(input.forbiddenFiles) ? input.forbiddenFiles.map(normalizePath) : [],
     contextFiles: Array.isArray(input.contextFiles) ? input.contextFiles.map(normalizePath) : [],
-    approvedHighRisk: Boolean(input.approvedHighRisk),
+    approvedHighRisk: parseBooleanFlag(input.approvedHighRisk, {
+      flagName: "approvedHighRisk",
+      defaultValue: false
+    }),
     maxRepairLoops: input.maxRepairLoops ?? 1
   };
 }
@@ -77,7 +83,10 @@ function normalizePlannedWorkflowInput(input) {
 
   return {
     workflow: clone(input.workflow),
-    approvedHighRisk: Boolean(input.approvedHighRisk),
+    approvedHighRisk: parseBooleanFlag(input.approvedHighRisk, {
+      flagName: "approvedHighRisk",
+      defaultValue: false
+    }),
     maxRepairLoops: input.maxRepairLoops ?? 1,
     context: input.context && typeof input.context === "object" && !Array.isArray(input.context)
       ? clone(input.context)
@@ -106,6 +115,36 @@ function sanitizePriorResults(runs) {
   }));
 }
 
+function toErrorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function createExecutionFailureResult({
+  packet,
+  failureKind,
+  reason,
+  priorResult = null
+}) {
+  const priorCommands = Array.isArray(priorResult?.commandsRun) ? priorResult.commandsRun : [];
+  const priorEvidence = Array.isArray(priorResult?.evidence) ? priorResult.evidence : [];
+  const priorQuestions = Array.isArray(priorResult?.openQuestions) ? priorResult.openQuestions : [];
+
+  return {
+    status: "failed",
+    summary: `${packet.role} ${failureKind} failed safely: ${reason}`,
+    changedFiles: [],
+    commandsRun: clone(priorCommands),
+    evidence: unique([
+      ...priorEvidence,
+      `${failureKind}_failure: ${reason}`
+    ]),
+    openQuestions: unique([
+      ...priorQuestions,
+      `Inspect ${packet.role} packet ${packet.id} for ${failureKind} violations.`
+    ])
+  };
+}
+
 function buildRunContext({ workflow, runs, repairCount, reviewResult, baseContext = {} }) {
   return {
     ...clone(baseContext),
@@ -126,16 +165,22 @@ function buildRunContext({ workflow, runs, repairCount, reviewResult, baseContex
 
 function validateChangedFiles(packet, result) {
   const changedFiles = result.changedFiles.map(normalizePath);
-  const allowedFiles = new Set(packet.allowedFiles.map(normalizePath));
-  const forbiddenFiles = new Set(packet.forbiddenFiles.map(normalizePath));
+  const allowedFiles = packet.allowedFiles.map(normalizePath);
+  const forbiddenFiles = packet.forbiddenFiles.map(normalizePath);
 
   if (READ_ONLY_ROLES.has(packet.role) && changedFiles.length > 0) {
-    throw new Error(`${packet.role} is read-only and must not report changed files`);
+    throw new Error(`${packet.role} is read-only and must not report changed files: ${changedFiles.join(", ")}`);
   }
 
   for (const changedFile of changedFiles) {
-    assert(allowedFiles.has(changedFile), `${packet.role} reported a file outside its allowlist: ${changedFile}`);
-    assert(!forbiddenFiles.has(changedFile), `${packet.role} reported a forbidden file: ${changedFile}`);
+    assert(
+      allowedFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry)),
+      `${packet.role} reported a file outside its allowlist: ${changedFile}`
+    );
+    assert(
+      !forbiddenFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry)),
+      `${packet.role} reported a forbidden file: ${changedFile}`
+    );
   }
 }
 
@@ -156,9 +201,28 @@ async function executePacket({
     reviewResult,
     baseContext
   });
-  const result = await runner.run(packet, context);
+  let result;
 
-  validateChangedFiles(packet, result);
+  try {
+    result = await runner.run(packet, context);
+  } catch (error) {
+    result = createExecutionFailureResult({
+      packet,
+      failureKind: "runner",
+      reason: toErrorMessage(error)
+    });
+  }
+
+  try {
+    validateChangedFiles(packet, result);
+  } catch (error) {
+    result = createExecutionFailureResult({
+      packet,
+      failureKind: "validation",
+      reason: toErrorMessage(error),
+      priorResult: result
+    });
+  }
 
   const run = {
     packet: clone(packet),
@@ -337,6 +401,7 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
 
 export async function runAutoWorkflow(input, { runner } = {}) {
   let normalizedInput;
+  let workflow;
 
   try {
     normalizedInput = normalizeWorkflowInput(input);
@@ -348,12 +413,20 @@ export async function runAutoWorkflow(input, { runner } = {}) {
     });
   }
 
-  const workflow = createInitialWorkflow({
-    goal: normalizedInput.goal,
-    allowedFiles: normalizedInput.allowedFiles,
-    forbiddenFiles: normalizedInput.forbiddenFiles,
-    contextFiles: normalizedInput.contextFiles
-  });
+  try {
+    workflow = createInitialWorkflow({
+      goal: normalizedInput.goal,
+      allowedFiles: normalizedInput.allowedFiles,
+      forbiddenFiles: normalizedInput.forbiddenFiles,
+      contextFiles: normalizedInput.contextFiles
+    });
+  } catch (error) {
+    return blockedInputExecution({
+      goal: normalizedInput.goal,
+      maxRepairLoops: normalizedInput.maxRepairLoops,
+      stopReason: error instanceof Error ? error.message : String(error)
+    });
+  }
 
   return runPlannedWorkflow({
     workflow,

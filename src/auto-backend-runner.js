@@ -1,3 +1,6 @@
+import { safeClone } from "./safe-clone.js";
+import { RISK_LEVELS } from "./contracts.js";
+
 const AUTO_BACKEND_MODE_PI_RUNTIME = "pi_runtime";
 const AUTO_BACKEND_MODE_LOW_RISK_PROCESS_IMPLEMENTER = "low_risk_process_implementer";
 const AUTO_BACKEND_MODE_PROCESS_SUBAGENTS = "process_subagents";
@@ -15,7 +18,7 @@ function assert(condition, message) {
 }
 
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  return safeClone(value);
 }
 
 function normalizeMode(mode) {
@@ -36,6 +39,22 @@ function validateMode(mode) {
   );
 }
 
+function isValidRiskLevel(value) {
+  return typeof value === "string" && RISK_LEVELS.includes(value);
+}
+
+function effectiveRisk(packet, context) {
+  if (isValidRiskLevel(packet?.risk)) {
+    return packet.risk;
+  }
+
+  if (isValidRiskLevel(context?.risk)) {
+    return context.risk;
+  }
+
+  return null;
+}
+
 function shouldUseProcessBackend({ mode, packet, context }) {
   if (mode === AUTO_BACKEND_MODE_PROCESS_SUBAGENTS) {
     return ["explorer", "implementer", "reviewer", "verifier"].includes(packet?.role);
@@ -45,7 +64,7 @@ function shouldUseProcessBackend({ mode, packet, context }) {
     return false;
   }
 
-  return context?.risk === "low" && (packet?.role === "implementer" || packet?.role === "verifier");
+  return effectiveRisk(packet, context) === "low" && (packet?.role === "implementer" || packet?.role === "verifier");
 }
 
 export function createAutoBackendRunner({

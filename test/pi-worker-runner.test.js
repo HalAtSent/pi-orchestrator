@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createTaskPacket } from "../src/contracts.js";
+import { createTaskPacket, validateWorkerResult } from "../src/contracts.js";
 import { runAutoWorkflow } from "../src/auto-workflow.js";
 import { createFileClaimRegistry, createPiWorkerRunner } from "../src/pi-worker-runner.js";
 
@@ -195,6 +195,40 @@ test("adapter response maps back into a valid worker result", async () => {
   assert.deepEqual(result.openQuestions, []);
 });
 
+test("runner handles non-cloneable context values without crashing", async () => {
+  let capturedRuntimeContext;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker(request, runtimeContext) {
+        capturedRuntimeContext = runtimeContext;
+        return successResultForRequest(request);
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer"), {
+    workflowId: "workflow-with-function-context",
+    callbacks: {
+      onComplete() {
+        return "done";
+      }
+    }
+  });
+
+  validateWorkerResult(result);
+  assert.equal(result.status, "success");
+
+  const calls = runner.getCalls();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].context.workflowId, "workflow-with-function-context");
+  assert.equal(typeof calls[0].context.callbacks.onComplete, "string");
+  assert.match(calls[0].context.callbacks.onComplete, /uncloneable/i);
+
+  assert.equal(capturedRuntimeContext.context.workflowId, "workflow-with-function-context");
+  assert.equal(typeof capturedRuntimeContext.context.callbacks.onComplete, "string");
+  assert.match(capturedRuntimeContext.context.callbacks.onComplete, /uncloneable/i);
+});
+
 test("runner rejects write claims for read-only roles", async () => {
   const runner = createPiWorkerRunner({
     adapter: {
@@ -227,6 +261,66 @@ test("runner rejects writer changes outside of the allowlist", async () => {
 
   assert.equal(result.status, "failed");
   assert.match(result.summary, /outside its allowlist/i);
+});
+
+test("runner accepts nested writes under a directory scope", async () => {
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker(request) {
+        return successResultForRequest(request, {
+          changedFiles: ["docs/guide.md"]
+        });
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer", {
+    allowedFiles: ["docs/"],
+    forbiddenFiles: []
+  }), {});
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.changedFiles, ["docs/guide.md"]);
+});
+
+test("claim registry blocks overlapping directory and file claims in both directions", () => {
+  const directoryFirstRegistry = createFileClaimRegistry();
+  const directoryFirstClaim = directoryFirstRegistry.claimMany(["docs/"], "writer-a");
+  assert.equal(directoryFirstClaim.ok, true);
+
+  const fileAfterDirectoryClaim = directoryFirstRegistry.claimMany(["docs/guide.md"], "writer-b");
+  assert.equal(fileAfterDirectoryClaim.ok, false);
+  assert.equal(fileAfterDirectoryClaim.conflicts[0].owner, "writer-a");
+  assert.equal(fileAfterDirectoryClaim.conflicts[0].file, "docs/");
+
+  const fileFirstRegistry = createFileClaimRegistry();
+  const fileFirstClaim = fileFirstRegistry.claimMany(["docs/guide.md"], "writer-a");
+  assert.equal(fileFirstClaim.ok, true);
+
+  const directoryAfterFileClaim = fileFirstRegistry.claimMany(["docs/"], "writer-b");
+  assert.equal(directoryAfterFileClaim.ok, false);
+  assert.equal(directoryAfterFileClaim.conflicts[0].owner, "writer-a");
+  assert.equal(directoryAfterFileClaim.conflicts[0].file, "docs/guide.md");
+});
+
+test("runner treats ./ and non-./ scoped paths as equivalent", async () => {
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker(request) {
+        return successResultForRequest(request, {
+          changedFiles: ["src/helpers.js"]
+        });
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer", {
+    allowedFiles: ["./src/helpers.js"],
+    forbiddenFiles: ["./src/forbidden.js"]
+  }), {});
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.changedFiles, ["src/helpers.js"]);
 });
 
 test("runAutoWorkflow executes through the Pi-backed runner with a fake adapter", async () => {

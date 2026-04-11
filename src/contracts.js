@@ -26,8 +26,11 @@ function assertString(name, value) {
 
 function assertStringArray(name, value) {
   assert(Array.isArray(value), `${name} must be an array`);
-  for (const item of value) {
-    assert(typeof item === "string", `${name} must only contain strings`);
+  for (const [index, item] of value.entries()) {
+    assert(
+      typeof item === "string" && item.trim().length > 0,
+      `${name}[${index}] must be a non-empty string`
+    );
   }
 }
 

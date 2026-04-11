@@ -27,6 +27,26 @@ async function withTempDir(prefix, callback) {
   }
 }
 
+function createPersistedRunJournal(program, {
+  status,
+  stopReason,
+  contractRuns,
+  completedContractIds
+}) {
+  const completedSet = new Set(completedContractIds);
+
+  return {
+    programId: program.id,
+    status,
+    stopReason,
+    contractRuns,
+    completedContractIds,
+    pendingContractIds: program.contracts
+      .map((contract) => contract.id)
+      .filter((contractId) => !completedSet.has(contractId))
+  };
+}
+
 test("program runner executes contracts in dependency order", async () => {
   const program = buildProgram();
   const shuffled = structuredClone(program);
@@ -216,6 +236,96 @@ test("resumeExecutionProgram converts thrown contract executor errors into a blo
   });
 });
 
+test("resumeExecutionProgram does not rerun contracts for a persisted failed journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const failedJournal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: contract.id === "freeze-lifecycle-contracts" ? "failed" : "success",
+        summary: `Result for ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(failedJournal.status, "failed");
+
+    const attemptedContracts = [];
+    const resumedJournal = await resumeExecutionProgram(program.id, {
+      contractExecutor: async (contract) => {
+        attemptedContracts.push(contract.id);
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(resumedJournal.status, "blocked");
+    assert.match(resumedJournal.stopReason, /cannot be resumed/i);
+    assert.match(resumedJournal.stopReason, /failed/i);
+    assert.equal(attemptedContracts.length, 0);
+    assert.equal(resumedJournal.contractRuns.length, failedJournal.contractRuns.length);
+    assert.deepEqual(resumedJournal.completedContractIds, failedJournal.completedContractIds);
+    assert.deepEqual(resumedJournal.pendingContractIds, failedJournal.pendingContractIds);
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "failed");
+    assert.equal(persisted.runJournal.status, "failed");
+  });
+});
+
+test("resumeExecutionProgram does not rerun contracts for a persisted blocked journal", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const blockedJournal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: contract.id === "freeze-lifecycle-contracts" ? "blocked" : "success",
+        summary: `Result for ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(blockedJournal.status, "blocked");
+
+    const attemptedContracts = [];
+    const resumedJournal = await resumeExecutionProgram(program.id, {
+      contractExecutor: async (contract) => {
+        attemptedContracts.push(contract.id);
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(resumedJournal.status, "blocked");
+    assert.match(resumedJournal.stopReason, /cannot be resumed/i);
+    assert.match(resumedJournal.stopReason, /blocked/i);
+    assert.equal(attemptedContracts.length, 0);
+    assert.equal(resumedJournal.contractRuns.length, blockedJournal.contractRuns.length);
+    assert.deepEqual(resumedJournal.completedContractIds, blockedJournal.completedContractIds);
+    assert.deepEqual(resumedJournal.pendingContractIds, blockedJournal.pendingContractIds);
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.status, "blocked");
+  });
+});
+
 test("program runner blocks execution when a dependency id is missing", async () => {
   const program = buildProgram();
   const broken = structuredClone(program);
@@ -264,34 +374,30 @@ test("program runner blocks execution when dependencies contain a cycle", async 
   assert.equal(calls.length, 0);
 });
 
-test("program runner persists run state and resumes from the next pending contract", async () => {
+test("resumeExecutionProgram resumes a persisted running journal from the next pending contract", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const program = buildProgram();
     const runStore = createRunStore({ rootDir });
+    const firstContract = program.contracts[0];
 
-    const firstJournal = await runExecutionProgram(program, {
-      contractExecutor: async (contract) => {
-        if (contract.id === "freeze-lifecycle-contracts") {
-          return {
-            status: "blocked",
-            summary: "Waiting for human decision before continuing.",
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: createPersistedRunJournal(program, {
+        status: "running",
+        stopReason: null,
+        contractRuns: [
+          {
+            contractId: firstContract.id,
+            status: "success",
+            summary: `Executed ${firstContract.id}.`,
             evidence: [],
             openQuestions: []
-          };
-        }
-
-        return {
-          status: "success",
-          summary: `Executed ${contract.id}.`,
-          evidence: [],
-          openQuestions: []
-        };
-      },
-      runStore
+          }
+        ],
+        completedContractIds: [firstContract.id]
+      })
     });
-
-    assert.equal(firstJournal.status, "blocked");
-    assert.deepEqual(firstJournal.completedContractIds, ["bootstrap-package"]);
 
     const resumedContracts = [];
     const resumedJournal = await resumeExecutionProgram(program.id, {

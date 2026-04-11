@@ -1,4 +1,6 @@
 import { createWorkerResult, validateTaskPacket } from "./contracts.js";
+import { isPathWithinScope, normalizeScopedPath, scopesOverlap } from "./path-scopes.js";
+import { safeClone } from "./safe-clone.js";
 
 const READ_ONLY_ACCESS = "read_only";
 const WRITE_ACCESS = "write";
@@ -37,11 +39,7 @@ function assert(condition, message) {
 }
 
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
-}
-
-function normalizePath(path) {
-  return String(path).replace(/\\/g, "/");
+  return safeClone(value);
 }
 
 function unique(values) {
@@ -49,7 +47,7 @@ function unique(values) {
 }
 
 function normalizeFileList(files = []) {
-  return unique(files.map((path) => normalizePath(path)));
+  return unique(files.map((path) => normalizeScopedPath(path)));
 }
 
 function normalizePacket(packet) {
@@ -106,16 +104,18 @@ function isWriteRole(roleProfile) {
 
 function validateResultWritePolicy({ packet, roleProfile, workerResult }) {
   const normalizedChangedFiles = normalizeFileList(workerResult.changedFiles);
-  const allowedFiles = new Set(packet.allowedFiles);
-  const forbiddenFiles = new Set(packet.forbiddenFiles);
+  const allowedScopes = packet.allowedFiles;
+  const forbiddenScopes = packet.forbiddenFiles;
 
   if (!isWriteRole(roleProfile) && normalizedChangedFiles.length > 0) {
     throw new Error(`${packet.role} is read-only and must not report changed files`);
   }
 
   for (const changedFile of normalizedChangedFiles) {
-    assert(allowedFiles.has(changedFile), `${packet.role} reported a file outside its allowlist: ${changedFile}`);
-    assert(!forbiddenFiles.has(changedFile), `${packet.role} reported a forbidden file: ${changedFile}`);
+    const withinAllowedScope = allowedScopes.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    const withinForbiddenScope = forbiddenScopes.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    assert(withinAllowedScope, `${packet.role} reported a file outside its allowlist: ${changedFile}`);
+    assert(!withinForbiddenScope, `${packet.role} reported a forbidden file: ${changedFile}`);
   }
 
   return createWorkerResult({
@@ -178,12 +178,17 @@ export function createFileClaimRegistry() {
       const conflicts = [];
 
       for (const file of normalizedFiles) {
-        const existingOwner = claims.get(file);
-        if (existingOwner && existingOwner !== normalizedOwner) {
-          conflicts.push({
-            file,
-            owner: existingOwner
-          });
+        for (const [claimedScope, existingOwner] of claims.entries()) {
+          if (existingOwner === normalizedOwner) {
+            continue;
+          }
+
+          if (scopesOverlap(file, claimedScope)) {
+            conflicts.push({
+              file: claimedScope,
+              owner: existingOwner
+            });
+          }
         }
       }
 
@@ -227,7 +232,14 @@ export function createFileClaimRegistry() {
     },
 
     getOwner(file) {
-      return claims.get(normalizePath(file)) ?? null;
+      const normalizedFile = normalizeScopedPath(file);
+      for (const [claimedScope, owner] of claims.entries()) {
+        if (scopesOverlap(normalizedFile, claimedScope)) {
+          return owner;
+        }
+      }
+
+      return null;
     },
 
     snapshot() {

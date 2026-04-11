@@ -19,6 +19,21 @@ function buildLowRiskContract(overrides = {}) {
   };
 }
 
+function buildDeclaredHighRiskContract(overrides = {}) {
+  return {
+    id: "contract-declared-high-risk",
+    goal: "Rename one local helper in a single file",
+    scopePaths: ["src/helpers.js"],
+    constraints: [],
+    nonGoals: ["Do not edit files outside src/helpers.js"],
+    acceptanceChecks: ["Changes stay inside the declared scope."],
+    stopConditions: ["Stop if additional files are required."],
+    deliverables: ["Renamed helper"],
+    risk: "high",
+    ...overrides
+  };
+}
+
 test("default program contract executor returns blocked when no worker handler exists", async () => {
   const runner = createLocalWorkerRunner();
   const executeContract = createProgramContractExecutor({ runner });
@@ -114,4 +129,71 @@ test("program contract executor threads program execution context into packet wo
   assert.equal(calls[1].context.programId, "program-smoke");
   assert.equal(calls[1].context.priorResults.at(-1).role, "implementer");
   assert.equal(calls[1].context.priorResults.at(-1).status, "success");
+});
+
+test("program contract executor supports per-invocation approvedHighRisk overrides", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "explorer",
+      result: {
+        status: "success",
+        summary: "Mapped the contract scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope files enumerated."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Applied scoped updates.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Scoped update completed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "reviewer",
+      result: {
+        status: "success",
+        summary: "Reviewed scoped updates.",
+        changedFiles: [],
+        commandsRun: ["git diff --stat"],
+        evidence: ["No findings."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification checks passed.",
+        changedFiles: [],
+        commandsRun: ["node --test --test-isolation=none"],
+        evidence: ["Verification passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({
+    runner,
+    approvedHighRisk: false
+  });
+
+  const blockedWithoutApproval = await executeContract(buildDeclaredHighRiskContract());
+  assert.equal(blockedWithoutApproval.status, "blocked");
+  assert.equal(runner.getCalls().length, 0);
+
+  const allowedWithPerCallApproval = await executeContract(buildDeclaredHighRiskContract(), {
+    approvedHighRisk: "true"
+  });
+  assert.equal(allowedWithPerCallApproval.status, "success");
+  assert.deepEqual(
+    runner.getCalls().map((call) => call.packet.role),
+    ["explorer", "implementer", "reviewer", "verifier"]
+  );
+  assert.equal(runner.getPendingStepCount(), 0);
 });

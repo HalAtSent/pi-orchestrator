@@ -5,6 +5,14 @@ import {
 } from "./project-contracts.js";
 
 const TERMINAL_STOP_STATUSES = new Set(["blocked", "failed", "repair_required"]);
+// Only journals that still represent in-progress work are resumable.
+const RUN_JOURNAL_RESUME_POLICY = Object.freeze({
+  running: "resume",
+  success: "return_existing",
+  blocked: "reject_terminal",
+  failed: "reject_terminal",
+  repair_required: "reject_terminal"
+});
 
 function assert(condition, message) {
   if (!condition) {
@@ -191,6 +199,26 @@ function createBlockedRunJournal(programId, stopReason) {
     completedContractIds: [],
     pendingContractIds: []
   });
+}
+
+function createTerminalResumeRejectedJournal(program, runJournal) {
+  const priorStopReason = runJournal.stopReason
+    ? ` Previous stop reason: ${runJournal.stopReason}`
+    : "";
+
+  return stopProgram({
+    program,
+    status: "blocked",
+    stopReason: `Persisted run cannot be resumed because status "${runJournal.status}" is terminal.${priorStopReason}`,
+    contractRuns: clone(runJournal.contractRuns),
+    completedContractIds: [...runJournal.completedContractIds]
+  });
+}
+
+function resolveRunJournalResumePolicy(runJournal) {
+  const policy = RUN_JOURNAL_RESUME_POLICY[runJournal.status];
+  assert(policy, `Unexpected run journal status: ${runJournal.status}`);
+  return policy;
 }
 
 function nextReadyContract(program, pendingContractIdSet, completedContractIdSet) {
@@ -625,8 +653,13 @@ export async function resumeExecutionProgram(programIdInput, {
     return createBlockedRunJournal(programId, `Persisted run state is inconsistent: ${resumeState.reason}`);
   }
 
-  if (runJournal.status === "success") {
+  const resumePolicy = resolveRunJournalResumePolicy(runJournal);
+  if (resumePolicy === "return_existing") {
     return runJournal;
+  }
+
+  if (resumePolicy === "reject_terminal") {
+    return createTerminalResumeRejectedJournal(program, runJournal);
   }
 
   return runProgramFromState(program, {

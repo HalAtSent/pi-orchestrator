@@ -1,4 +1,5 @@
 import { runPlannedWorkflow } from "./auto-workflow.js";
+import { parseBooleanFlag } from "./boolean-flags.js";
 import { compileExecutionContract } from "./program-compiler.js";
 
 function assert(condition, message) {
@@ -91,6 +92,10 @@ export function createProgramContractExecutor({
   assert(runner && typeof runner.run === "function", "runner.run(packet, context) is required");
   assert(typeof compiler === "function", "compiler(contract) is required");
   assert(typeof executePlannedWorkflow === "function", "executePlannedWorkflow(input, options) is required");
+  const defaultApprovedHighRisk = parseBooleanFlag(approvedHighRisk, {
+    flagName: "approvedHighRisk",
+    defaultValue: false
+  });
 
   return async function executeContract(contract, context = {}) {
     const contractId = typeof contract?.id === "string" && contract.id.trim().length > 0
@@ -112,9 +117,13 @@ export function createProgramContractExecutor({
     }
 
     try {
+      const invocationApprovedHighRisk = parseBooleanFlag(context?.approvedHighRisk, {
+        flagName: "approvedHighRisk",
+        defaultValue: defaultApprovedHighRisk
+      });
       const execution = await executePlannedWorkflow({
         workflow: compiledPlan.workflow,
-        approvedHighRisk,
+        approvedHighRisk: invocationApprovedHighRisk,
         maxRepairLoops,
         context
       }, {

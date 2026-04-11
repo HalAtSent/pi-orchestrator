@@ -5,13 +5,50 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { createTaskPacket, createWorkerResult, RESULT_STATUSES } from "./contracts.js";
+import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import {
+  createCachedProcessModelProbe,
+  PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES,
+  PROCESS_MODEL_PROBE_DEFAULT_PROVIDER
+} from "./process-model-probe.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
+import { safeClone } from "./safe-clone.js";
 
 const SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const DEFAULT_TEMP_PREFIX = "pi-orchestrator-process-worker-";
 const DEFAULT_APPLY_TEMP_PREFIX = ".pi-orchestrator-apply-";
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
+const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
+const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
+const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
+const PROCESS_PROVIDER_OPENAI_CODEX = PROCESS_MODEL_PROBE_DEFAULT_PROVIDER;
+const PROCESS_MODEL_FALLBACK = "gpt-5.4";
+const MODEL_SELECTION_DIRECT = "direct";
+const MODEL_SELECTION_FALLBACK = "fallback";
+const MODEL_SELECTION_BLOCKED = "blocked";
+const PROCESS_ROLE_PROFILES = Object.freeze({
+  explorer: Object.freeze({
+    provider: PROCESS_PROVIDER_OPENAI_CODEX,
+    preferredModel: "gpt-5.4",
+    thinking: "high"
+  }),
+  implementer: Object.freeze({
+    provider: PROCESS_PROVIDER_OPENAI_CODEX,
+    preferredModel: "gpt-5.3-codex",
+    thinking: "medium"
+  }),
+  reviewer: Object.freeze({
+    provider: PROCESS_PROVIDER_OPENAI_CODEX,
+    preferredModel: "gpt-5.4",
+    thinking: "high"
+  }),
+  verifier: Object.freeze({
+    provider: PROCESS_PROVIDER_OPENAI_CODEX,
+    preferredModel: "gpt-5.4-mini",
+    thinking: "medium"
+  })
+});
 
 function assert(condition, message) {
   if (!condition) {
@@ -20,7 +57,7 @@ function assert(condition, message) {
 }
 
 function clone(value) {
-  return value === undefined ? undefined : structuredClone(value);
+  return safeClone(value);
 }
 
 function unique(values) {
@@ -28,7 +65,7 @@ function unique(values) {
 }
 
 function normalizePath(pathValue) {
-  return String(pathValue).replace(/\\/g, "/");
+  return normalizeScopedPath(pathValue);
 }
 
 function truncate(text, maxLength = 1200) {
@@ -175,7 +212,7 @@ function createSuccessResult(summary, {
 
 function normalizeRelativeFilePath(pathValue, fieldName) {
   const raw = String(pathValue);
-  const normalized = normalizePath(raw).replace(/^\.\/+/u, "");
+  const normalized = normalizePath(raw);
   const segments = normalized.split("/");
 
   assert(normalized.length > 0, `${fieldName} entries must not be empty`);
@@ -347,6 +384,14 @@ function diffSnapshots(beforeSnapshot, afterSnapshot) {
   return files.filter((file) => beforeSnapshot.get(file) !== afterSnapshot.get(file));
 }
 
+function getReadOnlyAllowedStatusInstruction(role) {
+  return role === "reviewer"
+    ? 'Allowed statuses: "success", "repair_required", "blocked".'
+    : role === "verifier"
+      ? 'Allowed statuses: "success", "failed", "blocked".'
+      : 'Allowed statuses: "success", "blocked".';
+}
+
 function buildCodexPrompt(packet) {
   if (READ_ONLY_ROLES.has(packet.role)) {
     const roleLabel = packet.role === "explorer"
@@ -400,11 +445,7 @@ function buildCodexPrompt(packet) {
       "",
       "Return exactly one JSON object and nothing else.",
       "The JSON object must contain: status, summary, evidence, openQuestions.",
-      packet.role === "reviewer"
-        ? 'Allowed statuses: "success", "repair_required", "blocked".'
-        : packet.role === "verifier"
-          ? 'Allowed statuses: "success", "failed", "blocked".'
-          : 'Allowed statuses: "success", "blocked".'
+      getReadOnlyAllowedStatusInstruction(packet.role)
     );
     return lines.join("\n");
   }
@@ -443,6 +484,50 @@ function buildCodexPrompt(packet) {
   }
 
   lines.push("", "After applying the scoped edits, stop.");
+  return lines.join("\n");
+}
+
+function buildStrictReadOnlyRetryPrompt(packet, previousStdout) {
+  const roleLabel = packet.role === "explorer"
+    ? "explorer"
+    : packet.role === "reviewer"
+      ? "reviewer"
+      : "verifier";
+  const previousOutputSnippet = truncate(previousStdout ?? "", 600).replace(/\r?\n/gu, "\\n");
+  const lines = [
+    `You are the ${roleLabel} worker for a bounded coding task.`,
+    "Your previous response was invalid because it was not valid structured JSON.",
+    "Retry now and return exactly one JSON object only.",
+    "",
+    `Goal: ${packet.goal}`,
+    "",
+    "Hard rules:",
+    "- Do not modify any files.",
+    "- Do not delegate work and do not spawn sub-workers.",
+    "- Output must be a single raw JSON object with no markdown, prose, or code fences.",
+    "",
+    "ALLOWED_SCOPE:",
+    ...packet.allowedFiles.map((file) => `- ${file}`)
+  ];
+
+  if (packet.contextFiles.length > 0) {
+    lines.push("", "CONTEXT_FILES:", ...packet.contextFiles.map((file) => `- ${file}`));
+  }
+
+  if (packet.acceptanceChecks.length > 0) {
+    lines.push("", "ACCEPTANCE_CHECKS:", ...packet.acceptanceChecks.map((check) => `- ${check}`));
+  }
+
+  lines.push(
+    "",
+    "SCHEMA_REMINDER:",
+    '{"status":"<allowed_status>","summary":"<short summary>","evidence":["<fact>"],"openQuestions":["<optional question>"]}',
+    getReadOnlyAllowedStatusInstruction(packet.role),
+    "",
+    "PREVIOUS_INVALID_OUTPUT_SNIPPET:",
+    previousOutputSnippet.length > 0 ? previousOutputSnippet : "[empty]"
+  );
+
   return lines.join("\n");
 }
 
@@ -553,6 +638,299 @@ function inferCommandsRun(launchResult) {
   return [];
 }
 
+function normalizeProcessRoleProfiles(roleProfilesInput) {
+  assert(roleProfilesInput && typeof roleProfilesInput === "object", "roleProfiles must be an object");
+  const normalized = {};
+
+  for (const role of SUPPORTED_ROLES) {
+    const profile = roleProfilesInput[role];
+    assert(profile && typeof profile === "object", `role profile for ${role} must be an object`);
+
+    const provider = typeof profile.provider === "string" && profile.provider.trim().length > 0
+      ? profile.provider.trim()
+      : PROCESS_PROVIDER_OPENAI_CODEX;
+    const preferredModel = typeof profile.preferredModel === "string" && profile.preferredModel.trim().length > 0
+      ? profile.preferredModel.trim()
+      : PROCESS_MODEL_FALLBACK;
+    const thinking = typeof profile.thinking === "string" && profile.thinking.trim().length > 0
+      ? profile.thinking.trim()
+      : "off";
+
+    normalized[role] = Object.freeze({
+      provider,
+      preferredModel,
+      thinking
+    });
+  }
+
+  return Object.freeze(normalized);
+}
+
+function normalizeLauncherArgsBuilderOutput(value) {
+  if (value && typeof value === "object" && !Array.isArray(value) && "args" in value) {
+    const argsValue = value.args;
+    const args = Array.isArray(argsValue)
+      ? argsValue.map((entry) => String(entry))
+      : [String(argsValue)];
+
+    const launchSelection = value.launchSelection && typeof value.launchSelection === "object" && !Array.isArray(value.launchSelection)
+      ? clone(value.launchSelection)
+      : null;
+
+    return {
+      args,
+      launchSelection
+    };
+  }
+
+  if (Array.isArray(value)) {
+    return {
+      args: value.map((entry) => String(entry)),
+      launchSelection: null
+    };
+  }
+
+  return {
+    args: [String(value)],
+    launchSelection: null
+  };
+}
+
+function normalizeLaunchSelectionOverride(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const selectedProvider = typeof value.selectedProvider === "string" && value.selectedProvider.trim().length > 0
+    ? value.selectedProvider.trim()
+    : null;
+  const selectedModel = typeof value.selectedModel === "string" && value.selectedModel.trim().length > 0
+    ? value.selectedModel.trim()
+    : null;
+  const selectedThinking = typeof value.selectedThinking === "string" && value.selectedThinking.trim().length > 0
+    ? value.selectedThinking.trim()
+    : null;
+
+  if (!selectedProvider || !selectedModel || !selectedThinking) {
+    return null;
+  }
+
+  const requestedProvider = typeof value.requestedProvider === "string" && value.requestedProvider.trim().length > 0
+    ? value.requestedProvider.trim()
+    : selectedProvider;
+  const requestedModel = typeof value.requestedModel === "string" && value.requestedModel.trim().length > 0
+    ? value.requestedModel.trim()
+    : selectedModel;
+  const modelSelectionMode = typeof value.modelSelectionMode === "string" && value.modelSelectionMode.trim().length > 0
+    ? value.modelSelectionMode.trim()
+    : MODEL_SELECTION_DIRECT;
+  const modelSelectionReason = typeof value.modelSelectionReason === "string" && value.modelSelectionReason.trim().length > 0
+    ? value.modelSelectionReason.trim()
+    : "retry_reused_previous_selection";
+  const fallbackReason = typeof value.fallbackReason === "string" && value.fallbackReason.trim().length > 0
+    ? value.fallbackReason.trim()
+    : null;
+  const supportedModels = Array.isArray(value.supportedModels) && value.supportedModels.length > 0
+    ? unique(value.supportedModels.map((entry) => String(entry)))
+    : [selectedModel];
+
+  return {
+    requestedProvider,
+    requestedModel,
+    selectedProvider,
+    selectedModel,
+    selectedThinking,
+    modelSelectionMode,
+    modelSelectionReason,
+    fallbackReason,
+    supportedModels
+  };
+}
+
+function resolveRoleLaunchSelection({
+  packetRole,
+  roleProfiles,
+  fallbackModel,
+  modelProbeResult
+}) {
+  const roleProfile = roleProfiles[packetRole];
+  assert(roleProfile, `process backend blocked: role profile missing for ${packetRole}`);
+
+  const provider = roleProfile.provider;
+  const requestedModel = roleProfile.preferredModel;
+  const selectedThinking = roleProfile.thinking;
+
+  const normalizedFallbackModel = typeof fallbackModel === "string" && fallbackModel.trim().length > 0
+    ? fallbackModel.trim()
+    : PROCESS_MODEL_FALLBACK;
+
+  const supportedModels = Array.isArray(modelProbeResult?.supportedModels)
+    ? unique(modelProbeResult.supportedModels.map((model) => String(model)))
+    : [];
+  const supportedModelSet = new Set(supportedModels);
+
+  if (supportedModelSet.has(requestedModel)) {
+    return {
+      requestedProvider: provider,
+      requestedModel,
+      selectedProvider: provider,
+      selectedModel: requestedModel,
+      selectedThinking,
+      modelSelectionMode: MODEL_SELECTION_DIRECT,
+      modelSelectionReason: "preferred_model_supported",
+      fallbackReason: null,
+      supportedModels
+    };
+  }
+
+  if (supportedModelSet.has(normalizedFallbackModel)) {
+    return {
+      requestedProvider: provider,
+      requestedModel,
+      selectedProvider: provider,
+      selectedModel: normalizedFallbackModel,
+      selectedThinking,
+      modelSelectionMode: MODEL_SELECTION_FALLBACK,
+      modelSelectionReason: "preferred_model_unavailable",
+      fallbackReason: `preferred model unavailable: ${requestedModel}; fallback model selected: ${normalizedFallbackModel}`,
+      supportedModels
+    };
+  }
+
+  const blockedReason = supportedModels.length === 0
+    ? `process backend blocked: no supported models resolved for provider ${provider}`
+    : `process backend blocked: provider ${provider} does not support preferred model ${requestedModel} or fallback model ${normalizedFallbackModel}`;
+
+  throw new Error(`${blockedReason}; supported models: ${supportedModels.length === 0 ? "none" : supportedModels.join(", ")}`);
+}
+
+export function createProcessRoleArgsBuilder({
+  roleProfiles = PROCESS_ROLE_PROFILES,
+  fallbackModel = PROCESS_MODEL_FALLBACK,
+  modelProbe = createCachedProcessModelProbe({
+    providerId: PROCESS_PROVIDER_OPENAI_CODEX,
+    candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+  })
+} = {}) {
+  assert(typeof modelProbe === "function", "modelProbe(options) must be a function");
+  const normalizedRoleProfiles = normalizeProcessRoleProfiles(roleProfiles);
+  const normalizedFallbackModel = typeof fallbackModel === "string" && fallbackModel.trim().length > 0
+    ? fallbackModel.trim()
+    : PROCESS_MODEL_FALLBACK;
+
+  return async function buildProcessRoleArgs({ packet, prompt, launchSelectionOverride }) {
+    const roleProfile = normalizedRoleProfiles[packet.role];
+    assert(roleProfile, `process backend blocked: role profile missing for ${packet.role}`);
+
+    const forcedLaunchSelection = normalizeLaunchSelectionOverride(launchSelectionOverride);
+    if (forcedLaunchSelection) {
+      return {
+        args: [
+          "-p",
+          "--no-session",
+          "--provider",
+          forcedLaunchSelection.selectedProvider,
+          "--model",
+          forcedLaunchSelection.selectedModel,
+          "--thinking",
+          forcedLaunchSelection.selectedThinking,
+          prompt
+        ],
+        launchSelection: forcedLaunchSelection
+      };
+    }
+
+    const probeResult = await modelProbe({
+      providerId: roleProfile.provider,
+      candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+    });
+
+    if (probeResult?.blockedReason) {
+      throw new Error(`process backend blocked: model probe failed for provider ${roleProfile.provider} (${probeResult.blockedReason})`);
+    }
+
+    const launchSelection = resolveRoleLaunchSelection({
+      packetRole: packet.role,
+      roleProfiles: normalizedRoleProfiles,
+      fallbackModel: normalizedFallbackModel,
+      modelProbeResult: probeResult
+    });
+
+    return {
+      args: [
+        "-p",
+        "--no-session",
+        "--provider",
+        launchSelection.selectedProvider,
+        "--model",
+        launchSelection.selectedModel,
+        "--thinking",
+        launchSelection.selectedThinking,
+        prompt
+      ],
+      launchSelection
+    };
+  };
+}
+
+function parseLongOptionValue(args, optionName) {
+  const prefix = `${optionName}=`;
+  let isPassed = false;
+  let requestedValue = null;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const current = args[index];
+
+    if (current === optionName) {
+      isPassed = true;
+      const next = args[index + 1];
+      if (typeof next === "string" && !next.startsWith("-")) {
+        requestedValue = next;
+      } else {
+        requestedValue = null;
+      }
+      continue;
+    }
+
+    if (current.startsWith(prefix)) {
+      isPassed = true;
+      const inlineValue = current.slice(prefix.length);
+      requestedValue = inlineValue.length > 0 ? inlineValue : null;
+    }
+  }
+
+  return { isPassed, requestedValue };
+}
+
+function describeLaunchProfile(argsInput) {
+  const args = Array.isArray(argsInput) ? argsInput.map((value) => String(value)) : [];
+  const provider = parseLongOptionValue(args, "--provider");
+  const model = parseLongOptionValue(args, "--model");
+  const thinking = parseLongOptionValue(args, "--thinking");
+
+  return {
+    providerFlagPassed: provider.isPassed,
+    providerSelection: provider.isPassed
+      ? provider.requestedValue ?? EXPLICIT_FLAG_WITHOUT_VALUE
+      : IMPLICIT_PI_DEFAULT_SELECTION,
+    modelFlagPassed: model.isPassed,
+    modelSelection: model.isPassed
+      ? model.requestedValue ?? EXPLICIT_FLAG_WITHOUT_VALUE
+      : IMPLICIT_PI_DEFAULT_SELECTION,
+    thinkingFlagPassed: thinking.isPassed,
+    thinkingSelection: thinking.isPassed
+      ? thinking.requestedValue ?? EXPLICIT_FLAG_WITHOUT_VALUE
+      : "not_passed",
+    effectiveLauncherMode: provider.isPassed || model.isPassed
+      ? EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE
+      : IMPLICIT_PI_DEFAULT_SELECTION
+  };
+}
+
+function prefixEvidenceEntries(entries, prefix) {
+  return normalizeStringArray(entries).map((entry) => `${prefix}${entry}`);
+}
+
 function buildEvidence({
   launchResult,
   repositoryRoot,
@@ -563,6 +941,7 @@ function buildEvidence({
   missingSeedFiles,
   changedFiles
 }) {
+  const launchProfile = describeLaunchProfile(launchResult?.args);
   const evidence = [
     `repository_root: ${repositoryRoot}`,
     `workspace: ${workspaceRoot}`,
@@ -570,8 +949,36 @@ function buildEvidence({
     `context_files: ${contextFiles.length === 0 ? "none" : contextFiles.join(", ")}`,
     `copied_seed_files: ${copiedSeedFiles.length === 0 ? "none" : copiedSeedFiles.join(", ")}`,
     `missing_seed_files: ${missingSeedFiles.length === 0 ? "none" : missingSeedFiles.join(", ")}`,
-    `changed_files: ${changedFiles.length === 0 ? "none" : changedFiles.join(", ")}`
+    `changed_files: ${changedFiles.length === 0 ? "none" : changedFiles.join(", ")}`,
+    `provider_flag_passed: ${launchProfile.providerFlagPassed}`,
+    `provider_selection: ${launchProfile.providerSelection}`,
+    `model_flag_passed: ${launchProfile.modelFlagPassed}`,
+    `model_selection: ${launchProfile.modelSelection}`,
+    `thinking_flag_passed: ${launchProfile.thinkingFlagPassed}`,
+    `thinking_selection: ${launchProfile.thinkingSelection}`,
+    `effective_launcher_mode: ${launchProfile.effectiveLauncherMode}`
   ];
+
+  if (launchResult?.launchSelection && typeof launchResult.launchSelection === "object") {
+    const launchSelection = launchResult.launchSelection;
+    evidence.push(`requested_provider: ${launchSelection.requestedProvider ?? "unknown"}`);
+    evidence.push(`requested_model: ${launchSelection.requestedModel ?? "unknown"}`);
+    evidence.push(`selected_provider: ${launchSelection.selectedProvider ?? "unknown"}`);
+    evidence.push(`selected_model: ${launchSelection.selectedModel ?? "unknown"}`);
+    evidence.push(`selected_thinking: ${launchSelection.selectedThinking ?? "unknown"}`);
+    evidence.push(`model_selection_mode: ${launchSelection.modelSelectionMode ?? MODEL_SELECTION_BLOCKED}`);
+    evidence.push(`model_selection_reason: ${launchSelection.modelSelectionReason ?? "none"}`);
+
+    if (launchSelection.fallbackReason) {
+      evidence.push(`model_fallback_reason: ${launchSelection.fallbackReason}`);
+    }
+
+    if (Array.isArray(launchSelection.supportedModels)) {
+      evidence.push(
+        `supported_provider_models: ${launchSelection.supportedModels.length === 0 ? "none" : launchSelection.supportedModels.join(", ")}`
+      );
+    }
+  }
 
   if (launchResult?.launcher) {
     evidence.push(`launcher: ${launchResult.launcher}`);
@@ -627,35 +1034,44 @@ function buildEvidence({
 export function createProcessPiCliLauncher({
   timeoutMs = DEFAULT_LAUNCH_TIMEOUT_MS,
   argsBuilder,
+  roleProfiles = PROCESS_ROLE_PROFILES,
+  fallbackModel = PROCESS_MODEL_FALLBACK,
+  modelProbe = createCachedProcessModelProbe({
+    providerId: PROCESS_PROVIDER_OPENAI_CODEX,
+    candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+  }),
   spawnCommandResolver = getPiSpawnCommand,
   runCommandFn = runCommand
 } = {}) {
   assert(Number.isInteger(timeoutMs) && timeoutMs > 0, "pi launcher timeoutMs must be a positive integer");
   assert(typeof spawnCommandResolver === "function", "spawnCommandResolver(options) must be a function");
   assert(typeof runCommandFn === "function", "runCommandFn(request) must be a function");
+  const resolvedArgsBuilder = typeof argsBuilder === "function"
+    ? argsBuilder
+    : createProcessRoleArgsBuilder({
+      roleProfiles,
+      fallbackModel,
+      modelProbe
+    });
 
   return async function launchPiWorker({
     packet,
     context,
-    workspaceRoot
+    workspaceRoot,
+    promptOverride = null,
+    launchSelectionOverride = null
   }) {
-    const prompt = buildCodexPrompt(packet);
-    const rawArgs = typeof argsBuilder === "function"
-      ? argsBuilder({
+    const prompt = typeof promptOverride === "string" && promptOverride.trim().length > 0
+      ? promptOverride
+      : buildCodexPrompt(packet);
+    let argsBuilderOutput;
+    try {
+      argsBuilderOutput = await resolvedArgsBuilder({
         packet: clone(packet),
         context: clone(context),
         workspaceRoot,
-        prompt
-      })
-      : ["-p", "--no-session", "--thinking", "off", prompt];
-    const args = Array.isArray(rawArgs) ? rawArgs.map((value) => String(value)) : [String(rawArgs)];
-
-    let spawnCommand;
-    try {
-      spawnCommand = await spawnCommandResolver({
-        packet: clone(packet),
-        context: clone(context),
-        workspaceRoot
+        prompt,
+        launchSelectionOverride: clone(launchSelectionOverride)
       });
     } catch (error) {
       return {
@@ -669,12 +1085,49 @@ export function createProcessPiCliLauncher({
         stderr: "",
         error,
         durationMs: 0,
+        launcher: "pi_cli_args_builder_error",
+        launcherPath: null,
+        piScriptPath: null,
+        piPackageRoot: null,
+        piSpawnResolution: "worker launcher arguments could not be resolved",
+        commandsRun: [],
+        launchProfile: describeLaunchProfile([]),
+        launchSelection: null
+      };
+    }
+
+    const normalizedArgsOutput = normalizeLauncherArgsBuilderOutput(argsBuilderOutput);
+    const args = normalizedArgsOutput.args;
+    const launchSelection = normalizedArgsOutput.launchSelection;
+    const inputLaunchProfile = describeLaunchProfile(args);
+
+    let spawnCommand;
+    try {
+      spawnCommand = await spawnCommandResolver({
+        packet: clone(packet),
+        context: clone(context),
+        workspaceRoot
+      });
+    } catch (error) {
+      return {
+        command: "",
+        args,
+        cwd: workspaceRoot,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        error,
+        durationMs: 0,
         launcher: "pi_cli_resolution_error",
         launcherPath: null,
         piScriptPath: null,
         piPackageRoot: null,
         piSpawnResolution: `pi spawn command resolution failed: ${errorMessage(error)}`,
-        commandsRun: []
+        commandsRun: [],
+        launchProfile: inputLaunchProfile,
+        launchSelection
       };
     }
 
@@ -685,6 +1138,7 @@ export function createProcessPiCliLauncher({
       ? spawnCommand.argsPrefix.map((value) => String(value))
       : [];
     const fullArgs = [...argsPrefix, ...args];
+    const launchProfile = describeLaunchProfile(fullArgs);
 
     const hasResolvedPiScript = typeof spawnCommand?.piScriptPath === "string" && spawnCommand.piScriptPath.length > 0;
     if (!hasResolvedPiScript) {
@@ -704,7 +1158,9 @@ export function createProcessPiCliLauncher({
         piScriptPath: spawnCommand?.piScriptPath ?? null,
         piPackageRoot: spawnCommand?.piPackageRoot ?? null,
         piSpawnResolution: spawnCommand?.resolutionMessage ?? "pi spawn command resolution returned no script path",
-        commandsRun: []
+        commandsRun: [],
+        launchProfile,
+        launchSelection
       };
     }
 
@@ -725,7 +1181,9 @@ export function createProcessPiCliLauncher({
         piScriptPath: spawnCommand?.piScriptPath ?? null,
         piPackageRoot: spawnCommand?.piPackageRoot ?? null,
         piSpawnResolution: spawnCommand?.resolutionMessage ?? "pi spawn command resolution returned an empty command",
-        commandsRun: []
+        commandsRun: [],
+        launchProfile,
+        launchSelection
       };
     }
 
@@ -759,7 +1217,9 @@ export function createProcessPiCliLauncher({
       piScriptPath: spawnCommand?.piScriptPath ?? null,
       piPackageRoot: spawnCommand?.piPackageRoot ?? null,
       piSpawnResolution: spawnCommand?.resolutionMessage ?? null,
-      commandsRun: [formatCommand(command, fullArgs)]
+      commandsRun: [formatCommand(command, fullArgs)],
+      launchProfile,
+      launchSelection
     };
   };
 }
@@ -902,8 +1362,9 @@ export function createProcessWorkerBackend({
 
         const afterSnapshot = await snapshotFiles(workspaceRoot);
         changedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
-        const commandsRun = inferCommandsRun(launchResult);
-        const evidence = buildEvidence({
+        const isReadOnlyRole = READ_ONLY_ROLES.has(packet.role);
+        let commandsRun = inferCommandsRun(launchResult);
+        let evidence = buildEvidence({
           launchResult,
           repositoryRoot: normalizedRepositoryRoot,
           workspaceRoot,
@@ -913,11 +1374,27 @@ export function createProcessWorkerBackend({
           missingSeedFiles,
           changedFiles
         });
+        let readOnlyStructuredOutputSource = null;
+
+        const setReadOnlyRetryAttemptedEvidence = (attempted) => {
+          if (!isReadOnlyRole) {
+            return;
+          }
+
+          evidence = [
+            ...evidence.filter((entry) => !entry.startsWith("read_only_json_repair_retry_attempted:")),
+            `read_only_json_repair_retry_attempted: ${attempted}`
+          ];
+        };
+
+        if (isReadOnlyRole) {
+          setReadOnlyRetryAttemptedEvidence(false);
+        }
 
         if (launchResult?.error) {
           return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
             commandsRun,
-            evidence,
+            evidence: unique(evidence),
             openQuestions: [
               "Check local permissions, Pi resolution, and worker launcher availability."
             ]
@@ -928,7 +1405,7 @@ export function createProcessWorkerBackend({
           return createFailedResult("process worker failed: launcher timed out", {
             changedFiles,
             commandsRun,
-            evidence,
+            evidence: unique(evidence),
             openQuestions: [
               "Reduce prompt complexity or increase launcher timeout."
             ]
@@ -939,68 +1416,184 @@ export function createProcessWorkerBackend({
           return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
             changedFiles,
             commandsRun,
-            evidence,
+            evidence: unique(evidence),
             openQuestions: [
               "Inspect launcher stdout/stderr and verify non-interactive worker command syntax."
             ]
           });
         }
 
-        const allowedFileSet = new Set(allowedFiles);
-        const forbiddenFileSet = new Set(forbiddenFiles);
-
-        if (READ_ONLY_ROLES.has(packet.role) && changedFiles.length > 0) {
+        if (isReadOnlyRole && changedFiles.length > 0) {
           return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
             changedFiles,
             commandsRun,
-            evidence: [
+            evidence: unique([
               ...evidence,
               `unexpected_read_only_changes: ${changedFiles.join(", ")}`
-            ],
+            ]),
             openQuestions: [
               `Tighten ${packet.role} prompt and runner constraints to keep the role read-only.`
             ]
           });
         }
 
-        const changedOutsideAllowlist = changedFiles.filter((file) => !allowedFileSet.has(file));
-        if (changedOutsideAllowlist.length > 0) {
-          return createFailedResult("process worker failed: worker changed files outside the allowlist", {
-            changedFiles,
-            commandsRun,
-            evidence: [
-              ...evidence,
-              `unexpected_files: ${changedOutsideAllowlist.join(", ")}`
-            ],
-            openQuestions: [
-              "Tighten worker instructions to enforce allowlist-only writes."
-            ]
-          });
-        }
-
-        const changedForbiddenFiles = changedFiles.filter((file) => forbiddenFileSet.has(file));
-        if (changedForbiddenFiles.length > 0) {
-          return createFailedResult("process worker failed: worker changed forbidden files", {
-            changedFiles,
-            commandsRun,
-            evidence: [
-              ...evidence,
-              `forbidden_files_changed: ${changedForbiddenFiles.join(", ")}`
-            ],
-            openQuestions: [
-              "Narrow the packet scope or remove conflicting forbidden paths."
-            ]
-          });
-        }
-
-        const structuredReadOnlyOutput = READ_ONLY_ROLES.has(packet.role)
+        let structuredReadOnlyOutput = isReadOnlyRole
           ? parseStructuredReadOnlyOutput({
             role: packet.role,
             stdout: launchResult?.stdout ?? ""
           })
           : null;
 
-        if (READ_ONLY_ROLES.has(packet.role) && structuredReadOnlyOutput) {
+        if (isReadOnlyRole && !structuredReadOnlyOutput) {
+          setReadOnlyRetryAttemptedEvidence(true);
+          evidence = unique([
+            ...evidence,
+            "read_only_structured_output_valid_first_attempt: false"
+          ]);
+
+          const retryLaunchSelectionOverride = normalizeLaunchSelectionOverride(launchResult?.launchSelection);
+          const retryPrompt = buildStrictReadOnlyRetryPrompt(normalizedPacket, launchResult?.stdout ?? "");
+
+          launchResult = await launcher({
+            packet: clone(normalizedPacket),
+            context: clone(contextInput),
+            repositoryRoot: normalizedRepositoryRoot,
+            workspaceRoot,
+            targetRelativePaths: clone(allowedFiles),
+            targetAbsolutePaths: clone(targetAbsolutePaths),
+            targetRelativePath: allowedFiles[0] ?? null,
+            targetAbsolutePath: targetAbsolutePaths[0] ?? null,
+            promptOverride: retryPrompt,
+            launchSelectionOverride: retryLaunchSelectionOverride ? clone(retryLaunchSelectionOverride) : null
+          });
+
+          const retrySnapshot = await snapshotFiles(workspaceRoot);
+          changedFiles = diffSnapshots(beforeSnapshot, retrySnapshot);
+          commandsRun = [...commandsRun, ...inferCommandsRun(launchResult)];
+          evidence = unique([
+            ...evidence,
+            ...prefixEvidenceEntries(buildEvidence({
+              launchResult,
+              repositoryRoot: normalizedRepositoryRoot,
+              workspaceRoot,
+              allowedFiles,
+              contextFiles,
+              copiedSeedFiles,
+              missingSeedFiles,
+              changedFiles
+            }), "retry_")
+          ]);
+
+          if (launchResult?.error) {
+            return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
+              commandsRun,
+              evidence: unique([
+                ...evidence,
+                "read_only_structured_output_valid_retry_attempt: false",
+                "read_only_retry_failure_reason: retry_launcher_invocation_failed"
+              ]),
+              openQuestions: [
+                "Check local permissions, Pi resolution, and worker launcher availability."
+              ]
+            });
+          }
+
+          if (launchResult?.timedOut) {
+            return createFailedResult("process worker failed: launcher timed out", {
+              changedFiles,
+              commandsRun,
+              evidence: unique([
+                ...evidence,
+                "read_only_structured_output_valid_retry_attempt: false",
+                "read_only_retry_failure_reason: retry_launcher_timed_out"
+              ]),
+              openQuestions: [
+                "Reduce prompt complexity or increase launcher timeout."
+              ]
+            });
+          }
+
+          if (launchResult?.exitCode !== 0) {
+            return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
+              changedFiles,
+              commandsRun,
+              evidence: unique([
+                ...evidence,
+                "read_only_structured_output_valid_retry_attempt: false",
+                `read_only_retry_failure_reason: retry_launcher_exit_code_${launchResult?.exitCode ?? "unknown"}`
+              ]),
+              openQuestions: [
+                "Inspect launcher stdout/stderr and verify non-interactive worker command syntax."
+              ]
+            });
+          }
+
+          if (changedFiles.length > 0) {
+            return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
+              changedFiles,
+              commandsRun,
+              evidence: unique([
+                ...evidence,
+                "read_only_structured_output_valid_retry_attempt: false",
+                `unexpected_read_only_changes: ${changedFiles.join(", ")}`
+              ]),
+              openQuestions: [
+                `Tighten ${packet.role} prompt and runner constraints to keep the role read-only.`
+              ]
+            });
+          }
+
+          structuredReadOnlyOutput = parseStructuredReadOnlyOutput({
+            role: packet.role,
+            stdout: launchResult?.stdout ?? ""
+          });
+
+          evidence = unique([
+            ...evidence,
+            `read_only_structured_output_valid_retry_attempt: ${Boolean(structuredReadOnlyOutput)}`
+          ]);
+          if (structuredReadOnlyOutput) {
+            readOnlyStructuredOutputSource = "retry_attempt";
+          }
+        } else if (isReadOnlyRole && structuredReadOnlyOutput) {
+          evidence = unique([
+            ...evidence,
+            "read_only_structured_output_valid_first_attempt: true"
+          ]);
+          readOnlyStructuredOutputSource = "first_attempt";
+        }
+
+        const changedOutsideAllowlist = changedFiles.filter((file) => !allowedFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
+        if (changedOutsideAllowlist.length > 0) {
+          return createFailedResult("process worker failed: worker changed files outside the allowlist", {
+            changedFiles,
+            commandsRun,
+            evidence: unique([
+              ...evidence,
+              `unexpected_files: ${changedOutsideAllowlist.join(", ")}`
+            ]),
+            openQuestions: [
+              "Tighten worker instructions to enforce allowlist-only writes."
+            ]
+          });
+        }
+
+        const changedForbiddenFiles = changedFiles.filter((file) => forbiddenFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
+        if (changedForbiddenFiles.length > 0) {
+          return createFailedResult("process worker failed: worker changed forbidden files", {
+            changedFiles,
+            commandsRun,
+            evidence: unique([
+              ...evidence,
+              `forbidden_files_changed: ${changedForbiddenFiles.join(", ")}`
+            ]),
+            openQuestions: [
+              "Narrow the packet scope or remove conflicting forbidden paths."
+            ]
+          });
+        }
+
+        if (isReadOnlyRole && structuredReadOnlyOutput) {
           return createWorkerResult({
             status: structuredReadOnlyOutput.status,
             summary: structuredReadOnlyOutput.summary,
@@ -1009,6 +1602,8 @@ export function createProcessWorkerBackend({
             evidence: unique([
               ...evidence,
               ...structuredReadOnlyOutput.evidence,
+              "read_only_structured_output_valid: true",
+              `read_only_structured_output_source: ${readOnlyStructuredOutputSource ?? "unknown"}`,
               "allowlist_enforced: true",
               "recursive_delegation_forbidden: true",
               "repository_changes_applied: not_applicable"
@@ -1017,16 +1612,18 @@ export function createProcessWorkerBackend({
           });
         }
 
-        if (READ_ONLY_ROLES.has(packet.role) && !structuredReadOnlyOutput) {
-          return createFailedResult(`${packet.role} process worker failed: invalid structured read-only output`, {
+        if (isReadOnlyRole && !structuredReadOnlyOutput) {
+          return createFailedResult(`${packet.role} process worker failed: invalid structured read-only output after retry`, {
             changedFiles,
             commandsRun,
             evidence: unique([
               ...evidence,
+              "read_only_structured_output_valid_retry_attempt: false",
+              "read_only_retry_failure_reason: first_and_retry_outputs_invalid_json",
               "read_only_structured_output_valid: false"
             ]),
             openQuestions: [
-              `Return valid JSON for ${packet.role} with status, summary, evidence, and openQuestions.`
+              `Return valid JSON for ${packet.role} with status, summary, evidence, and openQuestions; output one JSON object only.`
             ]
           });
         }
@@ -1097,3 +1694,7 @@ export function createProcessWorkerBackend({
 export const PROCESS_WORKER_SUPPORTED_ROLE = SUPPORTED_ROLES[0];
 export const PROCESS_WORKER_SUPPORTED_ROLES = SUPPORTED_ROLES;
 export const PROCESS_WORKER_DEFAULT_LAUNCH_TIMEOUT_MS = DEFAULT_LAUNCH_TIMEOUT_MS;
+export const PROCESS_WORKER_PROVIDER_ID = PROCESS_PROVIDER_OPENAI_CODEX;
+export const PROCESS_WORKER_MODEL_CANDIDATES = PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES;
+export const PROCESS_WORKER_FALLBACK_MODEL = PROCESS_MODEL_FALLBACK;
+export const PROCESS_WORKER_ROLE_PROFILES = PROCESS_ROLE_PROFILES;
