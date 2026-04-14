@@ -7,7 +7,11 @@ import { join } from "node:path";
 
 import { createBuildSessionStore } from "../src/build-session-store.js";
 import { createOperatorIntake } from "../src/operator-intake.js";
-import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import {
+  buildProjectLifecycleArtifacts,
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
+} from "../src/project-workflows.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
@@ -37,6 +41,8 @@ test("build session store creates and loads a persisted build session", async ()
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const intake = createOperatorIntake("Build a launch dashboard for product operators");
     const lifecycle = createLifecycleForTests();
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
 
     const created = await buildSessionStore.createBuildSession({
       intake,
@@ -55,13 +61,22 @@ test("build session store creates and loads a persisted build session", async ()
       `audit_report:${lifecycle.auditReport.id}`
     ]);
     assert.equal(created.lineageDepth, 1);
+    assert.equal(created.planFingerprint, expectedPlanFingerprint);
     assert.equal(created.execution.status, "awaiting_approval");
     assert.equal(created.execution.stopReasonCode, null);
     assert.equal(created.execution.validationOutcome, "not_run");
+    assert.equal(created.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(created.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(created.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(created.approval.policyProfile, "default");
     assert.deepEqual(created.execution.actionClasses, []);
-    assert.equal(created.execution.policyProfile, null);
+    assert.equal(created.execution.policyProfile, "default");
     assert.equal(created.execution.validationArtifacts.length, 1);
     assert.equal(created.execution.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(created.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
     assert.equal(created.execution.programId, null);
     assert.equal(created.execution.completedContracts, 0);
     assert.equal(created.execution.pendingContracts, lifecycle.executionProgram.contracts.length);
@@ -79,10 +94,19 @@ test("build session store creates and loads a persisted build session", async ()
     ]);
     assert.equal(loaded.execution.status, "awaiting_approval");
     assert.equal(loaded.execution.validationOutcome, "not_run");
+    assert.equal(loaded.planFingerprint, expectedPlanFingerprint);
+    assert.equal(loaded.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(loaded.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(loaded.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(loaded.approval.policyProfile, "default");
     assert.deepEqual(loaded.execution.actionClasses, []);
-    assert.equal(loaded.execution.policyProfile, null);
+    assert.equal(loaded.execution.policyProfile, "default");
     assert.equal(loaded.execution.validationArtifacts.length, 1);
     assert.equal(loaded.execution.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(loaded.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
 
     const persistedPath = join(rootDir, ".pi", "build-sessions", `${encodeURIComponent(created.buildId)}.json`);
     const persisted = JSON.parse(await readFile(persistedPath, "utf8"));
@@ -96,6 +120,11 @@ test("build session store creates and loads a persisted build session", async ()
       `execution_program:${lifecycle.executionProgram.id}`,
       `audit_report:${lifecycle.auditReport.id}`
     ]);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
+    assert.equal(persisted.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(persisted.approval.policyProfile, "default");
     assert.equal(persisted.execution.status, "awaiting_approval");
   });
 });
@@ -105,6 +134,8 @@ test("build session store update can record approval and execution summary", asy
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const intake = createOperatorIntake("Build a launch dashboard for product operators");
     const lifecycle = createLifecycleForTests();
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
 
     const created = await buildSessionStore.createBuildSession({
       intake,
@@ -141,24 +172,40 @@ test("build session store update can record approval and execution summary", asy
 
     assert.equal(updated.approval.approved, true);
     assert.equal(typeof updated.approval.approvedAt, "string");
+    assert.equal(updated.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(updated.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(updated.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(updated.approval.policyProfile, "default");
     assert.equal(updated.execution.status, "success");
     assert.equal(updated.execution.stopReasonCode, null);
     assert.equal(updated.execution.validationOutcome, "pass");
     assert.deepEqual(updated.execution.actionClasses, []);
-    assert.equal(updated.execution.policyProfile, null);
+    assert.equal(updated.execution.policyProfile, "default");
     assert.equal(updated.execution.validationArtifacts.length, 1);
     assert.equal(updated.execution.validationArtifacts[0].reference, "test-run:node --test --test-isolation=none");
+    assert.deepEqual(updated.execution.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
     assert.equal(updated.execution.programId, lifecycle.executionProgram.id);
     assert.equal(updated.execution.completedContracts, lifecycle.executionProgram.contracts.length);
     assert.equal(updated.execution.pendingContracts, 0);
 
     const loaded = await buildSessionStore.loadBuildSession(created.buildId);
+    assert.equal(loaded.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(loaded.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(loaded.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(loaded.approval.policyProfile, "default");
     assert.equal(loaded.execution.status, "success");
     assert.equal(loaded.execution.validationOutcome, "pass");
     assert.deepEqual(loaded.execution.actionClasses, []);
-    assert.equal(loaded.execution.policyProfile, null);
+    assert.equal(loaded.execution.policyProfile, "default");
     assert.equal(loaded.execution.validationArtifacts.length, 1);
     assert.equal(loaded.execution.validationArtifacts[0].reference, "test-run:node --test --test-isolation=none");
+    assert.deepEqual(loaded.execution.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
     assert.equal(loaded.execution.programId, lifecycle.executionProgram.id);
   });
 });
@@ -205,6 +252,10 @@ test("build session store normalizes unsupported action classes and uncaptured v
         validationOutcome: "pass"
       }
     ]);
+    assert.deepEqual(updated.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["validation_artifacts_not_captured"]
+    });
 
     const loaded = await buildSessionStore.loadBuildSession(created.buildId);
     assert.deepEqual(loaded.execution.actionClasses, []);
@@ -216,6 +267,59 @@ test("build session store normalizes unsupported action classes and uncaptured v
         validationOutcome: "pass"
       }
     ]);
+    assert.deepEqual(loaded.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["validation_artifacts_not_captured"]
+    });
+  });
+});
+
+test("build session store preserves explicit run-journal-derived reviewability summaries", async () => {
+  await withTempDir("pi-orchestrator-build-session-store-", async (rootDir) => {
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const intake = createOperatorIntake("Build a launch dashboard for product operators");
+    const lifecycle = createLifecycleForTests();
+
+    const created = await buildSessionStore.createBuildSession({
+      intake,
+      lifecycle,
+      approvalRequested: true
+    });
+
+    const updated = await buildSessionStore.updateBuildSession(created.buildId, (existingSession) => ({
+      ...existingSession,
+      execution: {
+        ...existingSession.execution,
+        status: "success",
+        stopReason: null,
+        programId: existingSession.lifecycle.executionProgram.id,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        reviewability: {
+          status: "reviewable",
+          reasons: []
+        },
+        completedContracts: existingSession.lifecycle.executionProgram.contracts.length,
+        pendingContracts: 0,
+        updatedAt: new Date().toISOString()
+      }
+    }));
+
+    assert.deepEqual(updated.execution.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+
+    const loaded = await buildSessionStore.loadBuildSession(created.buildId);
+    assert.deepEqual(loaded.execution.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
   });
 });
 
@@ -224,6 +328,8 @@ test("build session store load backfills lineage and evidence defaults for legac
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const intake = createOperatorIntake("Build a launch dashboard for product operators");
     const lifecycle = createLifecycleForTests();
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
     const buildId = "build-legacy-record";
     const persistedPath = join(rootDir, ".pi", "build-sessions", `${encodeURIComponent(buildId)}.json`);
 
@@ -255,6 +361,7 @@ test("build session store load backfills lineage and evidence defaults for legac
     assert.equal(loaded.artifactType, "build_session");
     assert.equal(loaded.repositoryRoot, rootDir);
     assert.equal(loaded.programId, lifecycle.executionProgram.id);
+    assert.equal(loaded.planFingerprint, expectedPlanFingerprint);
     assert.deepEqual(loaded.sourceArtifactIds, [
       `proposal_set:${lifecycle.proposalSet.id}`,
       `project_blueprint:${lifecycle.blueprint.id}`,
@@ -262,11 +369,59 @@ test("build session store load backfills lineage and evidence defaults for legac
       `audit_report:${lifecycle.auditReport.id}`
     ]);
     assert.equal(loaded.lineageDepth, 1);
+    assert.equal(loaded.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(loaded.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(loaded.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(loaded.approval.policyProfile, "default");
     assert.deepEqual(loaded.execution.actionClasses, []);
-    assert.equal(loaded.execution.policyProfile, null);
+    assert.equal(loaded.execution.policyProfile, "default");
     assert.equal(loaded.execution.validationArtifacts.length, 1);
     assert.equal(loaded.execution.validationArtifacts[0].status, "not_captured");
     assert.equal(loaded.execution.validationArtifacts[0].validationOutcome, "not_run");
+    assert.deepEqual(loaded.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
+  });
+});
+
+test("build session store load rejects present envelope type or version drift", async () => {
+  await withTempDir("pi-orchestrator-build-session-store-", async (rootDir) => {
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const intake = createOperatorIntake("Build a launch dashboard for product operators");
+    const lifecycle = createLifecycleForTests();
+    const buildId = "build-invalid-envelope";
+    const persistedPath = join(rootDir, ".pi", "build-sessions", `${encodeURIComponent(buildId)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "build-sessions"), { recursive: true });
+    await writeFile(persistedPath, `${JSON.stringify({
+      artifactType: "unexpected_build_session",
+      formatVersion: 2,
+      buildId,
+      intake,
+      lifecycle,
+      approval: {
+        approved: false,
+        approvedAt: null
+      },
+      execution: {
+        status: "awaiting_approval",
+        stopReason: null,
+        stopReasonCode: null,
+        validationOutcome: "not_run",
+        programId: null,
+        completedContracts: 0,
+        pendingContracts: lifecycle.executionProgram.contracts.length,
+        updatedAt: new Date().toISOString()
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => buildSessionStore.loadBuildSession(buildId),
+      /buildSession\.artifactType must be build_session|buildSession\.formatVersion must be 1/u
+    );
   });
 });
 

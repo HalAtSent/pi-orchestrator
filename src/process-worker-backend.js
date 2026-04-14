@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { copyFile, cp, mkdir, mkdtemp, readdir, rename, rm, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -27,6 +28,85 @@ const PROCESS_MODEL_FALLBACK = "gpt-5.4";
 const MODEL_SELECTION_DIRECT = "direct";
 const MODEL_SELECTION_FALLBACK = "fallback";
 const MODEL_SELECTION_BLOCKED = "blocked";
+const ROLE_CONTRACT_DOCS = Object.freeze({
+  common: Object.freeze({
+    label: "docs/agents/COMMON.md",
+    url: new URL("../docs/agents/COMMON.md", import.meta.url),
+    headings: [
+      "Optimization Order",
+      "Required Defaults",
+      "Facts And Inference",
+      "Forbidden Shortcuts",
+      "Evidence Expectations",
+      "Same-Slice Companion Updates",
+      "Stop Or Escalate",
+      "Output Discipline"
+    ]
+  }),
+  explorer: Object.freeze({
+    label: "docs/agents/EXPLORER.md",
+    url: new URL("../docs/agents/EXPLORER.md", import.meta.url),
+    headings: [
+      "Optimization Target",
+      "Forbidden Actions",
+      "Required Evidence",
+      "Stop Or Block",
+      "Output Shape"
+    ]
+  }),
+  implementer: Object.freeze({
+    label: "docs/agents/IMPLEMENTER.md",
+    url: new URL("../docs/agents/IMPLEMENTER.md", import.meta.url),
+    headings: [
+      "Optimization Order",
+      "Allowed Actions",
+      "Explicit Rules",
+      "Stop Or Escalate",
+      "Output Shape"
+    ]
+  }),
+  reviewer: Object.freeze({
+    label: "docs/agents/REVIEWER.md",
+    url: new URL("../docs/agents/REVIEWER.md", import.meta.url),
+    headings: [
+      "Optimization Target",
+      "Explicit Rules",
+      "Rejection Triggers",
+      "Stop Or Block",
+      "Output Shape"
+    ]
+  }),
+  verifier: Object.freeze({
+    label: "docs/agents/VERIFIER.md",
+    url: new URL("../docs/agents/VERIFIER.md", import.meta.url),
+    headings: [
+      "Optimization Target",
+      "Explicit Rules",
+      "Required Evidence",
+      "Current Repo Evidence Limits",
+      "Stop Or Block",
+      "Output Shape"
+    ]
+  })
+});
+const FALLBACK_COMMON_ROLE_GUIDANCE = Object.freeze([
+  "Advisory markdown for this worker is unavailable or incomplete; continue under code-enforced boundaries, status rules, and policy checks.",
+  "Treat missing advisory markdown as non-authoritative and rely on the enforced task scope plus direct repository evidence."
+]);
+const FALLBACK_ROLE_GUIDANCE = Object.freeze({
+  explorer: Object.freeze([
+    "Stay read-only, answer with bounded repository facts, and surface uncertainty explicitly."
+  ]),
+  implementer: Object.freeze([
+    "Work only inside ALLOWED_FILES, keep the change task-scoped, and stop after the scoped edit is complete."
+  ]),
+  reviewer: Object.freeze([
+    "Ground repair findings in inspected evidence and use the enforced structured result fields."
+  ]),
+  verifier: Object.freeze([
+    "Report only what was demonstrated from inspected artifacts or commands actually run."
+  ])
+});
 const PROCESS_ROLE_PROFILES = Object.freeze({
   explorer: Object.freeze({
     provider: PROCESS_PROVIDER_OPENAI_CODEX,
@@ -62,6 +142,140 @@ function clone(value) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function stripMarkdownFormatting(value) {
+  return String(value)
+    .replace(/\[([^\]]+)\]\([^)]+\)/gu, "$1")
+    .replace(/`([^`]+)`/gu, "$1")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+function extractMarkdownSectionBlocks(markdown, heading) {
+  const normalizedMarkdown = String(markdown ?? "").replace(/\r\n?/gu, "\n");
+  const headingPattern = new RegExp(`^## ${escapeRegExp(heading)}\\s*$`, "mu");
+  const headingMatch = headingPattern.exec(normalizedMarkdown);
+  assert(headingMatch, `missing markdown heading: ${heading}`);
+
+  const sectionStart = headingMatch.index + headingMatch[0].length;
+  const remainingMarkdown = normalizedMarkdown.slice(sectionStart);
+  const nextHeadingIndex = remainingMarkdown.search(/^##\s+/mu);
+  const sectionBody = nextHeadingIndex === -1
+    ? remainingMarkdown
+    : remainingMarkdown.slice(0, nextHeadingIndex);
+
+  const blocks = [];
+  let currentBlock = null;
+  const pushCurrentBlock = () => {
+    if (!currentBlock) {
+      return;
+    }
+
+    const normalizedBlock = stripMarkdownFormatting(currentBlock);
+    if (normalizedBlock.length > 0) {
+      blocks.push(normalizedBlock);
+    }
+    currentBlock = null;
+  };
+
+  for (const rawLine of sectionBody.split("\n")) {
+    const trimmedLine = rawLine.trim();
+    if (trimmedLine.length === 0) {
+      pushCurrentBlock();
+      continue;
+    }
+
+    const listMatch = trimmedLine.match(/^(-|\d+\.)\s+(.*)$/u);
+    if (listMatch) {
+      pushCurrentBlock();
+      currentBlock = listMatch[2];
+      continue;
+    }
+
+    currentBlock = currentBlock ? `${currentBlock} ${trimmedLine}` : trimmedLine;
+  }
+
+  pushCurrentBlock();
+  return blocks;
+}
+
+function freezeRoleContractGuidanceEntry({ common, role, sourceLabels, diagnostics }) {
+  return Object.freeze({
+    common: Object.freeze([...common]),
+    role: Object.freeze([...role]),
+    sourceLabels: Object.freeze([...sourceLabels]),
+    diagnostics: Object.freeze([...(diagnostics ?? [])])
+  });
+}
+
+function loadRoleContractDocGuidance({
+  doc,
+  readFileFn,
+  fallbackEntries,
+  emptyGuidanceMessage
+}) {
+  try {
+    const markdown = readFileFn(doc.url, "utf8");
+    const guidance = doc.headings.flatMap((heading) => extractMarkdownSectionBlocks(markdown, heading));
+    assert(guidance.length > 0, emptyGuidanceMessage);
+    return {
+      guidance,
+      diagnostic: null
+    };
+  } catch (error) {
+    return {
+      guidance: fallbackEntries,
+      diagnostic: `${doc.label} fallback active (${errorMessage(error)})`
+    };
+  }
+}
+
+export function loadRoleContractGuidance({
+  readFileFn = readFileSync,
+  roleContractDocs = ROLE_CONTRACT_DOCS
+} = {}) {
+  const commonDoc = roleContractDocs.common;
+  const commonLoad = loadRoleContractDocGuidance({
+    doc: commonDoc,
+    readFileFn,
+    fallbackEntries: FALLBACK_COMMON_ROLE_GUIDANCE,
+    emptyGuidanceMessage: "common role contract guidance must not be empty"
+  });
+
+  const guidanceByRole = {};
+  for (const role of SUPPORTED_ROLES) {
+    const roleDoc = roleContractDocs[role];
+    const roleLoad = loadRoleContractDocGuidance({
+      doc: roleDoc,
+      readFileFn,
+      fallbackEntries: FALLBACK_ROLE_GUIDANCE[role] ?? [],
+      emptyGuidanceMessage: `role contract guidance for ${role} must not be empty`
+    });
+
+    guidanceByRole[role] = freezeRoleContractGuidanceEntry({
+      common: commonLoad.guidance,
+      role: roleLoad.guidance,
+      sourceLabels: [commonDoc.label, roleDoc.label],
+      diagnostics: [commonLoad.diagnostic, roleLoad.diagnostic].filter(Boolean)
+    });
+  }
+
+  return Object.freeze(guidanceByRole);
+}
+
+let cachedRoleContractGuidance = null;
+
+function getRoleContractGuidance() {
+  if (!cachedRoleContractGuidance) {
+    cachedRoleContractGuidance = loadRoleContractGuidance();
+  }
+
+  return cachedRoleContractGuidance;
 }
 
 function normalizePath(pathValue) {
@@ -198,7 +412,8 @@ function createFailedResult(summary, {
 function createSuccessResult(summary, {
   changedFiles = [],
   commandsRun = [],
-  evidence = []
+  evidence = [],
+  changedSurfaceObservation = null
 } = {}) {
   return createWorkerResult({
     status: "success",
@@ -206,7 +421,8 @@ function createSuccessResult(summary, {
     changedFiles: normalizeStringArray(changedFiles),
     commandsRun: normalizeStringArray(commandsRun),
     evidence: normalizeStringArray(evidence),
-    openQuestions: []
+    openQuestions: [],
+    changedSurfaceObservation
   });
 }
 
@@ -404,7 +620,23 @@ function getReadOnlyWorkerObjective(packet) {
   return "Verify the scoped implementation against the original task and acceptance checks.";
 }
 
-function buildCodexPrompt(packet) {
+function buildRoleContractPromptSection(role, roleContractGuidance = getRoleContractGuidance()) {
+  const contractGuidance = roleContractGuidance[role];
+  assert(contractGuidance, `missing role contract guidance for ${role}`);
+
+  return [
+    "ADVISORY_ROLE_CONTRACTS:",
+    `- Source docs: ${contractGuidance.sourceLabels.join(", ")}`,
+    "- These markdown contracts shape worker behavior only. Code-enforced boundaries, status rules, and policy checks remain authoritative.",
+    ...contractGuidance.diagnostics.map((diagnostic) => `- Advisory doc status: ${diagnostic}.`),
+    "COMMON_ROLE_GUIDANCE:",
+    ...contractGuidance.common.map((entry) => `- ${entry}`),
+    `${role.toUpperCase()}_ROLE_GUIDANCE:`,
+    ...contractGuidance.role.map((entry) => `- ${entry}`)
+  ];
+}
+
+function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance()) {
   if (READ_ONLY_ROLES.has(packet.role)) {
     const roleLabel = packet.role === "explorer"
       ? "explorer"
@@ -438,6 +670,8 @@ function buildCodexPrompt(packet) {
       "- Do not modify any files.",
       "- Do not delegate work and do not spawn sub-workers.",
       ...roleSpecificRules,
+      "",
+      ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
       "",
       "ALLOWED_SCOPE:",
       ...packet.allowedFiles.map((file) => `- ${file}`)
@@ -475,7 +709,9 @@ function buildCodexPrompt(packet) {
     "- Never modify files outside ALLOWED_FILES.",
     "- Never modify FORBIDDEN_FILES.",
     "- Do not delegate work and do not spawn sub-workers.",
-    "- Keep changes minimal and task-scoped.",
+    "- Keep changes task-scoped, but prefer the smallest sufficient correct change, not the smallest diff.",
+    "",
+    ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
     "",
     "ALLOWED_FILES:",
     ...packet.allowedFiles.map((file) => `- ${file}`)
@@ -501,7 +737,7 @@ function buildCodexPrompt(packet) {
   return lines.join("\n");
 }
 
-function buildStrictReadOnlyRetryPrompt(packet, previousStdout) {
+function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuidance = getRoleContractGuidance()) {
   const roleLabel = packet.role === "explorer"
     ? "explorer"
     : packet.role === "reviewer"
@@ -520,6 +756,8 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout) {
     "- Do not modify any files.",
     "- Do not delegate work and do not spawn sub-workers.",
     "- Output must be a single raw JSON object with no markdown, prose, or code fences.",
+    "",
+    ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
     "",
     "ALLOWED_SCOPE:",
     ...packet.allowedFiles.map((file) => `- ${file}`)
@@ -1072,6 +1310,7 @@ export function createProcessPiCliLauncher({
   argsBuilder,
   roleProfiles = PROCESS_ROLE_PROFILES,
   fallbackModel = PROCESS_MODEL_FALLBACK,
+  roleContractGuidanceLoader = getRoleContractGuidance,
   modelProbe = createCachedProcessModelProbe({
     providerId: PROCESS_PROVIDER_OPENAI_CODEX,
     candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
@@ -1080,6 +1319,7 @@ export function createProcessPiCliLauncher({
   runCommandFn = runCommand
 } = {}) {
   assert(Number.isInteger(timeoutMs) && timeoutMs > 0, "pi launcher timeoutMs must be a positive integer");
+  assert(typeof roleContractGuidanceLoader === "function", "roleContractGuidanceLoader() must be a function");
   assert(typeof spawnCommandResolver === "function", "spawnCommandResolver(options) must be a function");
   assert(typeof runCommandFn === "function", "runCommandFn(request) must be a function");
   const resolvedArgsBuilder = typeof argsBuilder === "function"
@@ -1097,9 +1337,11 @@ export function createProcessPiCliLauncher({
     promptOverride = null,
     launchSelectionOverride = null
   }) {
-    const prompt = typeof promptOverride === "string" && promptOverride.trim().length > 0
+    const hasPromptOverride = typeof promptOverride === "string" && promptOverride.trim().length > 0;
+    const roleContractGuidance = hasPromptOverride ? null : roleContractGuidanceLoader();
+    const prompt = hasPromptOverride
       ? promptOverride
-      : buildCodexPrompt(packet);
+      : buildCodexPrompt(packet, roleContractGuidance);
     let argsBuilderOutput;
     try {
       argsBuilderOutput = await resolvedArgsBuilder({
@@ -1488,7 +1730,11 @@ export function createProcessWorkerBackend({
           ]);
 
           const retryLaunchSelectionOverride = normalizeLaunchSelectionOverride(launchResult?.launchSelection);
-          const retryPrompt = buildStrictReadOnlyRetryPrompt(normalizedPacket, launchResult?.stdout ?? "");
+          const retryPrompt = buildStrictReadOnlyRetryPrompt(
+            normalizedPacket,
+            launchResult?.stdout ?? "",
+            getRoleContractGuidance()
+          );
 
           launchResult = await launcher({
             packet: clone(normalizedPacket),
@@ -1683,11 +1929,17 @@ export function createProcessWorkerBackend({
           evidence: unique([
             ...evidence,
             packet.role === "implementer"
-              ? "repository_changes_applied: true"
+              ? `repository_changes_applied: ${changedFiles.length > 0 ? "true" : "false"}`
               : "repository_changes_applied: not_applicable",
             "allowlist_enforced: true",
             "recursive_delegation_forbidden: true"
-          ])
+          ]),
+          changedSurfaceObservation: packet.role === "implementer"
+            ? {
+              capture: "complete",
+              paths: changedFiles
+            }
+            : null
         });
       } catch (error) {
         const commandsRun = inferCommandsRun(launchResult);

@@ -6,6 +6,7 @@ import {
   normalizeActionClasses,
   normalizeLineageDepth,
   normalizePolicyProfile,
+  normalizeReviewability,
   normalizeSourceArtifactIds,
   normalizeValidationArtifacts,
   toArtifactReference
@@ -42,6 +43,27 @@ function assertPlainObject(name, value) {
 function assertIsoTimestamp(name, value) {
   assert(typeof value === "string" && value.trim().length > 0, `${name} must be a non-empty string`);
   assert(!Number.isNaN(Date.parse(value)), `${name} must be an ISO timestamp`);
+}
+
+function normalizeExactArtifactType(name, value, expected) {
+  if (value === undefined || value === null) {
+    return expected;
+  }
+
+  assert(typeof value === "string" && value.trim().length > 0, `${name} must be a non-empty string`);
+  const normalized = value.trim();
+  assert(normalized === expected, `${name} must be ${expected}`);
+  return expected;
+}
+
+function normalizeFormatVersion(name, value, expected) {
+  if (value === undefined || value === null) {
+    return expected;
+  }
+
+  assert(Number.isInteger(value), `${name} must be an integer`);
+  assert(value === expected, `${name} must be ${expected}`);
+  return expected;
 }
 
 function stringArraysEqual(left, right) {
@@ -132,17 +154,37 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
   const normalizedRunJournalValidationArtifacts = normalizeValidationArtifacts(runJournal.validationArtifacts, {
     validationOutcome: runJournal.validationOutcome
   });
+  const normalizedRunJournalReviewability = normalizeReviewability(null, {
+    status: runJournal.status,
+    stopReason: normalizedStopReason,
+    stopReasonCode: normalizedStopReasonCode,
+    validationArtifacts: normalizedRunJournalValidationArtifacts,
+    contractRuns: runJournal.contractRuns
+  });
+  if (runJournal.reviewability !== undefined && runJournal.reviewability !== null) {
+    normalizeReviewability(runJournal.reviewability, {
+      status: runJournal.status,
+      stopReason: normalizedStopReason,
+      stopReasonCode: normalizedStopReasonCode,
+      validationArtifacts: normalizedRunJournalValidationArtifacts,
+      contractRuns: runJournal.contractRuns
+    });
+  }
+  const normalizedRunJournalArtifactType = normalizeExactArtifactType(
+    "persistedRun.runJournal.artifactType",
+    runJournal.artifactType,
+    RUN_JOURNAL_ARTIFACT_TYPE
+  );
 
   const normalizedRunJournal = {
     ...runJournal,
-    artifactType: typeof runJournal.artifactType === "string" && runJournal.artifactType.trim().length > 0
-      ? runJournal.artifactType.trim()
-      : RUN_JOURNAL_ARTIFACT_TYPE,
+    artifactType: normalizedRunJournalArtifactType,
     sourceArtifactIds: normalizedRunJournalSourceArtifactIds,
     lineageDepth: normalizedRunJournalLineageDepth,
     actionClasses: normalizedRunJournalActionClasses,
     policyProfile: normalizedRunJournalPolicyProfile,
-    validationArtifacts: normalizedRunJournalValidationArtifacts
+    validationArtifacts: normalizedRunJournalValidationArtifacts,
+    reviewability: normalizedRunJournalReviewability
   };
 
   const defaultSourceArtifactIds = [
@@ -160,15 +202,32 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
     stopReasonCode: normalizedStopReasonCode
   });
   const policyProfile = normalizePolicyProfile(recordInput.policyProfile ?? normalizedRunJournalPolicyProfile);
-  const validationArtifacts = normalizeValidationArtifacts(recordInput.validationArtifacts, {
-    validationOutcome: runJournal.validationOutcome
-  });
+  const validationArtifacts = normalizeValidationArtifacts(
+    recordInput.validationArtifacts ?? normalizedRunJournalValidationArtifacts,
+    { validationOutcome: runJournal.validationOutcome }
+  );
+  if (recordInput.reviewability !== undefined && recordInput.reviewability !== null) {
+    normalizeReviewability(recordInput.reviewability, {
+      status: normalizedRunJournal.status,
+      stopReason: normalizedStopReason,
+      stopReasonCode: normalizedStopReasonCode,
+      validationArtifacts: normalizedRunJournalValidationArtifacts,
+      contractRuns: normalizedRunJournal.contractRuns
+    });
+  }
   const normalizedRepositoryRoot = typeof recordInput.repositoryRoot === "string" && recordInput.repositoryRoot.trim().length > 0
     ? recordInput.repositoryRoot.trim()
     : repositoryRoot;
-  const artifactType = typeof recordInput.artifactType === "string" && recordInput.artifactType.trim().length > 0
-    ? recordInput.artifactType.trim()
-    : PERSISTED_RUN_RECORD_ARTIFACT_TYPE;
+  const artifactType = normalizeExactArtifactType(
+    "persistedRun.artifactType",
+    recordInput.artifactType,
+    PERSISTED_RUN_RECORD_ARTIFACT_TYPE
+  );
+  const formatVersion = normalizeFormatVersion(
+    "persistedRun.formatVersion",
+    recordInput.formatVersion,
+    RUN_STORE_FORMAT_VERSION
+  );
 
   const createdAt = recordInput.createdAt ?? existingCreatedAt ?? nowIso;
   const updatedAt = recordInput.updatedAt ?? nowIso;
@@ -177,7 +236,7 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
 
   return {
     artifactType,
-    formatVersion: RUN_STORE_FORMAT_VERSION,
+    formatVersion,
     repositoryRoot: normalizedRepositoryRoot,
     programId,
     sourceArtifactIds,
@@ -193,6 +252,7 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
     actionClasses,
     policyProfile,
     validationArtifacts,
+    reviewability: normalizedRunJournalReviewability,
     createdAt,
     updatedAt
   };
@@ -447,6 +507,7 @@ export function createRunStore({
           stopReason: _ignoredStopReason,
           stopReasonCode: _ignoredStopReasonCode,
           validationOutcome: _ignoredValidationOutcome,
+          reviewability: _ignoredReviewability,
           artifactType: _ignoredArtifactType,
           repositoryRoot: _ignoredRepositoryRoot,
           sourceArtifactIds: _ignoredSourceArtifactIds,

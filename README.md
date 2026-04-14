@@ -16,10 +16,10 @@ Current implemented scope includes:
 
 - core task and result contracts
 - project-lifecycle contracts for brainstorming, blueprinting, slicing, bootstrapping, and audit
-- operator-facing `/build` sessions with persisted `buildId` state, plain-English status views, and approval-by-id
+- operator-facing `/build` sessions with persisted `buildId` state, plain-English status views, and plan-scoped approval-by-id
 - policy heuristics for risk and human gates
 - workflow planning and execution-program helpers
-- a pure auto-workflow executor with one repair loop by default
+- a pure auto-workflow executor with one in-run repair loop by default
 - a Pi-backed worker adapter and runner boundary with local/scripted runners for tests
 - a role-aware process worker backend for bounded out-of-process execution (`explorer`, `implementer`, `reviewer`, `verifier`)
 - an opt-in `/auto` backend selector with `pi_runtime` (default), `low_risk_process_implementer`, and `process_subagents` modes
@@ -30,21 +30,23 @@ Current implemented scope includes:
 
 ## Live Runtime Status
 
-The reliable live path currently uses the process-backed child-session backend in `src/process-worker-backend.js`.
+The strongest repo-local runtime evidence currently centers on the process-backed child-session backend in `src/process-worker-backend.js`, which is the current local Pi shim path.
 
-- Native Pi host `runWorker(...)` is not reliably available across hosts, so local live execution is routed through backend-selected runner paths.
+- Native Pi host `runWorker(...)` is not reliably available across hosts, so local execution is usually routed through backend-selected runner paths instead of treated as a universal Pi-host guarantee.
 - Backend selection is wired through `src/auto-backend-runner.js`, `src/pi-extension.js`, and the local Pi shim `.pi/extensions/pi-orchestrator.js`.
 - The local shim currently pins `AUTO_BACKEND_MODES.PROCESS_SUBAGENTS`.
-- Proven live in Pi:
+- Implemented and exercised in repo-local tests and local runtime development paths:
   - low-risk `/auto`
-  - high-risk `/auto`
+  - high-risk `/auto` with explicit approval
   - multi-contract `run-program`
   - explorer, implementer, reviewer, and verifier through the process backend
   - approval gating
   - persisted resume flow
   - UI launch summaries that surface selected provider/model information
+- The checked-in `docs/specs/*smoke*.md` files are placeholder smoke notes used by scoped tasks and tests; they are not durable run-evidence artifacts by themselves.
+- Persisted `.pi/runs/*.json` and `.pi/build-sessions/*.json` records are the intended evidence-bearing surfaces described in `docs/RUN-EVIDENCE-SCHEMA.md`, but this repo does not currently ship committed examples of those artifacts.
 
-## Current Live Provider/Model Selection
+## Current Process-Backend Provider/Model Selection
 
 - provider: `openai-codex`
 - explorer: `gpt-5.4`
@@ -52,7 +54,7 @@ The reliable live path currently uses the process-backed child-session backend i
 - reviewer: `gpt-5.4`
 - verifier: `gpt-5.4-mini`
 
-These are selected explicitly in the process backend rather than inherited implicitly from Pi defaults.
+These are selected explicitly in the current process backend path rather than inherited implicitly from Pi defaults.
 
 ## Layout
 
@@ -94,7 +96,9 @@ These are selected explicitly in the process backend rather than inherited impli
 See [`docs/OPERATING-GUIDE.md`](./docs/OPERATING-GUIDE.md) for the stage flow, runtime expectations, and remaining limits.
 For non-technical usage, see [`docs/QUICKSTART.md`](./docs/QUICKSTART.md).
 For the repo doctrine and feature bar, see [`docs/HARNESS-PRINCIPLES.md`](./docs/HARNESS-PRINCIPLES.md).
-For normative behavior and inspectability requirements, see [`docs/HARNESS-CONTRACT.md`](./docs/HARNESS-CONTRACT.md) and [`docs/RUN-EVIDENCE-SCHEMA.md`](./docs/RUN-EVIDENCE-SCHEMA.md).
+For authoritative behavior, state rules, active-profile tightening, and inspectability requirements, see [`docs/HARNESS-CONTRACT.md`](./docs/HARNESS-CONTRACT.md), [`docs/POLICY-PROFILES.md`](./docs/POLICY-PROFILES.md), and [`docs/RUN-EVIDENCE-SCHEMA.md`](./docs/RUN-EVIDENCE-SCHEMA.md).
+For future-facing hardening that is not yet enforced, see [`docs/HARDENING-ROADMAP.md`](./docs/HARDENING-ROADMAP.md).
+If a README summary differs from those normative docs, the normative docs win.
 
 ## Pi Commands And Tools
 
@@ -112,8 +116,8 @@ Available Pi command and tool surfaces:
 - `inspect_worker_runtime`: inspect whether the live Pi host exposes worker execution
 - `validate_worker_result`: validate structured worker output
 - `/brainstorm`: command entrypoint for structured alternatives
-- `/build`: operator-facing plain-English intake, staged plan, and approval checkpoint
-- `/build-approve`: approve and execute a pending build session by `buildId`
+- `/build`: operator-facing plain-English intake, staged plan, and approval checkpoint for a stored build plan
+- `/build-approve`: approve and execute the current stored build plan by `buildId`; approval is limited to that plan revision and its approved action classes
 - `/build-status`: inspect plain-English build-session status by `buildId`
 - `/blueprint`: command entrypoint for a frozen project blueprint
 - `/slice`: command entrypoint for milestone execution contracts
@@ -127,6 +131,6 @@ Available Pi command and tool surfaces:
 
 ## Current Limits
 
-- Native Pi worker execution is still not reliable in every host, so the process backend remains the live path that matters most.
+- Native Pi worker execution is still not reliable in every host, so the process backend remains the current local runtime path that matters most.
 - Operator controls, evidence surfaces, and runtime diagnostics should continue to harden from real task runs.
 - Policy and safety should remain code-enforced rather than prompt-dependent as the harness grows.

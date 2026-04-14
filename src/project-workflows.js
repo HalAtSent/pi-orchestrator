@@ -1,4 +1,7 @@
+import { createHash } from "node:crypto";
+
 import { classifyRisk } from "./policies.js";
+import { compileExecutionContract } from "./program-compiler.js";
 import {
   createAuditReport,
   createBootstrapContract,
@@ -9,6 +12,10 @@ import {
   validateProjectBlueprint,
   validateProposalSet
 } from "./project-contracts.js";
+import {
+  derivePlannedActionClassesFromWorkflow,
+  inferActionClassesFromCommands
+} from "./run-evidence.js";
 
 const SUPPORTED_PROJECT_TYPES = Object.freeze(["automation-package", "service", "application", "library"]);
 const SUPPORTED_AUTONOMY_MODES = Object.freeze(["autonomous", "guarded"]);
@@ -48,6 +55,26 @@ function normalizeEnumString(name, value, supportedValues) {
     `${name} must be one of: ${supportedValues.join(", ")}`
   );
   return normalized;
+}
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) {
+    return value.map((item) => stableSerialize(item));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, stableSerialize(value[key])])
+    );
+  }
+
+  return value;
+}
+
+function unique(values) {
+  return [...new Set(values)];
 }
 
 function normalizeProjectType(value) {
@@ -719,6 +746,41 @@ export function sliceProject({ blueprint } = {}) {
   });
 }
 
+export function createExecutionProgramPlanFingerprint(executionProgramInput) {
+  validateExecutionProgram(executionProgramInput);
+  const canonicalProgram = stableSerialize(structuredClone(executionProgramInput));
+
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalProgram))
+    .digest("hex");
+}
+
+export function deriveExecutionProgramActionClasses(executionProgramInput, {
+  compiler = compileExecutionContract
+} = {}) {
+  validateExecutionProgram(executionProgramInput);
+  assert(typeof compiler === "function", "compiler(contract, options) is required");
+
+  const planned = new Set();
+  for (const contract of executionProgramInput.contracts) {
+    const compiledPlan = compiler(contract, {
+      contextFiles: []
+    });
+
+    for (const actionClass of derivePlannedActionClassesFromWorkflow(compiledPlan.workflow)) {
+      planned.add(actionClass);
+    }
+
+    for (const actionClass of inferActionClassesFromCommands(contract.verificationPlan)) {
+      planned.add(actionClass);
+    }
+  }
+
+  return unique([
+    ...planned
+  ]);
+}
+
 export function bootstrapProject({ blueprint } = {}) {
   validateProjectBlueprint(blueprint);
   const program = sliceProject({ blueprint });
@@ -891,6 +953,17 @@ export function auditProject({ blueprint, executionProgram } = {}) {
       summary: "One or more contracts are missing explicit verification steps.",
       recommendation: "Require a concrete verification plan on every contract before execution."
     });
+  }
+
+  for (const contract of program.contracts) {
+    if (contract.scopePaths.length === 0) {
+      findings.push({
+        id: `missing-scope-paths-${contract.id}`,
+        severity: "high",
+        summary: `Contract ${contract.id} does not declare any scope paths.`,
+        recommendation: "Require at least one explicit scope path on every contract before execution."
+      });
+    }
   }
 
   const status = findings.length === 0 ? "pass" : "attention_required";

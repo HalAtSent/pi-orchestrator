@@ -9,6 +9,8 @@ import {
   bootstrapProject,
   brainstormProject,
   buildProjectLifecycleArtifacts,
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses,
   sliceProject
 } from "../src/project-workflows.js";
 
@@ -187,6 +189,39 @@ test("slice returns an execution program with ordered milestone contracts", () =
   assert.ok(executionProgram.completionChecks.length >= 3);
 });
 
+test("execution program approval helpers derive a stable fingerprint and pre-execution action classes", () => {
+  const brief = loadFixture("project-brief.json");
+  const { executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const fingerprint = createExecutionProgramPlanFingerprint(executionProgram);
+  const actionClasses = deriveExecutionProgramActionClasses(executionProgram);
+  const modifiedProgram = structuredClone(executionProgram);
+
+  modifiedProgram.contracts[0].summary = `${modifiedProgram.contracts[0].summary} (changed)`;
+
+  assert.match(fingerprint, /^[a-f0-9]{64}$/u);
+  assert.deepEqual(actionClasses, ["read_repo", "write_allowed", "execute_local_command"]);
+  assert.notEqual(
+    createExecutionProgramPlanFingerprint(modifiedProgram),
+    fingerprint
+  );
+});
+
+test("execution program approval helpers promote install and git mutation classes from explicit verification commands", () => {
+  const brief = loadFixture("project-brief.json");
+  const { executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const programWithCommandSignals = structuredClone(executionProgram);
+
+  programWithCommandSignals.contracts[0].verificationPlan = [
+    "npm install --save-dev vitest",
+    "git commit -m \"checkpoint\""
+  ];
+
+  assert.deepEqual(
+    deriveExecutionProgramActionClasses(programWithCommandSignals),
+    ["read_repo", "write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]
+  );
+});
+
 test("bootstrap extracts the first executable contract with commands", () => {
   const brief = loadFixture("project-brief.json");
   const { blueprint } = buildProjectLifecycleArtifacts(brief);
@@ -320,4 +355,20 @@ test("audit flags duplicate contract ids in execution-program topology", () => {
   assert.equal(auditReport.status, "attention_required");
   assert.ok(auditReport.findings.some((finding) => finding.id === `duplicate-contract-id-${duplicateContract.id}`));
   assert.ok(auditReport.findings.some((finding) => finding.summary.includes(`duplicate contract id: ${duplicateContract.id}`)));
+});
+
+test("audit flags contracts that omit scope paths", () => {
+  const brief = loadFixture("project-brief.json");
+  const { blueprint, executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const brokenProgram = structuredClone(executionProgram);
+  brokenProgram.contracts[0].scopePaths = [];
+
+  const auditReport = auditProject({
+    blueprint,
+    executionProgram: brokenProgram
+  });
+
+  assert.equal(auditReport.status, "attention_required");
+  assert.ok(auditReport.findings.some((finding) => finding.id === "missing-scope-paths-bootstrap-package"));
+  assert.ok(auditReport.findings.some((finding) => finding.summary.includes("does not declare any scope paths")));
 });

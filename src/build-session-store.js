@@ -2,15 +2,21 @@
 import { join, resolve } from "node:path";
 
 import {
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
+} from "./project-workflows.js";
+import {
   createAuditReport,
   createExecutionProgram,
   createProjectBlueprint,
   createProposalSet
 } from "./project-contracts.js";
 import {
+  normalizeDeclaredActionClasses,
   normalizeActionClasses,
   normalizeLineageDepth,
   normalizePolicyProfile,
+  normalizeReviewability,
   normalizeSourceArtifactIds,
   normalizeStopReasonCode,
   normalizeValidationArtifacts,
@@ -23,6 +29,12 @@ export const BUILD_SESSION_STATUSES = Object.freeze([
   "awaiting_approval",
   "approved",
   "running",
+  "success",
+  "blocked",
+  "failed",
+  "repair_required"
+]);
+const TERMINAL_BUILD_SESSION_STATUSES = new Set([
   "success",
   "blocked",
   "failed",
@@ -47,6 +59,27 @@ function assertIsoTimestamp(name, value) {
   assert(!Number.isNaN(Date.parse(value)), `${name} must be an ISO timestamp`);
 }
 
+function normalizeExactArtifactType(name, value, expected) {
+  if (value === undefined || value === null) {
+    return expected;
+  }
+
+  assert(typeof value === "string" && value.trim().length > 0, `${name} must be a non-empty string`);
+  const normalized = value.trim();
+  assert(normalized === expected, `${name} must be ${expected}`);
+  return expected;
+}
+
+function normalizeFormatVersion(name, value, expected) {
+  if (value === undefined || value === null) {
+    return expected;
+  }
+
+  assert(Number.isInteger(value), `${name} must be an integer`);
+  assert(value === expected, `${name} must be ${expected}`);
+  return expected;
+}
+
 function clone(value) {
   return structuredClone(value);
 }
@@ -59,6 +92,25 @@ function normalizeBuildId(buildId) {
 function normalizeProgramId(programId) {
   assert(typeof programId === "string" && programId.trim().length > 0, "programId must be a non-empty string");
   return programId.trim();
+}
+
+function normalizePlanFingerprint(name, value) {
+  assert(typeof value === "string" && value.trim().length > 0, `${name} must be a non-empty string`);
+  return value.trim().toLowerCase();
+}
+
+function stringArraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function normalizeIntake(intakeInput) {
@@ -82,7 +134,13 @@ function normalizeLifecycle(lifecycleInput) {
   };
 }
 
-function normalizeApproval(approvalInput, { defaultApproved = false } = {}) {
+function normalizeApproval(approvalInput, {
+  defaultApproved = false,
+  defaultProgramId = null,
+  defaultPlanFingerprint = null,
+  defaultActionClasses = [],
+  defaultPolicyProfile = null
+} = {}) {
   const nowIso = new Date().toISOString();
   const source = approvalInput && typeof approvalInput === "object" && !Array.isArray(approvalInput)
     ? approvalInput
@@ -99,9 +157,56 @@ function normalizeApproval(approvalInput, { defaultApproved = false } = {}) {
     assertIsoTimestamp("buildSession.approval.approvedAt", approvedAt);
   }
 
+  const programId = source.programId === undefined || source.programId === null
+    ? defaultProgramId
+    : normalizeProgramId(source.programId);
+
+  if (programId !== null && defaultProgramId !== null) {
+    assert(
+      programId === defaultProgramId,
+      "buildSession.approval.programId must match buildSession.lifecycle.executionProgram.id"
+    );
+  }
+
+  const planFingerprint = source.planFingerprint === undefined || source.planFingerprint === null
+    ? defaultPlanFingerprint
+    : normalizePlanFingerprint("buildSession.approval.planFingerprint", source.planFingerprint);
+
+  if (planFingerprint !== null && defaultPlanFingerprint !== null) {
+    assert(
+      planFingerprint === defaultPlanFingerprint,
+      "buildSession.approval.planFingerprint must match buildSession.planFingerprint"
+    );
+  }
+
+  const actionClasses = normalizeDeclaredActionClasses(source.actionClasses, {
+    fallback: defaultActionClasses
+  });
+  const normalizedActionClasses = actionClasses.length === 0 && defaultActionClasses.length > 0
+    ? [...defaultActionClasses]
+    : actionClasses;
+  if (defaultActionClasses !== null) {
+    assert(
+      stringArraysEqual(normalizedActionClasses, defaultActionClasses),
+      "buildSession.approval.actionClasses must match the stored execution-program approval scope"
+    );
+  }
+
+  const policyProfile = normalizePolicyProfile(source.policyProfile ?? defaultPolicyProfile);
+  if (defaultPolicyProfile !== null) {
+    assert(
+      policyProfile === defaultPolicyProfile,
+      "buildSession.approval.policyProfile must match the resolved execution policy profile"
+    );
+  }
+
   return {
     approved,
-    approvedAt
+    approvedAt,
+    programId,
+    planFingerprint,
+    actionClasses: normalizedActionClasses,
+    policyProfile
   };
 }
 
@@ -169,6 +274,26 @@ function normalizeExecutionState(executionInput, {
     source.validationArtifacts ?? defaultValidationArtifacts,
     { validationOutcome }
   );
+  const inferredReviewability = normalizeReviewability(null, {
+    status,
+    stopReason,
+    stopReasonCode,
+    validationArtifacts
+  });
+  let reviewability = inferredReviewability;
+  if (source.reviewability !== undefined && source.reviewability !== null) {
+    const normalizedProvidedReviewability = normalizeReviewability(source.reviewability, {
+      status,
+      stopReason,
+      stopReasonCode,
+      validationArtifacts
+    });
+    const staleNonTerminalClassification = TERMINAL_BUILD_SESSION_STATUSES.has(status) &&
+      normalizedProvidedReviewability.reasons.includes("non_terminal_status");
+    reviewability = staleNonTerminalClassification
+      ? inferredReviewability
+      : normalizedProvidedReviewability;
+  }
 
   return {
     status,
@@ -178,6 +303,7 @@ function normalizeExecutionState(executionInput, {
     actionClasses,
     policyProfile,
     validationArtifacts,
+    reviewability,
     programId,
     completedContracts,
     pendingContracts,
@@ -196,16 +322,40 @@ function normalizePersistedBuildSessionRecord(recordInput, { existingCreatedAt, 
   const buildId = normalizeBuildId(recordInput.buildId);
   const intake = normalizeIntake(recordInput.intake);
   const lifecycle = normalizeLifecycle(recordInput.lifecycle);
+  const derivedPlanFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+  const planFingerprint = normalizePlanFingerprint(
+    "buildSession.planFingerprint",
+    recordInput.planFingerprint ?? derivedPlanFingerprint
+  );
+  assert(
+    planFingerprint === derivedPlanFingerprint,
+    "buildSession.planFingerprint must match the stored lifecycle.executionProgram content"
+  );
+  const plannedApprovalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
+  const defaultPolicyProfile = normalizePolicyProfile(recordInput.execution?.policyProfile ?? null);
   const approval = normalizeApproval(recordInput.approval, {
-    defaultApproved: false
+    defaultApproved: false,
+    defaultProgramId: lifecycle.executionProgram.id,
+    defaultPlanFingerprint: planFingerprint,
+    defaultActionClasses: plannedApprovalActionClasses,
+    defaultPolicyProfile
   });
   const execution = normalizeExecutionState(recordInput.execution, {
     defaultStatus: approval.approved ? "approved" : "awaiting_approval",
     defaultPendingContracts: lifecycle.executionProgram.contracts.length,
     defaultProgramId: null,
     defaultActionClasses: [],
-    defaultPolicyProfile: null
+    defaultPolicyProfile: approval.policyProfile
   });
+
+  assert(
+    approval.programId === lifecycle.executionProgram.id,
+    "buildSession.approval.programId must match buildSession.lifecycle.executionProgram.id"
+  );
+  assert(
+    approval.planFingerprint === planFingerprint,
+    "buildSession.approval.planFingerprint must match buildSession.planFingerprint"
+  );
 
   if (execution.programId !== null) {
     assert(
@@ -225,9 +375,16 @@ function normalizePersistedBuildSessionRecord(recordInput, { existingCreatedAt, 
   const lineageDepth = normalizeLineageDepth(recordInput.lineageDepth, {
     fallback: 1
   });
-  const artifactType = typeof recordInput.artifactType === "string" && recordInput.artifactType.trim().length > 0
-    ? recordInput.artifactType.trim()
-    : BUILD_SESSION_ARTIFACT_TYPE;
+  const artifactType = normalizeExactArtifactType(
+    "buildSession.artifactType",
+    recordInput.artifactType,
+    BUILD_SESSION_ARTIFACT_TYPE
+  );
+  const formatVersion = normalizeFormatVersion(
+    "buildSession.formatVersion",
+    recordInput.formatVersion,
+    BUILD_SESSION_STORE_FORMAT_VERSION
+  );
   const normalizedRepositoryRoot = typeof recordInput.repositoryRoot === "string" && recordInput.repositoryRoot.trim().length > 0
     ? recordInput.repositoryRoot.trim()
     : repositoryRoot;
@@ -240,10 +397,11 @@ function normalizePersistedBuildSessionRecord(recordInput, { existingCreatedAt, 
 
   return {
     artifactType,
-    formatVersion: BUILD_SESSION_STORE_FORMAT_VERSION,
+    formatVersion,
     repositoryRoot: normalizedRepositoryRoot,
     buildId,
     programId,
+    planFingerprint,
     sourceArtifactIds,
     lineageDepth,
     intake,
@@ -361,6 +519,7 @@ export function createBuildSessionStore({
         artifactType: _ignoredArtifactType,
         repositoryRoot: _ignoredRepositoryRoot,
         programId: _ignoredProgramId,
+        planFingerprint: _ignoredPlanFingerprint,
         sourceArtifactIds: _ignoredSourceArtifactIds,
         lineageDepth: _ignoredLineageDepth,
         ...nextRecordInput

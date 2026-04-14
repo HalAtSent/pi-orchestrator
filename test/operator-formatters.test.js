@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import {
+  buildProjectLifecycleArtifacts,
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
+} from "../src/project-workflows.js";
 import {
   formatOperatorApprovalCheckpoint,
   formatOperatorBuildSessionLookupBlocked,
@@ -30,8 +34,11 @@ function createSampleIntake() {
 
 function createSampleBuildSession() {
   const lifecycle = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const planFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+  const approvalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
   return {
     buildId: "build-abc123",
+    planFingerprint,
     intake: createSampleIntake(),
     lifecycle: {
       proposalSet: lifecycle.proposalSet,
@@ -41,11 +48,22 @@ function createSampleBuildSession() {
     },
     approval: {
       approved: false,
-      approvedAt: null
+      approvedAt: null,
+      programId: lifecycle.executionProgram.id,
+      planFingerprint,
+      actionClasses: approvalActionClasses,
+      policyProfile: "default"
     },
     execution: {
       status: "awaiting_approval",
       stopReason: null,
+      actionClasses: [],
+      policyProfile: "default",
+      validationArtifacts: [],
+      reviewability: {
+        status: "not_reviewable",
+        reasons: ["non_terminal_status"]
+      },
       programId: null,
       completedContracts: 0,
       pendingContracts: lifecycle.executionProgram.contracts.length,
@@ -145,8 +163,123 @@ test("build session status formatter shows a plain-English status snapshot", () 
   assert.match(status, /Build Session/u);
   assert.match(status, /Build ID: build-abc123/u);
   assert.match(status, /Approval: pending/u);
+  assert.match(status, /Plan fingerprint: /u);
+  assert.match(status, /Approval scope: read_repo, write_allowed, execute_local_command/u);
   assert.match(status, /Execution status: awaiting_approval/u);
+  assert.match(status, /Changed surfaces:/u);
+  assert.match(status, /Proof collected:/u);
+  assert.match(status, /Unproven claims:/u);
+  assert.match(status, /Reviewability: Machine assessment: not reviewable\./u);
+  assert.match(status, /Approval needed: Yes\. Approve kickoff with \/build-approve build-abc123\./u);
+  assert.match(status, /Recovery \/ undo notes:/u);
   assert.match(status, /Next action: Approve kickoff with \/build-approve build-abc123\./u);
+});
+
+test("build session status distinguishes planned scope from executed evidence when run data exists", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "blocked",
+      stopReason: "waiting for dependency",
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: ["run explorer: success"],
+          changedSurface: {
+            capture: "not_captured",
+            paths: []
+          },
+          openQuestions: ["Restore previous file versions manually if rollback is needed."]
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: buildSession.lifecycle.executionProgram.contracts.slice(1).map((contract) => contract.id)
+    }
+  });
+
+  assert.match(status, /Changed surfaces: No observed changed-path evidence is persisted for recorded runs\./u);
+  assert.match(status, /Planned scope for contracts with recorded runs:/u);
+  assert.match(status, /Proof collected: 1 contract run record\(s\): 1 success\./u);
+  assert.match(status, /Recovery \/ undo notes: Persisted guidance:/u);
+});
+
+test("build session status reports exact observed changed paths when complete capture exists", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "success",
+      stopReason: null,
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: ["run implementer: success"],
+          changedSurface: {
+            capture: "complete",
+            paths: ["src/helpers.js"]
+          },
+          openQuestions: []
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: []
+    }
+  });
+
+  assert.match(status, /Changed surfaces: Observed changed paths are exact for recorded runs: src\/helpers\.js\./u);
+  assert.doesNotMatch(status, /Changed-path capture is partial/u);
+});
+
+test("build session status reports partial observed changed paths honestly", () => {
+  const buildSession = createSampleBuildSession();
+  const [firstContract, secondContract] = buildSession.lifecycle.executionProgram.contracts;
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "blocked",
+      stopReason: "waiting for dependency",
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: ["run implementer: success"],
+          changedSurface: {
+            capture: "partial",
+            paths: ["src/helpers.js"]
+          },
+          openQuestions: []
+        },
+        {
+          contractId: secondContract.id,
+          status: "blocked",
+          summary: "Waiting for dependency.",
+          evidence: ["run explorer: blocked"],
+          changedSurface: {
+            capture: "not_captured",
+            paths: []
+          },
+          openQuestions: ["Retry once dependency is available."]
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: [secondContract.id]
+    }
+  });
+
+  assert.match(status, /Changed surfaces: Observed changed paths are partial for recorded runs: src\/helpers\.js\./u);
+  assert.match(status, /Planned scope for runs without complete changed-path capture:/u);
+  assert.match(status, /Unproven claims: Changed-path capture is partial;/u);
 });
 
 test("build session blocked lookup formatter stays operator-friendly", () => {

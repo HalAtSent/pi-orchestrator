@@ -1,6 +1,9 @@
 import { runPlannedWorkflow } from "./auto-workflow.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { compileExecutionContract } from "./program-compiler.js";
+import { normalizeChangedSurface, normalizeChangedSurfaceObservation } from "./run-evidence.js";
+
+const IMPLEMENTER_ROLE = "implementer";
 
 function assert(condition, message) {
   if (!condition) {
@@ -17,6 +20,7 @@ function toBlockedContractResult(contractId, reason, { evidence = [], openQuesti
     status: "blocked",
     summary: `Execution blocked for ${contractId}: ${reason}`,
     evidence: [...evidence],
+    changedSurface: normalizeChangedSurface(null),
     openQuestions: [
       ...openQuestions
     ]
@@ -36,7 +40,19 @@ function normalizeContractStatus(status) {
 }
 
 function createExecutionEvidence(compiledPlan, execution) {
-  const runEvidence = execution.runs.map((run) => `run ${run.packet.role}: ${run.result.status}`);
+  const runEvidence = execution.runs.flatMap((run) => {
+    const evidence = [`run ${run.packet.role}: ${run.result.status}`];
+    const commandsRun = Array.isArray(run?.result?.commandsRun) ? run.result.commandsRun : [];
+
+    for (const command of commandsRun) {
+      if (typeof command !== "string" || command.trim().length === 0) {
+        continue;
+      }
+      evidence.push(`run ${run.packet.role} command: ${command.trim()}`);
+    }
+
+    return evidence;
+  });
 
   return [
     `compiled workflow: ${compiledPlan.workflow.workflowId}`,
@@ -59,16 +75,63 @@ function createExecutionOpenQuestions(execution) {
   return unique(fromRuns);
 }
 
+function getObservedChangedSurface(runResult) {
+  try {
+    return normalizeChangedSurfaceObservation(runResult?.changedSurfaceObservation, {
+      fieldName: "workerResult.changedSurfaceObservation"
+    });
+  } catch {
+    return null;
+  }
+}
+
+function deriveChangedSurface(execution) {
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+  const successfulImplementerRuns = runs.filter((run) => (
+    run?.packet?.role === IMPLEMENTER_ROLE && run?.result?.status === "success"
+  ));
+
+  if (successfulImplementerRuns.length === 0) {
+    return normalizeChangedSurface(null);
+  }
+
+  const observedRuns = successfulImplementerRuns
+    .map((run) => ({
+      run,
+      trusted: run?.provenance?.changedSurfaceObservationTrusted === true,
+      observation: getObservedChangedSurface(run?.result)
+    }))
+    .filter((entry) => entry.trusted && entry.observation?.capture === "complete");
+  if (observedRuns.length === 0) {
+    return normalizeChangedSurface(null);
+  }
+
+  const observedPaths = observedRuns.flatMap((entry) => (
+    Array.isArray(entry.observation?.paths) ? entry.observation.paths : []
+  ));
+
+  const capture = observedRuns.length === successfulImplementerRuns.length
+    ? "complete"
+    : "partial";
+
+  return normalizeChangedSurface({
+    capture,
+    paths: observedPaths
+  });
+}
+
 function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution) {
   const status = normalizeContractStatus(execution.status);
   const evidence = createExecutionEvidence(compiledPlan, execution);
   const openQuestions = createExecutionOpenQuestions(execution);
+  const changedSurface = deriveChangedSurface(execution);
 
   if (status === "success") {
     return {
       status,
       summary: `Executed ${contractId} through ${execution.runs.length} bounded packet run(s).`,
       evidence,
+      changedSurface,
       openQuestions
     };
   }
@@ -78,6 +141,7 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     status,
     summary: `Contract ${contractId} ${status}: ${reason}`,
     evidence,
+    changedSurface,
     openQuestions
   };
 }

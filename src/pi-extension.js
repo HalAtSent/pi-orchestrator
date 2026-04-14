@@ -27,12 +27,17 @@ import {
 } from "./program-runner.js";
 import {
   normalizeActionClasses,
+  normalizeDeclaredActionClasses,
   normalizePolicyProfile,
+  normalizeReviewability,
+  normalizeStopReasonCode,
   normalizeValidationArtifacts
 } from "./run-evidence.js";
 import {
   brainstormProject,
-  buildProjectLifecycleArtifacts
+  buildProjectLifecycleArtifacts,
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
 } from "./project-workflows.js";
 import {
   formatOperatorApprovalCheckpoint,
@@ -384,8 +389,18 @@ function parseBuildSessionIdArgs(args, { commandName } = {}) {
 }
 
 function summarizeBuildSessionExecutionFromRunJournal(runJournal) {
-  const stopReasonCode = runJournal.stopReasonCode ?? null;
+  const stopReasonCode = normalizeStopReasonCode(runJournal.stopReasonCode, {
+    status: runJournal.status,
+    stopReason: runJournal.stopReason
+  });
   const validationOutcome = runJournal.validationOutcome;
+  const reviewability = normalizeReviewability(runJournal.reviewability, {
+    status: runJournal.status,
+    stopReason: runJournal.stopReason ?? null,
+    stopReasonCode,
+    validationArtifacts: runJournal.validationArtifacts,
+    contractRuns: runJournal.contractRuns
+  });
 
   return {
     status: runJournal.status,
@@ -400,10 +415,147 @@ function summarizeBuildSessionExecutionFromRunJournal(runJournal) {
     validationArtifacts: normalizeValidationArtifacts(runJournal.validationArtifacts, {
       validationOutcome
     }),
+    reviewability,
     programId: runJournal.programId,
     completedContracts: runJournal.completedContractIds.length,
     pendingContracts: runJournal.pendingContractIds.length,
     updatedAt: new Date().toISOString()
+  };
+}
+
+function createBuildApprovalBinding(buildSession) {
+  return {
+    programId: buildSession.approval?.programId ?? buildSession.lifecycle.executionProgram.id,
+    planFingerprint: buildSession.approval?.planFingerprint ?? buildSession.planFingerprint,
+    actionClasses: Array.isArray(buildSession.approval?.actionClasses)
+      ? [...buildSession.approval.actionClasses]
+      : [],
+    policyProfile: normalizePolicyProfile(
+      buildSession.approval?.policyProfile ?? buildSession.execution?.policyProfile
+    )
+  };
+}
+
+function formatBuildApprovalScopeValue(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? `"${value.trim()}"`
+    : "none";
+}
+
+function formatBuildBlockedText({ buildSession = null, buildId = null, message }) {
+  if (buildSession) {
+    return [formatOperatorBuildSessionStatus(buildSession), formatOperatorBlockedMessage({ message })].join("\n\n");
+  }
+
+  return formatOperatorBuildSessionLookupBlocked({
+    buildId,
+    message
+  });
+}
+
+function inspectBuildSessionApprovalCoverage(buildSession) {
+  const executionProgram = buildSession.lifecycle.executionProgram;
+  const currentProgramId = executionProgram.id;
+  const currentPlanFingerprint = createExecutionProgramPlanFingerprint(executionProgram);
+  const currentActionClasses = deriveExecutionProgramActionClasses(executionProgram);
+  const approval = buildSession.approval ?? {};
+  const reasons = [];
+  let approvedActionClasses = [];
+  let approvedActionClassesError = null;
+
+  if (approval.approved !== true) {
+    reasons.push("no active approval is recorded for the current stored plan");
+  }
+
+  if (approval.programId !== currentProgramId) {
+    reasons.push(
+      `approved programId ${formatBuildApprovalScopeValue(approval.programId)} does not match current stored programId ${formatBuildApprovalScopeValue(currentProgramId)}`
+    );
+  }
+
+  if (approval.planFingerprint !== currentPlanFingerprint) {
+    reasons.push(
+      `approved planFingerprint ${formatBuildApprovalScopeValue(approval.planFingerprint)} does not match current stored planFingerprint ${formatBuildApprovalScopeValue(currentPlanFingerprint)}`
+    );
+  }
+
+  try {
+    approvedActionClasses = normalizeDeclaredActionClasses(approval.actionClasses, {
+      fallback: []
+    });
+  } catch (error) {
+    approvedActionClassesError = error instanceof Error ? error.message : String(error);
+    reasons.push(`recorded approval actionClasses are invalid: ${approvedActionClassesError}`);
+  }
+
+  const missingActionClasses = approvedActionClassesError
+    ? [...currentActionClasses]
+    : currentActionClasses.filter((actionClass) => !approvedActionClasses.includes(actionClass));
+
+  if (!approvedActionClassesError && missingActionClasses.length > 0) {
+    reasons.push(
+      `current stored plan requires action classes outside the approved scope: ${missingActionClasses.join(", ")}`
+    );
+  }
+
+  return {
+    ok: reasons.length === 0,
+    currentProgramId,
+    currentPlanFingerprint,
+    currentActionClasses,
+    approvedActionClasses,
+    missingActionClasses,
+    stopReason: reasons.length === 0
+      ? null
+      : `Fresh approval is required before execution: ${reasons.join("; ")}.`
+  };
+}
+
+async function persistBlockedBuildSessionExecution(buildSessionStore, buildSession, message) {
+  if (!buildSession || typeof buildSessionStore?.updateBuildSession !== "function") {
+    return buildSession;
+  }
+
+  try {
+    return await buildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+      if (!existingSession) {
+        throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+      }
+
+      return {
+        ...existingSession,
+        execution: {
+          ...existingSession.execution,
+          status: "blocked",
+          stopReason: message,
+          policyProfile: normalizePolicyProfile(
+            existingSession.approval?.policyProfile ?? existingSession.execution?.policyProfile
+          ),
+          programId: existingSession.execution.programId ?? existingSession.lifecycle.executionProgram.id,
+          updatedAt: new Date().toISOString()
+        }
+      };
+    });
+  } catch {
+    return buildSession;
+  }
+}
+
+async function enforceBuildSessionApprovalCoverage({ buildSession, buildSessionStore }) {
+  const coverage = inspectBuildSessionApprovalCoverage(buildSession);
+  if (coverage.ok) {
+    return {
+      ok: true,
+      buildSession,
+      coverage
+    };
+  }
+
+  return {
+    ok: false,
+    stopReason: coverage.stopReason,
+    coverage,
+    buildSession: await persistBlockedBuildSessionExecution(buildSessionStore, buildSession, coverage.stopReason)
   };
 }
 
@@ -432,6 +584,10 @@ function validationArtifactsEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function reviewabilityEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
 function buildSessionExecutionMatchesRunJournal(buildSession, runJournal) {
   const expectedExecution = summarizeBuildSessionExecutionFromRunJournal(runJournal);
 
@@ -450,6 +606,10 @@ function buildSessionExecutionMatchesRunJournal(buildSession, runJournal) {
     validationArtifactsEqual(
       Array.isArray(buildSession.execution.validationArtifacts) ? buildSession.execution.validationArtifacts : [],
       expectedExecution.validationArtifacts
+    ) &&
+    reviewabilityEqual(
+      buildSession.execution.reviewability ?? null,
+      expectedExecution.reviewability
     );
 }
 
@@ -641,17 +801,71 @@ export function createPiExtension({
               throw new Error(`No build session found for build id: ${buildSession.buildId}`);
             }
 
+            const approvalBinding = createBuildApprovalBinding(existingSession);
             return {
               ...existingSession,
               approval: {
                 ...existingSession.approval,
                 approved: true,
-                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString()
+                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString(),
+                ...approvalBinding
               },
+              execution: {
+                ...existingSession.execution,
+                status: "approved",
+                stopReason: null,
+                actionClasses: existingSession.execution.actionClasses,
+                policyProfile: approvalBinding.policyProfile,
+                updatedAt: new Date().toISOString()
+              }
+            };
+          });
+
+          const inlineApprovalCoverage = await enforceBuildSessionApprovalCoverage({
+            buildSession,
+            buildSessionStore: resolvedBuildSessionStore
+          });
+          if (!inlineApprovalCoverage.ok) {
+            buildSession = inlineApprovalCoverage.buildSession;
+            const message = inlineApprovalCoverage.stopReason;
+
+            ctx.ui.notify(`build blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build blocked");
+
+            return {
+              status: "blocked",
+              stopReason: message,
+              summary: "Build flow blocked before execution.",
+              buildId: buildSession?.buildId ?? null,
+              buildSession,
+              text: formatBuildBlockedText({
+                buildSession,
+                buildId: buildSession?.buildId ?? null,
+                message
+              }),
+              details: {
+                buildId: buildSession?.buildId ?? null,
+                stopReason: message,
+                buildSession,
+                approvalCoverage: inlineApprovalCoverage.coverage
+              }
+            };
+          }
+
+          buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
+            if (!existingSession) {
+              throw new Error(`No build session found for build id: ${buildSession.buildId}`);
+            }
+
+            const approvalBinding = createBuildApprovalBinding(existingSession);
+            return {
+              ...existingSession,
               execution: {
                 ...existingSession.execution,
                 status: "running",
                 stopReason: null,
+                actionClasses: existingSession.execution.actionClasses,
+                policyProfile: approvalBinding.policyProfile,
                 programId: lifecycle.executionProgram.id,
                 completedContracts: 0,
                 pendingContracts: lifecycle.executionProgram.contracts.length,
@@ -678,7 +892,7 @@ export function createPiExtension({
             approvalRequested: true,
             runJournal
           });
-          const sessionStatus = formatOperatorBuildSessionStatus(buildSession);
+          const sessionStatus = formatOperatorBuildSessionStatus(buildSession, { runJournal });
           const text = [sessionStatus, intakeSummary, stagedPlan, approvalCheckpoint].join("\n\n");
           const recommendedNextAction = `/build-status ${buildSession.buildId}`;
 
@@ -714,44 +928,33 @@ export function createPiExtension({
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (buildSession && buildSession.approval.approved) {
-            try {
-              buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
-                if (!existingSession) {
-                  throw new Error(`No build session found for build id: ${buildSession.buildId}`);
-                }
-
-                return {
-                  ...existingSession,
-                  execution: {
-                    ...existingSession.execution,
-                    status: "blocked",
-                    stopReason: message,
-                    programId: existingSession.execution.programId ?? existingSession.lifecycle.executionProgram.id,
-                    updatedAt: new Date().toISOString()
-                  }
-                };
-              });
-            } catch {
-              // The command still returns a blocked response even if session persistence fails here.
-            }
+            buildSession = await persistBlockedBuildSessionExecution(
+              resolvedBuildSessionStore,
+              buildSession,
+              message
+            );
           }
 
           ctx.ui.notify(`build blocked: ${message}`, "warning");
           ctx.ui.setStatus("workflow", "build blocked");
-
-          const blockedText = buildSession
-            ? [formatOperatorBuildSessionStatus(buildSession), formatOperatorBlockedMessage({ message })].join("\n\n")
-            : formatOperatorBlockedMessage({ message });
 
           return {
             status: "blocked",
             stopReason: message,
             summary: "Build flow blocked before execution.",
             buildId: buildSession?.buildId ?? null,
-            text: blockedText,
+            buildSession,
+            text: buildSession
+              ? formatBuildBlockedText({
+                buildSession,
+                buildId: buildSession?.buildId ?? null,
+                message
+              })
+              : formatOperatorBlockedMessage({ message }),
             details: {
               buildId: buildSession?.buildId ?? null,
-              stopReason: message
+              stopReason: message,
+              buildSession
             }
           };
         }
@@ -795,12 +998,14 @@ export function createPiExtension({
               throw new Error(`No build session found for build id: ${buildId}`);
             }
 
+            const approvalBinding = createBuildApprovalBinding(existingSession);
             return {
               ...existingSession,
               approval: {
                 ...existingSession.approval,
                 approved: true,
-                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString()
+                approvedAt: existingSession.approval.approvedAt ?? new Date().toISOString(),
+                ...approvalBinding
               },
               execution: {
                 ...existingSession.execution,
@@ -810,6 +1015,8 @@ export function createPiExtension({
                 stopReason: existingSession.execution.status === "awaiting_approval"
                   ? null
                   : existingSession.execution.stopReason,
+                actionClasses: existingSession.execution.actionClasses,
+                policyProfile: approvalBinding.policyProfile,
                 updatedAt: new Date().toISOString()
               }
             };
@@ -819,7 +1026,7 @@ export function createPiExtension({
           buildSession = syncedState.buildSession;
           if (syncedState.runJournal) {
             const text = [
-              formatOperatorBuildSessionStatus(buildSession),
+              formatOperatorBuildSessionStatus(buildSession, { runJournal: syncedState.runJournal }),
               formatOperatorApprovalCheckpoint({
                 intake: buildSession.intake,
                 lifecycle: buildSession.lifecycle,
@@ -857,17 +1064,51 @@ export function createPiExtension({
             };
           }
 
+          const approvalCoverage = await enforceBuildSessionApprovalCoverage({
+            buildSession,
+            buildSessionStore: resolvedBuildSessionStore
+          });
+          if (!approvalCoverage.ok) {
+            buildSession = approvalCoverage.buildSession;
+            const message = approvalCoverage.stopReason;
+
+            ctx.ui.notify(`build approval blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build approval blocked");
+
+            return {
+              status: "blocked",
+              buildId,
+              stopReason: message,
+              summary: "Build approval could not proceed.",
+              buildSession,
+              text: formatBuildBlockedText({
+                buildSession,
+                buildId,
+                message
+              }),
+              details: {
+                buildId,
+                stopReason: message,
+                buildSession,
+                approvalCoverage: approvalCoverage.coverage
+              }
+            };
+          }
+
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
             if (!existingSession) {
               throw new Error(`No build session found for build id: ${buildId}`);
             }
 
+            const approvalBinding = createBuildApprovalBinding(existingSession);
             return {
               ...existingSession,
               execution: {
                 ...existingSession.execution,
                 status: "running",
                 stopReason: null,
+                actionClasses: existingSession.execution.actionClasses,
+                policyProfile: approvalBinding.policyProfile,
                 programId: existingSession.lifecycle.executionProgram.id,
                 completedContracts: 0,
                 pendingContracts: existingSession.lifecycle.executionProgram.contracts.length,
@@ -889,7 +1130,7 @@ export function createPiExtension({
           });
 
           const text = [
-            formatOperatorBuildSessionStatus(buildSession),
+            formatOperatorBuildSessionStatus(buildSession, { runJournal }),
             formatOperatorApprovalCheckpoint({
               intake: buildSession.intake,
               lifecycle: buildSession.lifecycle,
@@ -928,26 +1169,11 @@ export function createPiExtension({
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (buildId && buildSession && buildSession.approval.approved) {
-            try {
-              buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
-                if (!existingSession) {
-                  throw new Error(`No build session found for build id: ${buildId}`);
-                }
-
-                return {
-                  ...existingSession,
-                  execution: {
-                    ...existingSession.execution,
-                    status: "blocked",
-                    stopReason: message,
-                    programId: existingSession.execution.programId ?? existingSession.lifecycle.executionProgram.id,
-                    updatedAt: new Date().toISOString()
-                  }
-                };
-              });
-            } catch {
-              // Keep returning a blocked response even if persistence fails while recording the error.
-            }
+            buildSession = await persistBlockedBuildSessionExecution(
+              resolvedBuildSessionStore,
+              buildSession,
+              message
+            );
           }
 
           ctx.ui.notify(`build approval blocked: ${message}`, "warning");
@@ -958,13 +1184,16 @@ export function createPiExtension({
             buildId,
             stopReason: message,
             summary: "Build approval could not proceed.",
-            text: formatOperatorBuildSessionLookupBlocked({
+            buildSession,
+            text: formatBuildBlockedText({
+              buildSession,
               buildId,
               message
             }),
             details: {
               buildId,
-              stopReason: message
+              stopReason: message,
+              buildSession
             }
           };
         }
@@ -1004,7 +1233,7 @@ export function createPiExtension({
           const runJournal = syncedState.runJournal;
           const text = runJournal
             ? [
-              formatOperatorBuildSessionStatus(buildSession),
+              formatOperatorBuildSessionStatus(buildSession, { runJournal }),
               formatOperatorApprovalCheckpoint({
                 intake: buildSession.intake,
                 lifecycle: buildSession.lifecycle,

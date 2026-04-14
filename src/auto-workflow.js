@@ -2,6 +2,7 @@ import { buildTaskPacket, createInitialWorkflow } from "./orchestrator.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
 import { safeClone } from "./safe-clone.js";
+import { isTrustedChangedSurfaceObservationResult } from "./auto-backend-runner.js";
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 
@@ -202,9 +203,11 @@ async function executePacket({
     baseContext
   });
   let result;
+  let changedSurfaceObservationTrusted = false;
 
   try {
     result = await runner.run(packet, context);
+    changedSurfaceObservationTrusted = isTrustedChangedSurfaceObservationResult(result);
   } catch (error) {
     result = createExecutionFailureResult({
       packet,
@@ -222,11 +225,15 @@ async function executePacket({
       reason: toErrorMessage(error),
       priorResult: result
     });
+    changedSurfaceObservationTrusted = false;
   }
 
   const run = {
     packet: clone(packet),
     result: clone(result),
+    provenance: {
+      changedSurfaceObservationTrusted
+    },
     iteration
   };
 

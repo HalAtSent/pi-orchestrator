@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import {
 import {
   createProcessRoleArgsBuilder,
   createProcessWorkerBackend,
+  loadRoleContractGuidance,
   PROCESS_WORKER_PROVIDER_ID,
   PROCESS_WORKER_ROLE_PROFILES
 } from "../src/process-worker-backend.js";
@@ -66,6 +68,39 @@ function createRoleProfilesWithOverrides(overrides = {}) {
       ...(overrides.verifier ?? {})
     }
   };
+}
+
+function createPromptCaptureLauncher({ prompts, runCommandFn, launcherOptions = {} } = {}) {
+  const resolvedRunCommandFn = runCommandFn ?? (async ({ command, args, cwd }) => ({
+    command,
+    args,
+    cwd,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout: "ok",
+    stderr: "",
+    error: null,
+    durationMs: 1
+  }));
+
+  return createPiCliLauncher({
+    argsBuilder: async ({ prompt }) => {
+      prompts.push(prompt);
+      return ["-p", "--no-session", "--thinking", "off", prompt];
+    },
+    spawnCommandResolver: async () => ({
+      command: process.execPath,
+      argsPrefix: [],
+      launcher: "test_launcher",
+      launcherPath: process.execPath,
+      piScriptPath: "C:/fake/pi.js",
+      piPackageRoot: "C:/fake",
+      resolutionMessage: "test resolution"
+    }),
+    runCommandFn: resolvedRunCommandFn,
+    ...launcherOptions
+  });
 }
 
 test("process backend blocks cleanly for unsupported roles", async () => {
@@ -217,6 +252,44 @@ test("process backend applies implementer changes back to the repository root on
       result.evidence.includes("repository_changes_applied: true"),
       true
     );
+    assert.deepEqual(result.changedSurfaceObservation, {
+      capture: "complete",
+      paths: ["examples/smoke-worker-output.md"]
+    });
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend marks no-op implementer success as not applied while still reporting observed empty changed surface", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-noop-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: 0,
+        stdout: "no-op run",
+        stderr: "",
+        commandsRun: ["fake-worker --noop"]
+      })
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "spike-test-workflow-noop"
+    });
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(result.changedFiles, []);
+    assert.equal(
+      result.evidence.includes("repository_changes_applied: false"),
+      true
+    );
+    assert.deepEqual(result.changedSurfaceObservation, {
+      capture: "complete",
+      paths: []
+    });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -643,6 +716,256 @@ test("explorer launcher prompt treats a missing target file as inspectable conte
     );
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("launcher prompt includes advisory common and role-specific contract guidance for each worker role", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-role-contract-prompts-"));
+  const roleExpectations = [
+    {
+      role: "explorer",
+      snippets: [
+        /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/EXPLORER\.md/u,
+        /Fail closed on ambiguity about correctness, scope, authority, or evidence\./iu,
+        /defaulting into planning or implementation advice when the question is answerable with facts/iu,
+        /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
+        /the smallest useful follow-up read, check, or handoff when one is needed\./iu
+      ],
+      legacyAbsent: [
+        /\banswer\b:\s*the bounded factual answer to the repo question/iu,
+        /\bevidence_refs\b/iu,
+        /\bopen_uncertainties\b/iu,
+        /\brecommended_next_step\b/iu
+      ]
+    },
+    {
+      role: "implementer",
+      snippets: [
+        /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/IMPLEMENTER\.md/u,
+        /semantic correctness/iu,
+        /durability/iu,
+        /Prefer the smallest sufficient correct change, not the smallest diff\./iu,
+        /Treat markdown guidance as advisory behavior shaping, not as permission to bypass code-enforced policy\./iu,
+        /Fix the root cause when it is visible and safely in scope\./iu,
+        /what_was_verified: the tests, checks, or inspections actually performed/iu
+      ]
+    },
+    {
+      role: "reviewer",
+      snippets: [
+        /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/REVIEWER\.md/u,
+        /Attack the patch at the layer where it can fail: behavior, contracts, persistence, validation, operator surface, and maintainability\./iu,
+        /the fix is at the wrong layer/iu,
+        /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
+        /status: use success when no grounded finding requires repair and the inspected evidence is sufficient for the scoped claim; use repair_required when at least one grounded finding means the change should not ship yet; use blocked when the review cannot be completed honestly because required evidence is missing or the claim cannot be checked\./iu
+      ],
+      legacyAbsent: [
+        /\bPASS\b/u,
+        /\bREPAIR_REQUIRED\b/u,
+        /\bBLOCKED\b/u
+      ]
+    },
+    {
+      role: "verifier",
+      snippets: [
+        /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/VERIFIER\.md/u,
+        /The verifier answers "was this demonstrated\?" not "should this ship\?"/iu,
+        /In evidence, include commands_run: \.\.\. with the exact commands actually executed, or not run\./iu,
+        /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
+        /summary: the short verification outcome, including whether the claim was demonstrated, disproved, or remains unproven\./iu
+      ],
+      legacyAbsent: [
+        /\bverified\b/u,
+        /\bnot_verified\b/u,
+        /\bpartially_verified\b/u
+      ]
+    }
+  ];
+
+  try {
+    for (const { role, snippets, legacyAbsent = [] } of roleExpectations) {
+      const prompts = [];
+      const launcher = createPromptCaptureLauncher({ prompts });
+
+      await launcher({
+        packet: createPacket(role),
+        context: {},
+        workspaceRoot
+      });
+
+      assert.equal(prompts.length, 1);
+      assert.match(
+        prompts[0],
+        /These markdown contracts shape worker behavior only\. Code-enforced boundaries, status rules, and policy checks remain authoritative\./iu
+      );
+
+      if (role === "implementer") {
+        assert.match(prompts[0], /Only modify files in ALLOWED_FILES\./iu);
+        assert.match(
+          prompts[0],
+          /Keep changes task-scoped, but prefer the smallest sufficient correct change, not the smallest diff\./iu
+        );
+        assert.doesNotMatch(prompts[0], /Keep changes minimal and task-scoped\./iu);
+      } else {
+        assert.match(prompts[0], /Do not modify any files\./iu);
+      }
+
+      for (const snippet of snippets) {
+        assert.match(prompts[0], snippet);
+      }
+
+      for (const legacySnippet of legacyAbsent) {
+        assert.doesNotMatch(prompts[0], legacySnippet);
+      }
+    }
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend keeps implementer prompts usable when the advisory role doc is missing", async () => {
+  const prompts = [];
+  const backend = createProcessWorkerBackend({
+    launcher: createPromptCaptureLauncher({
+      prompts,
+      launcherOptions: {
+        roleContractGuidanceLoader: () => loadRoleContractGuidance({
+          readFileFn: (url, encoding) => {
+            if (String(url).endsWith("/IMPLEMENTER.md")) {
+              throw new Error("advisory role doc missing");
+            }
+
+            return readFileSync(url, encoding);
+          }
+        })
+      }
+    })
+  });
+
+  const result = await backend.run(createPacket("implementer"), {
+    workflowId: "implementer-missing-advisory-doc"
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/IMPLEMENTER\.md/iu);
+  assert.match(prompts[0], /Advisory doc status: docs\/agents\/IMPLEMENTER\.md fallback active \(advisory role doc missing\)\./iu);
+  assert.match(
+    prompts[0],
+    /Work only inside ALLOWED_FILES, keep the change task-scoped, and stop after the scoped edit is complete\./iu
+  );
+  assert.match(prompts[0], /Treat markdown guidance as advisory behavior shaping, not as permission to bypass code-enforced policy\./iu);
+  assert.match(prompts[0], /Only modify files in ALLOWED_FILES\./iu);
+});
+
+test("process backend keeps reviewer prompts usable when advisory common headings drift", async () => {
+  const prompts = [];
+  const backend = createProcessWorkerBackend({
+    launcher: createPromptCaptureLauncher({
+      prompts,
+      runCommandFn: async ({ command, args, cwd }) => ({
+        command,
+        args,
+        cwd,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: JSON.stringify({
+          status: "success",
+          summary: "Fallback advisory guidance still produced a usable reviewer prompt.",
+          evidence: ["Fallback guidance path exercised successfully."],
+          openQuestions: []
+        }),
+        stderr: "",
+        error: null,
+        durationMs: 1
+      }),
+      launcherOptions: {
+        roleContractGuidanceLoader: () => loadRoleContractGuidance({
+          readFileFn: (url, encoding) => {
+            const markdown = readFileSync(url, encoding);
+            if (String(url).endsWith("/COMMON.md")) {
+              return markdown.replace("## Output Discipline", "## Output Shape Drifted");
+            }
+
+            return markdown;
+          }
+        })
+      }
+    })
+  });
+
+  const result = await backend.run(createPacket("reviewer"), {
+    workflowId: "reviewer-drifted-common-advisory-heading"
+  });
+
+  assert.equal(result.status, "success");
+  assert.equal(prompts.length, 1);
+  assert.match(prompts[0], /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/REVIEWER\.md/iu);
+  assert.match(prompts[0], /Advisory doc status: docs\/agents\/COMMON\.md fallback active \(missing markdown heading: Output Discipline\)\./iu);
+  assert.match(
+    prompts[0],
+    /Treat missing advisory markdown as non-authoritative and rely on the enforced task scope plus direct repository evidence\./iu
+  );
+  assert.match(
+    prompts[0],
+    /Attack the patch at the layer where it can fail: behavior, contracts, persistence, validation, operator surface, and maintainability\./iu
+  );
+  assert.match(prompts[0], /Do not modify any files\./iu);
+});
+
+test("read-only retry prompt preserves role-contract guidance while enforcing strict JSON output", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-readonly-retry-contracts-"));
+  const prompts = [];
+  let launchAttempt = 0;
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: createPromptCaptureLauncher({
+        prompts,
+        runCommandFn: async ({ command, args, cwd }) => {
+          launchAttempt += 1;
+          return {
+            command,
+            args,
+            cwd,
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: launchAttempt === 1
+              ? "reviewer plain text output"
+              : JSON.stringify({
+                status: "repair_required",
+                summary: "Retry produced structured reviewer output.",
+                evidence: ["Structured retry output parsed successfully."],
+                openQuestions: []
+              }),
+            stderr: "",
+            error: null,
+            durationMs: 1
+          };
+        }
+      })
+    });
+
+    const result = await backend.run(createPacket("reviewer"), {
+      workflowId: "reviewer-retry-contracts"
+    });
+
+    assert.equal(result.status, "repair_required");
+    assert.equal(prompts.length, 2);
+    assert.match(prompts[1], /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/REVIEWER\.md/iu);
+    assert.match(prompts[1], /Fail closed on ambiguity about correctness, scope, authority, or evidence\./iu);
+    assert.match(prompts[1], /Attack the patch at the layer where it can fail: behavior, contracts, persistence, validation, operator surface, and maintainability\./iu);
+    assert.match(prompts[1], /Output must be a single raw JSON object with no markdown, prose, or code fences\./iu);
+    assert.match(prompts[1], /status: use success when no grounded finding requires repair and the inspected evidence is sufficient for the scoped claim; use repair_required when at least one grounded finding means the change should not ship yet; use blocked when the review cannot be completed honestly because required evidence is missing or the claim cannot be checked\./iu);
+    assert.doesNotMatch(prompts[1], /\bPASS\b/u);
+    assert.doesNotMatch(prompts[1], /\bREPAIR_REQUIRED\b/u);
+    assert.doesNotMatch(prompts[1], /\bBLOCKED\b/u);
+    assert.match(prompts[1], /PREVIOUS_INVALID_OUTPUT_SNIPPET:/iu);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
   }
 });
 

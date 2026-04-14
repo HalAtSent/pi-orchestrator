@@ -5,6 +5,26 @@ export const VALIDATION_OUTCOMES = Object.freeze([
   "not_run"
 ]);
 
+export const VALIDATION_ARTIFACT_STATUSES = Object.freeze([
+  "captured",
+  "not_captured"
+]);
+
+export const REVIEWABILITY_STATUSES = Object.freeze([
+  "reviewable",
+  "not_reviewable",
+  "unknown"
+]);
+
+export const REVIEWABILITY_REASONS = Object.freeze([
+  "non_terminal_status",
+  "validation_artifacts_not_captured",
+  "missing_stop_reason",
+  "missing_stop_reason_code",
+  "provider_model_evidence_missing",
+  "provider_model_evidence_requirement_unknown"
+]);
+
 export const STOP_REASON_CODES = Object.freeze([
   "approval_required",
   "invalid_input",
@@ -38,6 +58,21 @@ export const ACTION_CLASSES = Object.freeze([
   "recursive_delegate"
 ]);
 
+export const VALID_POLICY_PROFILES = Object.freeze([
+  "default"
+]);
+
+export const DEFAULT_POLICY_PROFILE = "default";
+export const CHANGED_SURFACE_CAPTURE_MODES = Object.freeze([
+  "complete",
+  "partial",
+  "not_captured"
+]);
+export const CHANGED_SURFACE_OBSERVATION_CAPTURE_MODES = Object.freeze([
+  "complete",
+  "not_captured"
+]);
+
 const ROLE_TO_ACTION_CLASSES = Object.freeze({
   explorer: ["read_repo"],
   implementer: ["write_allowed"],
@@ -50,6 +85,26 @@ const STOP_REASON_CODE_TO_ACTION_CLASSES = Object.freeze({
   protected_path_violation: ["write_protected"]
 });
 
+const TERMINAL_REVIEWABILITY_STATUSES = new Set([
+  "success",
+  "blocked",
+  "failed",
+  "repair_required"
+]);
+const REVIEWABILITY_BLOCKING_REASONS = new Set([
+  "non_terminal_status",
+  "validation_artifacts_not_captured",
+  "missing_stop_reason",
+  "missing_stop_reason_code",
+  "provider_model_evidence_missing"
+]);
+const PROVIDER_MODEL_EVIDENCE_KEYS = new Set([
+  "requested_provider",
+  "requested_model",
+  "selected_provider",
+  "selected_model"
+]);
+
 function normalizeString(value) {
   if (typeof value !== "string") {
     return "";
@@ -60,6 +115,443 @@ function normalizeString(value) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function isPlainObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value);
+}
+
+function sortReviewabilityReasons(reasons) {
+  const order = new Map(REVIEWABILITY_REASONS.map((reason, index) => [reason, index]));
+  return [...reasons].sort((left, right) => (
+    (order.get(left) ?? Number.MAX_SAFE_INTEGER) - (order.get(right) ?? Number.MAX_SAFE_INTEGER)
+  ));
+}
+
+function classifyReviewabilityStatusFromReasons(reasons) {
+  if (reasons.length === 0) {
+    return "reviewable";
+  }
+
+  if (reasons.some((reason) => REVIEWABILITY_BLOCKING_REASONS.has(reason))) {
+    return "not_reviewable";
+  }
+
+  return "unknown";
+}
+
+function parseEvidenceKeyValue(entry) {
+  const normalizedEntry = normalizeString(entry);
+  if (normalizedEntry.length === 0) {
+    return null;
+  }
+
+  const separatorIndex = normalizedEntry.indexOf(":");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+
+  const key = normalizedEntry.slice(0, separatorIndex).trim().toLowerCase();
+  const value = normalizedEntry.slice(separatorIndex + 1).trim();
+  if (key.length === 0) {
+    return null;
+  }
+
+  return {
+    key,
+    value
+  };
+}
+
+function collectProviderModelEvidenceSignals(contractRuns) {
+  let hasAnySignals = false;
+  let hasSelectedProvider = false;
+  let hasSelectedModel = false;
+
+  for (const contractRun of contractRuns) {
+    const evidenceEntries = Array.isArray(contractRun?.evidence) ? contractRun.evidence : [];
+    for (const evidenceEntry of evidenceEntries) {
+      const parsed = parseEvidenceKeyValue(evidenceEntry);
+      if (!parsed || !PROVIDER_MODEL_EVIDENCE_KEYS.has(parsed.key)) {
+        continue;
+      }
+
+      hasAnySignals = true;
+      if (parsed.key === "selected_provider" && parsed.value.length > 0 && parsed.value !== "unknown") {
+        hasSelectedProvider = true;
+      } else if (parsed.key === "selected_model" && parsed.value.length > 0 && parsed.value !== "unknown") {
+        hasSelectedModel = true;
+      }
+    }
+  }
+
+  return {
+    hasAnySignals,
+    hasSelectedProvider,
+    hasSelectedModel
+  };
+}
+
+function splitCommandSegments(command) {
+  const normalized = normalizeString(command);
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  return normalized
+    .split(/&&|\|\||;|\r?\n/gu)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+}
+
+function normalizeCommandToken(token) {
+  return normalizeString(token)
+    .replace(/^['"`]+|['"`]+$/gu, "")
+    .toLowerCase();
+}
+
+function tokenizeCommandSegment(segment) {
+  return normalizeString(segment)
+    .split(/\s+/u)
+    .map((token) => normalizeCommandToken(token))
+    .filter((token) => token.length > 0);
+}
+
+function isEnvironmentAssignmentToken(token) {
+  return /^[a-z_][a-z0-9_]*=/iu.test(token);
+}
+
+function unwrapCommandWrapper(tokens) {
+  let index = 0;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token === "sudo" || token === "time" || token === "command" || token === "env") {
+      index += 1;
+      continue;
+    }
+    if (token === "cmd" && (tokens[index + 1] === "/c" || tokens[index + 1] === "/k")) {
+      index += 2;
+      continue;
+    }
+    if (token === "bash" || token === "sh" || token === "zsh") {
+      if (tokens[index + 1] === "-c" || tokens[index + 1] === "-lc") {
+        index += 2;
+        continue;
+      }
+    }
+    if (isEnvironmentAssignmentToken(token)) {
+      index += 1;
+      continue;
+    }
+    break;
+  }
+
+  return tokens.slice(index);
+}
+
+function nextNonOptionToken(tokens, startIndex = 0) {
+  for (let index = startIndex; index < tokens.length; index += 1) {
+    if (!tokens[index].startsWith("-")) {
+      return tokens[index];
+    }
+  }
+  return null;
+}
+
+function includesPythonPipInstall(tokens) {
+  for (let index = 1; index < tokens.length - 2; index += 1) {
+    if (tokens[index] === "-m" && tokens[index + 1] === "pip" && tokens[index + 2] === "install") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function includesUvPipInstall(tokens) {
+  for (let index = 1; index < tokens.length - 1; index += 1) {
+    if (tokens[index] === "pip" && tokens[index + 1] === "install") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isInstallDependencyCommand(command) {
+  const segments = splitCommandSegments(command);
+  for (const segment of segments) {
+    const tokens = unwrapCommandWrapper(tokenizeCommandSegment(segment));
+    if (tokens.length === 0) {
+      continue;
+    }
+
+    const executable = tokens[0];
+    if (executable === "npm") {
+      const subcommand = nextNonOptionToken(tokens, 1);
+      if (subcommand && ["install", "i", "ci", "add"].includes(subcommand)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (executable === "pnpm") {
+      const subcommand = nextNonOptionToken(tokens, 1);
+      if (subcommand && ["install", "i", "add"].includes(subcommand)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (executable === "yarn" || executable === "bun") {
+      const subcommand = nextNonOptionToken(tokens, 1);
+      if (subcommand && ["install", "add"].includes(subcommand)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (executable === "pip" || executable === "pip3") {
+      if (nextNonOptionToken(tokens, 1) === "install") {
+        return true;
+      }
+      continue;
+    }
+
+    if (["python", "python3", "py"].includes(executable) && includesPythonPipInstall(tokens)) {
+      return true;
+    }
+
+    if (executable === "uv" && includesUvPipInstall(tokens)) {
+      return true;
+    }
+
+    if (executable === "poetry") {
+      const subcommand = nextNonOptionToken(tokens, 1);
+      if (subcommand && ["add", "install"].includes(subcommand)) {
+        return true;
+      }
+      continue;
+    }
+
+    if (executable === "go" && nextNonOptionToken(tokens, 1) === "get") {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+const GIT_GLOBAL_OPTIONS_WITH_VALUE = Object.freeze(new Set([
+  "-c",
+  "-C",
+  "--git-dir",
+  "--work-tree",
+  "--namespace",
+  "--super-prefix",
+  "--exec-path",
+  "--config-env"
+]));
+
+function parseGitSubcommand(tokens) {
+  let index = 1;
+
+  while (index < tokens.length) {
+    const token = tokens[index];
+
+    if (token === "--") {
+      index += 1;
+      break;
+    }
+
+    if (token.startsWith("-")) {
+      index += GIT_GLOBAL_OPTIONS_WITH_VALUE.has(token) ? 2 : 1;
+      continue;
+    }
+
+    return {
+      subcommand: token,
+      arguments: tokens.slice(index + 1)
+    };
+  }
+
+  if (index < tokens.length) {
+    return {
+      subcommand: tokens[index],
+      arguments: tokens.slice(index + 1)
+    };
+  }
+
+  return {
+    subcommand: null,
+    arguments: []
+  };
+}
+
+function isMutatingGitSubcommand(subcommand, args) {
+  if (subcommand === null) {
+    return false;
+  }
+
+  if ([
+    "add",
+    "am",
+    "apply",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "merge",
+    "mv",
+    "pull",
+    "push",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "switch"
+  ].includes(subcommand)) {
+    return true;
+  }
+
+  if (subcommand === "bisect") {
+    return args.length > 0;
+  }
+
+  if (subcommand === "branch") {
+    if (args.length === 0) {
+      return false;
+    }
+    return !args.every((argument) => argument === "--list" || argument === "-a");
+  }
+
+  if (subcommand === "tag") {
+    return args.length > 0;
+  }
+
+  if (subcommand === "worktree") {
+    const nested = nextNonOptionToken(args, 0);
+    return nested !== null && ["add", "remove", "move", "prune"].includes(nested);
+  }
+
+  return false;
+}
+
+function isMutateGitStateCommand(command) {
+  const segments = splitCommandSegments(command);
+  for (const segment of segments) {
+    const tokens = unwrapCommandWrapper(tokenizeCommandSegment(segment));
+    if (tokens[0] !== "git") {
+      continue;
+    }
+
+    const parsed = parseGitSubcommand(tokens);
+    if (isMutatingGitSubcommand(parsed.subcommand, parsed.arguments)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function extractCommandsFromEvidenceEntry(evidenceEntry) {
+  if (typeof evidenceEntry !== "string") {
+    return [];
+  }
+
+  const trimmed = evidenceEntry.trim();
+  const runCommandMatch = /^run\s+[a-z_]+\s+command:\s*(.+)$/iu.exec(trimmed);
+  if (runCommandMatch) {
+    return [runCommandMatch[1].trim()].filter((command) => command.length > 0);
+  }
+
+  if (trimmed.toLowerCase().startsWith("command:")) {
+    const command = trimmed.slice("command:".length).trim();
+    return command.length > 0 ? [command] : [];
+  }
+
+  return [];
+}
+
+export function inferActionClassesFromCommands(commandsInput) {
+  const inferred = new Set();
+  const commands = Array.isArray(commandsInput) ? commandsInput : [];
+
+  for (const rawCommand of commands) {
+    const command = normalizeString(rawCommand);
+    if (command.length === 0) {
+      continue;
+    }
+
+    if (isInstallDependencyCommand(command)) {
+      inferred.add("install_dependency");
+    }
+
+    if (isMutateGitStateCommand(command)) {
+      inferred.add("mutate_git_state");
+    }
+  }
+
+  return ACTION_CLASSES.filter((actionClass) => inferred.has(actionClass));
+}
+
+function normalizeRepoRelativePath(value, { fieldName = "path" } = {}) {
+  const raw = normalizeString(value);
+  if (raw.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+
+  const normalized = raw.replace(/\\/gu, "/");
+  const segments = normalized.split("/");
+  if (normalized.startsWith("/") || /^[A-Za-z]:/u.test(normalized)) {
+    throw new Error(`${fieldName} must be repo-relative`);
+  }
+  if (segments.some((segment) => segment === "..")) {
+    throw new Error(`${fieldName} must not escape the repository root`);
+  }
+
+  const canonicalSegments = [];
+  for (const segment of segments) {
+    if (segment === "" || segment === ".") {
+      continue;
+    }
+    canonicalSegments.push(segment);
+  }
+
+  const canonical = canonicalSegments.join("/");
+  if (canonical.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty path`);
+  }
+
+  return canonical;
+}
+
+function normalizeExplicitActionClasses(value, { fieldName = "actionClasses" } = {}) {
+  if (!Array.isArray(value)) {
+    throw new Error("must be an array");
+  }
+
+  const normalized = [];
+  const seen = new Set();
+
+  for (let index = 0; index < value.length; index += 1) {
+    const actionClass = normalizeString(value[index]);
+    if (actionClass.length === 0) {
+      throw new Error(`${fieldName}[${index}] must be a non-empty string`);
+    }
+    if (!ACTION_CLASSES.includes(actionClass)) {
+      throw new Error(`${fieldName}[${index}] must be one of: ${ACTION_CLASSES.join(", ")}`);
+    }
+    if (seen.has(actionClass)) {
+      continue;
+    }
+
+    seen.add(actionClass);
+    normalized.push(actionClass);
+  }
+
+  return ACTION_CLASSES.filter((actionClass) => seen.has(actionClass));
 }
 
 function extractRolesFromEvidenceEntry(evidenceEntry) {
@@ -282,6 +774,13 @@ export function inferActionClasses({ contractRuns = [], stopReasonCode = null } 
             inferred.add(actionClass);
           }
         }
+
+        const commandActionClasses = inferActionClassesFromCommands(
+          extractCommandsFromEvidenceEntry(evidenceEntry)
+        );
+        for (const actionClass of commandActionClasses) {
+          inferred.add(actionClass);
+        }
       }
     }
   }
@@ -294,33 +793,78 @@ export function inferActionClasses({ contractRuns = [], stopReasonCode = null } 
   return ACTION_CLASSES.filter((actionClass) => inferred.has(actionClass));
 }
 
+export function normalizeDeclaredActionClasses(value, { fallback = [] } = {}) {
+  const source = value === undefined || value === null ? fallback : value;
+  return normalizeExplicitActionClasses(source);
+}
+
 export function normalizeActionClasses(value, { contractRuns = [], stopReasonCode = null } = {}) {
   const inferred = inferActionClasses({
     contractRuns,
     stopReasonCode
   });
   if (value !== undefined && value !== null) {
-    if (!Array.isArray(value)) {
-      throw new Error("must be an array");
-    }
-
-    for (let index = 0; index < value.length; index += 1) {
-      const normalized = normalizeString(value[index]);
-      if (normalized.length === 0) {
-        throw new Error(`actionClasses[${index}] must be a non-empty string`);
-      }
-      if (!ACTION_CLASSES.includes(normalized)) {
-        throw new Error(`actionClasses[${index}] must be one of: ${ACTION_CLASSES.join(", ")}`);
-      }
-    }
+    normalizeExplicitActionClasses(value);
   }
 
   return inferred;
 }
 
+export function derivePlannedActionClassesFromWorkflow(workflowInput) {
+  if (!workflowInput || typeof workflowInput !== "object") {
+    return [];
+  }
+
+  const planned = new Set();
+  const packets = Array.isArray(workflowInput.packets) ? workflowInput.packets : [];
+  const roleSequence = Array.isArray(workflowInput.roleSequence) ? workflowInput.roleSequence : [];
+
+  for (const packet of packets) {
+    if (!packet || typeof packet !== "object") {
+      continue;
+    }
+
+    planned.add("read_repo");
+
+    if (normalizeString(packet.role) === "implementer") {
+      planned.add("write_allowed");
+    }
+
+    if (Array.isArray(packet.commands) && packet.commands.some((command) => normalizeString(command).length > 0)) {
+      planned.add("execute_local_command");
+    }
+
+    for (const actionClass of inferActionClassesFromCommands(packet.commands)) {
+      planned.add(actionClass);
+    }
+  }
+
+  if (packets.length === 0) {
+    for (const rawRole of roleSequence) {
+      const role = normalizeString(rawRole);
+      if (role.length === 0) {
+        continue;
+      }
+
+      planned.add("read_repo");
+      if (role === "implementer") {
+        planned.add("write_allowed");
+      }
+    }
+  }
+
+  return ACTION_CLASSES.filter((actionClass) => planned.has(actionClass));
+}
+
 export function normalizePolicyProfile(value) {
   const normalized = normalizeString(value);
-  return normalized.length > 0 ? normalized : null;
+  const resolved = normalized.length > 0 ? normalized : DEFAULT_POLICY_PROFILE;
+
+  if (!VALID_POLICY_PROFILES.includes(resolved)) {
+    throw new Error(`must be one of: ${VALID_POLICY_PROFILES.join(", ")}`);
+  }
+
+  return resolved;
 }
 
 function createValidationArtifactsPlaceholder(validationOutcome, { artifactType = "validation_artifact" } = {}) {
@@ -359,6 +903,9 @@ function normalizeValidationArtifactEntry(entry, { validationOutcome = null } = 
   normalizedEntry.artifactType = normalizedArtifactType.length > 0
     ? normalizedArtifactType
     : "validation_artifact";
+  if (normalizedEntry.artifactType !== "validation_artifact") {
+    throw new Error("validationArtifacts[].artifactType must be validation_artifact");
+  }
 
   if (normalizedEntry.reference !== undefined && normalizedEntry.reference !== null) {
     const normalizedReference = normalizeString(normalizedEntry.reference);
@@ -375,6 +922,11 @@ function normalizeValidationArtifactEntry(entry, { validationOutcome = null } = 
     if (normalizedStatus.length === 0) {
       throw new Error("validationArtifacts[].status must be a non-empty string when provided");
     }
+    if (!VALIDATION_ARTIFACT_STATUSES.includes(normalizedStatus)) {
+      throw new Error(
+        `validationArtifacts[].status must be one of: ${VALIDATION_ARTIFACT_STATUSES.join(", ")}`
+      );
+    }
     normalizedEntry.status = normalizedStatus;
   }
 
@@ -389,7 +941,16 @@ function normalizeValidationArtifactEntry(entry, { validationOutcome = null } = 
     ? normalizedOutcome
     : (normalizedEntry.validationOutcome ?? null);
 
-  if (!hasReference && (normalizedStatus === null || normalizedStatus !== "not_captured")) {
+  if (
+    !hasReference &&
+    (normalizedStatus === null || normalizedStatus === "captured")
+  ) {
+    return createValidationArtifactsPlaceholder(fallbackValidationOutcome, {
+      artifactType: normalizedEntry.artifactType
+    });
+  }
+
+  if (hasReference && normalizedStatus === "not_captured") {
     return createValidationArtifactsPlaceholder(fallbackValidationOutcome, {
       artifactType: normalizedEntry.artifactType
     });
@@ -420,6 +981,182 @@ export function normalizeValidationArtifacts(value, { validationOutcome = null }
   }));
   if (normalized.length === 0) {
     return [createValidationArtifactsPlaceholder(validationOutcome)];
+  }
+
+  return normalized;
+}
+
+export function inferReviewability({
+  status,
+  stopReason = null,
+  stopReasonCode = null,
+  validationArtifacts = null,
+  contractRuns = []
+} = {}) {
+  const normalizedStatus = normalizeString(status);
+  if (!TERMINAL_REVIEWABILITY_STATUSES.has(normalizedStatus)) {
+    return {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    };
+  }
+
+  const reasons = [];
+  if (normalizedStatus === "success") {
+    const validationOutcome = normalizeValidationOutcome(null, {
+      status: normalizedStatus
+    });
+    const normalizedValidationArtifacts = normalizeValidationArtifacts(validationArtifacts, {
+      validationOutcome
+    });
+    const capturedValidationArtifacts = normalizedValidationArtifacts
+      .filter((entry) => normalizeString(entry?.status) === "captured");
+    if (capturedValidationArtifacts.length === 0) {
+      reasons.push("validation_artifacts_not_captured");
+    }
+
+    const successfulContractRuns = Array.isArray(contractRuns)
+      ? contractRuns.filter((contractRun) => normalizeString(contractRun?.status) === "success")
+      : [];
+    if (successfulContractRuns.length > 0) {
+      const providerModelSignals = collectProviderModelEvidenceSignals(successfulContractRuns);
+      if (!providerModelSignals.hasAnySignals) {
+        reasons.push("provider_model_evidence_requirement_unknown");
+      } else if (!providerModelSignals.hasSelectedProvider || !providerModelSignals.hasSelectedModel) {
+        reasons.push("provider_model_evidence_missing");
+      }
+    }
+  } else {
+    if (normalizeString(stopReason).length === 0) {
+      reasons.push("missing_stop_reason");
+    }
+    if (normalizeString(stopReasonCode).length === 0) {
+      reasons.push("missing_stop_reason_code");
+    }
+  }
+
+  const normalizedReasons = sortReviewabilityReasons(unique(reasons));
+  return {
+    status: classifyReviewabilityStatusFromReasons(normalizedReasons),
+    reasons: normalizedReasons
+  };
+}
+
+export function normalizeReviewability(value, {
+  status,
+  stopReason = null,
+  stopReasonCode = null,
+  validationArtifacts = null,
+  contractRuns = []
+} = {}) {
+  if (value === undefined || value === null) {
+    return inferReviewability({
+      status,
+      stopReason,
+      stopReasonCode,
+      validationArtifacts,
+      contractRuns
+    });
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error("must be an object");
+  }
+
+  const normalizedStatus = normalizeString(value.status);
+  if (normalizedStatus.length === 0) {
+    throw new Error("status must be a non-empty string");
+  }
+  if (!REVIEWABILITY_STATUSES.includes(normalizedStatus)) {
+    throw new Error(`status must be one of: ${REVIEWABILITY_STATUSES.join(", ")}`);
+  }
+
+  const sourceReasons = value.reasons ?? [];
+  if (!Array.isArray(sourceReasons)) {
+    throw new Error("reasons must be an array");
+  }
+  const normalizedReasons = sortReviewabilityReasons(unique(sourceReasons.map((reason) => {
+    const normalizedReason = normalizeString(reason);
+    if (normalizedReason.length === 0) {
+      throw new Error("reasons[] entries must be non-empty strings");
+    }
+    if (!REVIEWABILITY_REASONS.includes(normalizedReason)) {
+      throw new Error(`reasons[] entries must be one of: ${REVIEWABILITY_REASONS.join(", ")}`);
+    }
+    return normalizedReason;
+  })));
+
+  const expectedStatus = classifyReviewabilityStatusFromReasons(normalizedReasons);
+  if (normalizedStatus !== expectedStatus) {
+    throw new Error(`status ${normalizedStatus} does not match reasons-derived status ${expectedStatus}`);
+  }
+
+  return {
+    status: normalizedStatus,
+    reasons: normalizedReasons
+  };
+}
+
+export function normalizeChangedSurface(value, {
+  fieldName = "changedSurface"
+} = {}) {
+  if (value === undefined || value === null) {
+    return {
+      capture: "not_captured",
+      paths: []
+    };
+  }
+
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const capture = normalizeString(value.capture);
+  if (capture.length === 0) {
+    throw new Error(`${fieldName}.capture must be a non-empty string`);
+  }
+  if (!CHANGED_SURFACE_CAPTURE_MODES.includes(capture)) {
+    throw new Error(
+      `${fieldName}.capture must be one of: ${CHANGED_SURFACE_CAPTURE_MODES.join(", ")}`
+    );
+  }
+
+  const rawPaths = value.paths ?? [];
+  if (!Array.isArray(rawPaths)) {
+    throw new Error(`${fieldName}.paths must be an array`);
+  }
+
+  const paths = unique(rawPaths.map((pathValue, index) => (
+    normalizeRepoRelativePath(pathValue, {
+      fieldName: `${fieldName}.paths[${index}]`
+    })
+  )));
+
+  if (capture === "not_captured" && paths.length > 0) {
+    throw new Error(`${fieldName}.paths must be empty when ${fieldName}.capture is not_captured`);
+  }
+
+  return {
+    capture,
+    paths
+  };
+}
+
+export function normalizeChangedSurfaceObservation(value, {
+  fieldName = "changedSurfaceObservation"
+} = {}) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  const normalized = normalizeChangedSurface(value, {
+    fieldName
+  });
+
+  if (!CHANGED_SURFACE_OBSERVATION_CAPTURE_MODES.includes(normalized.capture)) {
+    throw new Error(
+      `${fieldName}.capture must be one of: ${CHANGED_SURFACE_OBSERVATION_CAPTURE_MODES.join(", ")}`
+    );
   }
 
   return normalized;

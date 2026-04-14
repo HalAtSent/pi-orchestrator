@@ -1,5 +1,10 @@
 import { RISK_LEVELS, ROLE_TYPES, validateTaskPacket } from "./contracts.js";
-import { normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
+import {
+  normalizeChangedSurface,
+  normalizeReviewability,
+  normalizeStopReasonCode,
+  normalizeValidationOutcome
+} from "./run-evidence.js";
 
 export const AUDIT_STATUSES = Object.freeze(["pass", "attention_required"]);
 export const FINDING_SEVERITIES = Object.freeze(["low", "medium", "high"]);
@@ -222,6 +227,13 @@ export function validateContractExecutionResult(result) {
   assertString("contractExecutionResult.summary", result.summary);
   assertStringArray("contractExecutionResult.evidence", result.evidence);
   assertStringArray("contractExecutionResult.openQuestions", result.openQuestions);
+  try {
+    result.changedSurface = normalizeChangedSurface(result.changedSurface, {
+      fieldName: "contractExecutionResult.changedSurface"
+    });
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
   return result;
 }
 
@@ -235,6 +247,13 @@ export function validateRunJournalEntry(entry) {
   assertString("runJournalEntry.summary", entry.summary);
   assertStringArray("runJournalEntry.evidence", entry.evidence);
   assertStringArray("runJournalEntry.openQuestions", entry.openQuestions);
+  try {
+    entry.changedSurface = normalizeChangedSurface(entry.changedSurface, {
+      fieldName: "runJournalEntry.changedSurface"
+    });
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
   try {
     entry.validationOutcome = normalizeValidationOutcome(entry.validationOutcome, {
       status: entry.status
@@ -276,6 +295,17 @@ export function validateRunJournal(journal) {
   }
   assertStringArray("runJournal.completedContractIds", journal.completedContractIds);
   assertStringArray("runJournal.pendingContractIds", journal.pendingContractIds);
+  try {
+    journal.reviewability = normalizeReviewability(journal.reviewability, {
+      status: journal.status,
+      stopReason: journal.stopReason,
+      stopReasonCode: journal.stopReasonCode,
+      validationArtifacts: journal.validationArtifacts,
+      contractRuns: journal.contractRuns
+    });
+  } catch (error) {
+    throw new Error(`runJournal.reviewability ${error.message}`);
+  }
   return journal;
 }
 

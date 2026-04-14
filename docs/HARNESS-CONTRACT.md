@@ -2,7 +2,9 @@
 
 This document defines the normative operating contract for the harness.
 
-Unlike [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md), this file is not a doctrine layer. It is a behavioral contract. It should be reviewed like an interface specification.
+Unlike [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md), this file is not a doctrine layer. It is a behavioral contract. It should be reviewed like an interface specification that answers what must hold; the principles explain why the harness is shaped this way.
+
+Future-facing hardening that is not yet enforced belongs in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md), not in this contract.
 
 ## Scope
 
@@ -11,16 +13,21 @@ This contract defines:
 - trust classes and boundary crossings
 - precedence and conflict rules
 - kernel invariants
+- correctness, preservation, and durability defaults
 - action classes and default approval policy
+- evidence rules for terminal claims
+- approval-role boundaries and companion-update requirements
 - orchestrator and worker responsibilities
 - run state machines
 - fail-closed rules
 
 ## Conformance Status
 
-This is the v1 normative contract for the repository.
+This is the v1 behavioral contract for the repository.
 
-Current code already conforms to parts of it, especially:
+Rules in this file describe current implemented behavior, current fail-closed normalization, or explicit repo-wide policy defaults that are authoritative for review and promotion today.
+
+Current code enforces or materially normalizes these parts already, especially:
 
 - role separation
 - bounded worker scopes
@@ -28,26 +35,36 @@ Current code already conforms to parts of it, especially:
 - explicit run and build-session statuses
 - persisted run journals and build sessions
 - approval gating for high-risk execution
+- protected-path rejection in declared workflow scope
+- allowlist and forbidden-scope enforcement for writes
+- pre-execution approval-scope checks against the currently derived plan action-class set
 
-Other sections are intentionally stricter than the current code and should be treated as the target contract for future hardening work. A code path is non-conformant if it violates a rule in this file, even if that violation is not yet fully prevented in implementation.
+Target-state hardening that is not enforced today is tracked separately in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md). This file should not silently rely on stricter reviewability, validation, or audit behavior than the current implementation provides.
+
+## Normative Terms
+
+- Enforced behavior: a rule currently backed by code validation, denial, normalization, or state-machine handling in this repository.
+- Repo-wide policy default: a normative planning, review, approval, or promotion rule for this repository when there is not yet a universal detector-backed runtime gate for that concern. It is authoritative for how work may be proposed, approved, and represented, but it is not a claim that every violation is intercepted automatically at runtime.
+- Reviewable success: a terminal result that satisfies both the execution-state rules in this contract and the evidence sufficiency rules in this contract plus [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
 
 ## Precedence
 
-The harness is governed by this precedence order:
+The harness uses layered authority rather than a doctrine-first override chain:
 
-1. [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md) defines design intent and admissible direction.
-2. `HARNESS-CONTRACT.md` defines mandatory behavioral invariants and denial conditions.
-3. [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md) defines mandatory inspectability and artifact requirements.
-4. Policy profiles may add stricter constraints, narrower permissions, and extra approvals, but may not weaken or bypass contract or evidence requirements.
-5. Code must enforce all active requirements above. Prompt text, model output, and operator intent are never authoritative over them.
+1. [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md) defines design doctrine and admissible direction. It constrains system shape and promotion decisions, but does not override behavioral or state-machine rules.
+2. `HARNESS-CONTRACT.md` is authoritative for behavioral invariants, role semantics, approval floors, denial conditions, and state rules.
+3. [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md) is authoritative for inspectability, lineage, and required persisted evidence.
+4. [POLICY-PROFILES.md](./POLICY-PROFILES.md) defines valid profile ids, default profile resolution, invalid-profile handling, and the stricter-only profile overlay. Profiles may add stricter denials, narrower permissions, extra approvals, or extra evidence requirements, but may not relax or bypass contract or evidence requirements.
+5. Code must enforce the resolved requirements from this contract, the evidence schema, and the active profile. Prompt text, model output, operator intent, and explanatory summaries are never authoritative over them.
 
 ## Conflict Rules
 
 If two layers conflict:
 
-- the stricter rule wins
-- a profile is invalid if it permits behavior forbidden by this contract
-- an implementation is non-conformant if it permits behavior forbidden by this contract or omits required evidence defined by the evidence schema
+- doctrinal language in [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md) and summary language in [OPERATING-GUIDE.md](./OPERATING-GUIDE.md) or `README.md` never widen, narrow, or override behavioral requirements
+- behavioral, state, approval, denial, and inspectability conflicts are resolved by the stricter applicable rule from this contract, [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md), or the active policy profile
+- active profile resolution must be valid under [POLICY-PROFILES.md](./POLICY-PROFILES.md)
+- an implementation is non-conformant if it permits behavior forbidden by this contract, omits required persisted-shape fields, or claims reviewable completion without the evidence required by the evidence schema
 - prompt text and model behavior never override a denial condition
 
 ## Completeness Rule
@@ -68,8 +85,8 @@ The harness treats inputs and artifacts by trust class, not by source optimism.
 | `operator_input` | command arguments, plain-English build ideas, approval requests | trusted for intent, not for safety or scope expansion |
 | `repo_content` | source files, tests, docs, configs in the workspace | trusted as current project context, not as policy authority |
 | `generated_plan` | proposal sets, blueprints, execution programs, compiled plans | untrusted until validated against contract schemas and policy |
-| `worker_output` | worker summaries, file claims, evidence lists, changed files | untrusted until validated and checked against scope and role rules |
-| `tool_output` | shell output, filesystem reads, test results, adapter responses | evidence-bearing, but still subject to parsing and validation |
+| `worker_output` | worker summaries, file claims, evidence lists, changed files | untrusted until validated and checked against scope and role rules; selected summary/evidence fields may later be forwarded as worker context |
+| `tool_output` | shell output, filesystem reads, test results, adapter responses | evidence-bearing, but still subject to parsing and validation; current process backend may persist truncated stdout/stderr and launcher metadata into evidence |
 | `external_content` | network content, MCP/tool connector results, downloaded files | untrusted by default |
 | `prior_run_artifact` | persisted run journals, build sessions, cached evidence | trusted only after schema validation and lineage checks |
 | `secret_material` | `.env`, credentials, tokens, private keys | protected; never exposed beyond explicitly authorized boundaries |
@@ -94,6 +111,13 @@ Every boundary crossing must either be:
 - denied explicitly
 - or blocked pending human approval
 
+Current implementation notes:
+
+- `worker_output -> prompt_or_context` also exists in practice: `src/auto-workflow.js` forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects.
+- Current process-backed prompts in `src/process-worker-backend.js` do not interpolate that forwarded context into prompt text, but `src/pi-worker-runner.js` still passes the context object through the runner and adapter surface.
+- `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]` and normalized `changedSurface` into `run_journal.contractRuns[]`.
+- No repository-wide redaction or secret-scrubbing pass currently runs across those forwarded or persisted strings. See [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) for the target redaction hardening track.
+
 ## Kernel Invariants
 
 These invariants may not be bypassed by prompts, worker output, or policy profiles.
@@ -102,7 +126,7 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 
 - A write-capable worker may write only inside its explicit allowlist.
 - Forbidden paths always override allowed paths.
-- Protected paths may not be written without an explicit contract and approval path that permits them.
+- Protected paths are rejected by the current scope-validation surface; no general protected-path approval override is implemented today.
 - Only one write-capable worker may own a file within a single execution step.
 - Recursive delegation is denied by default.
 
@@ -117,7 +141,8 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 
 - Policy enforcement lives in code, not in prompt text.
 - High-risk execution requires explicit approval unless a stricter profile denies it entirely.
-- Approval may widen nothing except the specific denied action class it authorizes.
+- Build-scoped approval commands must bind approval to the current stored `programId` plus a concrete `planFingerprint` derived from that stored execution program, and may not authorize action classes outside that bound scope.
+- Current approval gating is narrower than the broader schema action-class vocabulary. Today the live gate is primarily the workflow-level high-risk approval check plus the pre-execution approval-scope comparison against the currently derived action-class set for the stored plan.
 - A profile may tighten approvals, but may not reduce required approvals below the contract floor.
 
 ### Validation
@@ -126,52 +151,144 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 - Worker results must validate before integration.
 - Persisted run artifacts must validate before resume or status sync.
 - Invalid structured output fails closed.
+- Current worker-result and persisted-artifact validation is primarily structural. Narrative adequacy such as whether summaries or stop reasons are specific enough for human review remains reviewer guidance in the evidence schema, not a machine-decided contract gate.
 
 ### Execution Discipline
 
 - Repair loops are bounded.
 - Stop conditions are terminal for the current step unless the state machine explicitly allows resume.
-- Missing evidence is a block condition for reviewable completion.
+- Missing evidence prevents a reviewer or caller from honestly treating a terminal result as reviewable completion, even when structural persistence succeeds.
+- Persisted success may still be stored with `validationArtifacts[].status = not_captured`; that is structurally valid persistence, not reviewable success.
 
 ## Action Classes
 
-The harness reasons about permissions by action class.
+The harness uses the live action-class surface below for current approval scope and behavioral enforcement.
 
-| Action class | Description | Default policy |
+Persisted artifacts may carry a broader enum defined in [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md), but classes without detector-backed runtime treatment are roadmap items rather than current contract guarantees. See [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) for planned expansion.
+
+### Implemented Today
+
+These classes currently have concrete enforcement owners or concrete derivation paths in code.
+
+| Action class | Current live treatment | Current grounding |
 | --- | --- | --- |
-| `read_repo` | read files inside the workspace | allow |
-| `read_protected` | read protected files or secret-adjacent files | allow-with-approval or deny by profile |
-| `write_allowed` | write files inside the explicit allowlist | allow for write-capable roles only |
-| `write_forbidden` | write files outside allowlist or inside forbidden scope | deny |
-| `write_protected` | write protected paths such as secrets, generated outputs, or restricted dirs | deny unless explicitly approved and profiled |
-| `execute_local_command` | run local commands within the workspace | allow in bounded environment |
-| `install_dependency` | add or change dependencies or lockfiles | allow-with-approval unless profile tightens |
-| `mutate_git_state` | commit, branch, rebase, stage, reset, open PR | allow-with-approval; destructive git operations default deny |
-| `access_network` | reach external network resources | deny by default unless profile allows |
-| `access_connector` | use external tools, MCP servers, hosted connectors | deny by default unless profile allows |
-| `access_secret` | read, pass, or reveal credentials or secret material | deny unless explicitly approved and profiled |
-| `irreversible_side_effect` | deploy, publish, delete data, migrate schema, external mutation | deny or allow-with-approval depending on profile; never implicit |
-| `recursive_delegate` | spawn nested workers beyond contract shape | deny |
+| `read_repo` | included in pre-execution approval scope and post-run evidence | derived prospectively from planned packets and inferred conservatively from role evidence |
+| `write_allowed` | included in pre-execution approval scope; permitted only for write-capable roles inside allowlist | derived prospectively for `implementer` packets and enforced by scope validation |
+| `write_forbidden` | denied | enforced by allowlist and forbidden-scope checks; surfaced through `scope_violation` evidence |
+| `write_protected` | denied by current scope validation surface | protected paths are rejected from declared allowlists and may surface conservatively through `protected_path_violation` evidence |
+| `execute_local_command` | included in pre-execution approval scope and persisted evidence | derived prospectively when planned packets declare commands |
+| `install_dependency` | included in pre-execution approval scope and persisted run evidence when detector-backed command signals exist | derived from concrete dependency-install command signals in stored-plan command surfaces and explicit run command evidence markers |
+| `mutate_git_state` | included in pre-execution approval scope and persisted run evidence when detector-backed command signals exist | derived from concrete git-mutating command signals in stored-plan command surfaces and explicit run command evidence markers |
+
+Current approval behavior over those classes is still narrower than a full action-class gate matrix:
+
+- the live human approval gate is primarily risk-based (`humanGate` or `approvedHighRisk`)
+- build approval bindings persist the currently derived action-class set and fail closed if the stored plan drifts outside that scope before execution starts
+- current code does not implement mid-run step-level reapproval
 
 ## Approval Matrix
 
-The approval floor for each action class is:
+The current approval and denial surface is:
 
-| Action class | Default requirement |
-| --- | --- |
-| `read_repo` | no approval |
-| `read_protected` | explicit approval unless stricter profile denies |
-| `write_allowed` | no extra approval beyond contract authorization |
-| `write_forbidden` | denied |
-| `write_protected` | explicit approval and profile support |
-| `execute_local_command` | no extra approval in bounded environment |
-| `install_dependency` | explicit approval |
-| `mutate_git_state` | explicit approval |
-| `access_network` | explicit approval and profile support |
-| `access_connector` | explicit approval and profile support |
-| `access_secret` | explicit approval and profile support |
-| `irreversible_side_effect` | explicit approval and profile support |
-| `recursive_delegate` | denied |
+| Action class | Current requirement | Implemented today |
+| --- | --- | --- |
+| `read_repo` | no extra approval | yes |
+| `write_allowed` | no extra action-class approval beyond contract authorization; still subject to the workflow high-risk gate when `humanGate = true` | yes |
+| `write_forbidden` | denied | yes |
+| `write_protected` | denied by current scope validation surface; no approval override path is implemented today | yes |
+| `execute_local_command` | no separate action-class approval today; included in the bound approval scope when present in the stored plan | yes |
+| `install_dependency` | no separate action-class approval today; included in the bound approval scope when concrete install-command signals are present in the stored plan | yes |
+| `mutate_git_state` | no separate action-class approval today; included in the bound approval scope when concrete git-mutation command signals are present in the stored plan | yes |
+
+The current build-approval gate therefore operates over the currently derived plan action-class set, but actual operator approval is still primarily the high-risk execution gate rather than a full per-class runtime approval matrix.
+
+Expansion of the action-class surface beyond the implemented set above is tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
+
+## Build Approval Binding
+
+A build approval record must cover:
+
+- one persisted `buildId`
+- the current stored `executionProgram.id` for that build session
+- the current stored `planFingerprint` for that build session
+- the active policy profile for that execution
+- the approved action-class set derived prospectively from the current stored execution program before execution begins
+
+`/build-approve <buildId>` authorizes execution of the currently materialized execution program for that build session only.
+
+It does not authorize:
+
+- future regenerated or materially changed plans whose stored `planFingerprint` differs
+- action classes outside the approved action-class set for that stored `programId` and `planFingerprint`
+- later escalation from one action class to a stricter one without fresh approval
+
+Before build-session execution begins, the harness must recompute the current stored execution-program `programId`, `planFingerprint`, and pre-execution derived action-class set. If that current scope no longer matches the recorded approval binding, or if the current derived set contains a newly introduced or stricter action class outside the recorded approval scope, the run must block pending fresh approval before execution starts. Approval may therefore be recorded first and then fail closed into `blocked` before any contract runs.
+
+Fresh approval may authorize only the current stored scope that introduced the newly required class or classes. It does not retroactively widen prior approval.
+
+## Correctness Default
+
+Current enforced state and validation rules remain authoritative. The rules below add the repository's default correctness bar for planning, review, and approval.
+
+- Unless a contract explicitly narrows responsibility, a scoped change is correct only if it preserves intended behavior across the happy path, relevant edge cases, invalid-input handling, declared state transitions, retry or recovery paths that the slice can trigger, and rollback, cleanup, or migration behavior when the slice changes stateful effects or persisted artifacts.
+- A known unresolved correctness gap inside the approved slice is incompatible with claiming reviewable `success`.
+- When a known correctness gap means the current slice cannot safely complete under the active plan, the truthful terminal result is `blocked`, `failed`, or `repair_required` under the existing state rules rather than `success`.
+
+## Preservation Default
+
+The default preservation rule for an approved slice is change what the slice intentionally changes and preserve everything else.
+
+- Contract invariants, role boundaries, approval floors, state enums, and evidence floors must continue to hold.
+- Backward compatibility is the default for public behavior, operator-visible behavior, and persisted or data semantics unless the approved slice explicitly changes them.
+- Out-of-scope public behavior must remain unchanged.
+- Persisted shape and data semantics must not drift silently, even when a file format or schema still validates structurally.
+
+## Durability Target
+
+This section is a repo-wide policy default.
+
+- The minimum acceptable fix is the smallest change that is still correct, preserves required behavior, and should survive the next obvious adjacent change in the same surface.
+- A change that only passes the currently observed case while leaving the same visible defect ready to recur on the next adjacent variation does not meet the default durability target.
+
+## Scope Widening And Companion Updates
+
+Current runtime approval binding remains enforced through stored `programId`, `planFingerprint`, and derived action classes. The rules below define what widening is acceptable within that shape and what requires fresh approval or explicit replanning.
+
+- Companion widening is allowed only when it is directly required to keep the approved slice coherent and reviewable, remains inside the same bounded goal and architecture slice, stays within the declared file and action-class scope, and does not silently change out-of-scope public behavior.
+- Fresh approval or explicit replanning is always required when widening changes the stored plan identity, introduces a newly required or stricter action class, expands into new protected or forbidden scope, changes persisted or data semantics beyond the already approved slice, or changes public or operator-facing behavior beyond what the current slice already says it is changing.
+- If a slice changes behavior, schema, or operator-visible surface, same-slice companion updates are required by repo-wide policy default. The slice must include the nearby validation, operator-facing wording, compatibility handling, and documentation updates needed to keep that changed surface truthful as one coherent change.
+
+## Evidence Required For `success`
+
+- `success` in the current state machine means all contracts completed with no terminal non-success result.
+- Reviewable `success` requires that terminal `success` state plus enough direct evidence to inspect what was approved, what ran, what was validated, and what remains uncertain.
+- Current v1 persists a narrow machine reviewability summary (`reviewability.status` and `reviewability.reasons[]`) on run and build execution artifacts. That summary is authoritative for the machine-checkable surface, not for every reviewer judgment.
+- The following must be directly evidenced in persisted artifacts when they are applicable to the claim being made: terminal status and completed-contract state, the approval binding and active `policyProfile` when approval was required, captured validation evidence for validations actually exercised, the concrete source of any blocked, failed, or repair-required outcome, and lineage linking the build session, execution program, and run journal.
+- The following may be inferred conservatively from current normalization or repository-local backend context: normalized `stopReasonCode`, normalized `validationOutcome`, conservative `actionClasses`, and whether provider or model evidence should have existed for that run.
+- Acceptable inference may classify or summarize directly persisted evidence. It may not replace missing required direct evidence.
+- If reviewable evidence is incomplete, current v1 may still persist a structurally valid terminal artifact, including persisted `success` with `validationArtifacts[].status = not_captured`. That artifact is persisted state, not reviewable `success`.
+- Missing reviewable evidence does not by itself rewrite a structurally persisted terminal status to `blocked`, `failed`, or `repair_required` after the fact. It instead limits what the orchestrator, reviewer, or caller may truthfully claim about that terminal state.
+- When an evidence gap is known while the run is still `running` and a repair or verification path exists inside the active plan, the orchestrator should spend that path before terminalizing.
+
+## Forbidden Shortcuts
+
+These are repository policy defaults. They may not be justified by time pressure, diff size, or a locally green result.
+
+- Do not weaken, remove, or skip validation merely to make the current slice pass, unless the approved change explicitly changes that validation contract itself.
+- Do not allow silent contract drift between the declared slice, implemented behavior, persisted evidence, and operator-facing description.
+- Do not ship a symptom-only patch when the underlying cause is already visible and can be addressed safely within the current slice.
+- Do not widen scope silently, including companion changes that materially alter behavior, schema, or operator surface without making that widening explicit in the same slice or obtaining fresh approval.
+
+## Approval Roles
+
+Current runtime code persists an operator-facing approval binding. The role boundary below is the authoritative repository policy default for what that approval does and does not mean.
+
+- `operator_approval` means approval to execute the current stored scope identified by `buildId`, `programId`, `planFingerprint`, resolved `policyProfile`, and the currently derived approval action-class set. In current code, `build_session.approval` is the persisted evidence of that approval surface.
+- `operator_approval` authorizes execution of the stored scope. It is not, by itself, evidence that the resulting change is technically sound, durable, or merge-grade.
+- `technical_approval` means a technically competent reviewer accepts the slice's correctness, preservation impact, evidence sufficiency, and hazard tradeoffs for the claimed outcome.
+- A zero-coding operator may be sufficient for `operator_approval` when the live gate requests operator consent. A zero-coding operator alone is not sufficient `technical_approval` for technically hazardous work.
+- Technically hazardous work includes, at minimum, changes to approval semantics, policy enforcement, state machines, persisted artifact schemas or data semantics, dependency or migration behavior, and operator-visible behavior whose failure would materially misstate scope, correctness, or safety.
+- Current v1 does not persist a first-class `technical_approval` artifact or runtime gate. Treat this section as a repo-wide policy default for review and promotion, not as a claim of broader machine enforcement than the code currently provides. Future operator-safe profile work is tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
 
 ## Orchestrator Contract
 
@@ -214,6 +331,8 @@ Workers must obey all of the following:
 - they may not redefine the goal
 - they may not recursively delegate unless the contract explicitly allows it
 - they may return `success`, `blocked`, `failed`, or `repair_required`
+- `repair_required` from independent review means the scoped output needs repair before the workflow can succeed
+- a review-triggered repair attempt, when budget remains, happens inside the enclosing `running` program run rather than through a separate persisted repair state
 - they may request clarification only by returning structured open questions or blocked output
 - they may not present free-form narrative as a substitute for structured result fields
 
@@ -236,20 +355,27 @@ Allowed transitions:
 | From | To | Condition |
 | --- | --- | --- |
 | `running` | `running` | additional contract progress recorded |
-| `running` | `success` | all contracts completed and validation passed |
+| `running` | `success` | all contracts completed with no terminal non-success result; see [Evidence Required For `success`](#evidence-required-for-success) for reviewable-success evidence rules |
 | `running` | `blocked` | stop condition, denial condition, or unresolved precondition |
 | `running` | `failed` | execution error or invalid execution result |
-| `running` | `repair_required` | independent review requires repair and repair budget remains governed |
+| `running` | `repair_required` | independent review still requires repair after the allowed repair budget is exhausted, or no repair loop is available to spend |
 | `success` | `success` | return-existing only |
-| `blocked` | `blocked` | terminal; may be inspected but not resumed |
-| `failed` | `failed` | terminal; may be inspected but not resumed |
-| `repair_required` | `repair_required` | terminal unless a future contract revision explicitly changes this |
+| `blocked` | `blocked` | original run is terminal for normal execution; a later resume attempt is rejected and may return a fresh blocked refusal artifact |
+| `failed` | `blocked` | original run is terminal for normal execution; a later resume attempt is rejected and may return a fresh blocked refusal artifact instead of continuing the failed run |
+| `repair_required` | `blocked` | original run is terminal for normal execution; a later resume attempt is rejected and may return a fresh blocked refusal artifact instead of continuing the repair-required run |
 
 Resume policy:
 
 - `running` is resumable
 - `success` returns the existing result
-- `blocked`, `failed`, and `repair_required` are terminal
+- `blocked`, `failed`, and `repair_required` are terminal for normal execution
+
+Clarifying note:
+
+- the harness does not expose a separate run-level repair substate
+- when review requests repair and budget remains, the orchestrator performs the repair loop while the run stays `running`
+- the run reaches terminal `repair_required` only after the configured repair budget is exhausted or unavailable
+- a resume attempt against a persisted terminal run does not continue that run; current implementation returns a new `blocked` refusal artifact with a resume-rejection reason
 
 ### Build Session State Machine
 
@@ -268,19 +394,24 @@ Allowed transitions:
 | From | To | Condition |
 | --- | --- | --- |
 | `awaiting_approval` | `approved` | explicit operator approval recorded |
+| `approved` | `blocked` | pre-execution approval binding or action-class coverage validation fails or throws before any contract run starts |
 | `approved` | `running` | execution begins |
 | `running` | `success` | linked program run succeeds |
 | `running` | `blocked` | linked program run blocks |
 | `running` | `failed` | linked program run fails |
-| `running` | `repair_required` | linked program run returns repair-required |
+| `running` | `repair_required` | linked program run ends terminal repair-required after the in-run repair budget is exhausted or unavailable |
 | `success` | `success` | inspection only |
 | `blocked` | `blocked` | inspection only |
 | `failed` | `failed` | inspection only |
-| `repair_required` | `repair_required` | inspection only |
+| `repair_required` | `repair_required` | inspection only; linked program run already terminated after review-triggered repair could not continue |
 
 Transition guards:
 
 - no execution may begin from `awaiting_approval` without recorded approval
+- recorded approval must bind to the current stored execution program `programId`, `planFingerprint`, and approved action classes
+- execution must block before start when the current pre-execution derived action-class set contains a class outside the recorded approval scope
+- `approved` records that approval was captured for the current stored scope; it does not guarantee execution has started yet
+- `approved -> blocked` is the required fail-closed path when the pre-execution gate revalidates scope and finds drift, invalid approval metadata, or other approval-coverage errors before execution starts, including gate failures surfaced as thrown errors
 - linked program identifiers must match the execution program being run
 - build-session execution status must not contradict the linked run journal after synchronization
 
@@ -297,17 +428,15 @@ The harness must deny or block when:
 - a worker result fails validation
 - a persisted run artifact fails validation
 - approval is required but absent
-- a requested action class is not permitted by the active profile
-- evidence required for the current terminal state is missing
+- the active policy profile is missing, ambiguous, or invalid under [POLICY-PROFILES.md](./POLICY-PROFILES.md)
+- the current stored plan requires action classes outside the recorded approval scope before execution begins
+- evidence required for a claimed reviewable terminal state is missing
 
-## Invalid Profile Conditions
+## Policy Profile Validity
 
-A policy profile is invalid if it:
+Valid profile ids, default profile behavior, stricter-only overlay rules, and invalid-profile handling are defined in [POLICY-PROFILES.md](./POLICY-PROFILES.md).
 
-- permits an action class denied by this contract
-- weakens an approval floor defined by this contract
-- disables required evidence capture
-- allows prompts or worker output to override contract invariants
+A run is non-conformant if it executes under an unresolved or invalid profile.
 
 ## Promotion Gate
 

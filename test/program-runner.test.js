@@ -251,6 +251,54 @@ test("runExecutionProgram converts malformed evidence/openQuestions returns into
   });
 });
 
+test("runExecutionProgram fails closed when contract executor returns malformed changed-surface evidence", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed changed-surface payload.",
+            evidence: [],
+            changedSurface: {
+              capture: "complete",
+              paths: ["../outside.js"]
+            },
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(journal.stopReason, /contractExecutionResult\.changedSurface\.paths\[0\] must not escape the repository root/i);
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "blocked");
+    assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
 test("runExecutionProgram converts missing summary returns into a blocked journal", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const program = buildProgram();
@@ -314,6 +362,44 @@ test("program runner reports pending contracts after a stop", async () => {
     "harden-regressions-and-audit",
     "package-readiness"
   ]);
+});
+
+test("program runner persists success with placeholder validation artifacts when no captured validation evidence is recorded", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(persisted.lastStatus, "success");
+    assert.deepEqual(persisted.validationArtifacts, [
+      {
+        artifactType: "validation_artifact",
+        reference: null,
+        status: "not_captured",
+        validationOutcome: "pass"
+      }
+    ]);
+    assert.deepEqual(persisted.runJournal.validationArtifacts, [
+      {
+        artifactType: "validation_artifact",
+        reference: null,
+        status: "not_captured",
+        validationOutcome: "pass"
+      }
+    ]);
+  });
 });
 
 test("resumeExecutionProgram converts thrown contract executor errors into a blocked journal", async () => {
@@ -582,6 +668,10 @@ test("formatProgramRunJournal includes contract evidence", () => {
         contractId: "contract-a",
         status: "success",
         summary: "Executed contract-a.",
+        changedSurface: {
+          capture: "complete",
+          paths: ["src/helpers.js"]
+        },
         validationOutcome: "pass",
         evidence: [
           "selected_provider: openai-codex",
@@ -594,6 +684,8 @@ test("formatProgramRunJournal includes contract evidence", () => {
 
   assert.match(formatted, /selected_provider: openai-codex/i);
   assert.match(formatted, /selected_model: gpt-5\.4/i);
+  assert.match(formatted, /changed_surface_capture: complete/i);
+  assert.match(formatted, /src\/helpers\.js/i);
   assert.match(formatted, /validation_outcome: pass/i);
 });
 

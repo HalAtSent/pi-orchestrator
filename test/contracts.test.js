@@ -74,6 +74,18 @@ test("createWorkerResult rejects empty evidence and openQuestions entries", () =
   );
 });
 
+test("createWorkerResult rejects malformed changedSurfaceObservation payloads", () => {
+  assert.throws(
+    () => createWorkerResult(validWorkerResult({
+      changedSurfaceObservation: {
+        capture: "partial",
+        paths: ["src/contracts.js"]
+      }
+    })),
+    /result\.changedSurfaceObservation\.capture must be one of: complete, not_captured/u
+  );
+});
+
 test("existing valid payloads still pass and optional arrays can be omitted", () => {
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket()));
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket({

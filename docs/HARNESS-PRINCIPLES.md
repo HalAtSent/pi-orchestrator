@@ -4,6 +4,10 @@ This repository exists to make agentic coding more useful without pretending it 
 
 The target is not raw autonomy. The target is `quality-adjusted autonomy`: use models where they create real leverage, but contain the failure modes that make long-horizon software work expensive, insecure, or untrustworthy.
 
+This document explains why the harness is shaped this way and what kinds of changes fit. It is doctrine, not an operational override; mandatory behavior, state rules, and inspectability requirements live in [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md), [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md), and [POLICY-PROFILES.md](./POLICY-PROFILES.md).
+
+Normative documents in this repository should describe enforced behavior only. Target-state aspirations, hardening ideas, and roadmap direction belong in separate planning surfaces rather than being smuggled into contract or schema language. The current planning surface for that work is [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
+
 ## Mission
 
 Build a trustworthy, bounded, evidence-heavy coding harness for day-to-day software work.
@@ -14,10 +18,13 @@ That means:
 - use subagents for scoped task work, not for owning the whole system
 - make decisions reviewable after the fact
 - fail closed when scope, evidence, or trust boundaries break down
+- optimize for merge-grade correctness, not happy-path green
+- keep the surface simple for operators while preserving strict technical judgment underneath
 
 Companion specs:
 
 - [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md)
+- [POLICY-PROFILES.md](./POLICY-PROFILES.md)
 - [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md)
 
 ## What This Harness Is Defending Against
@@ -39,6 +46,7 @@ In practical terms, the harness is trying to reduce:
 - prompt-dependent policy enforcement
 - review overload from unbounded code generation
 - hidden operational cost from retries, model choice, and cleanup work
+- patch-shaped fixes that pass once and decay on the next change
 
 ## Core Principles
 
@@ -52,7 +60,7 @@ Safety-critical rules belong in code:
 - file ownership
 - allowlists and forbidden paths
 - approval gates
-- repair-loop limits
+- bounded in-run repair-loop limits
 - validation of worker input and output
 
 ### 2. Strong Orchestrator, Narrow Workers
@@ -74,10 +82,10 @@ Every extra tool, connector, hook, or permission expands blast radius.
 The default should be:
 
 - read-only unless write access is required
-- one writer per file
+- prefer single-write ownership per file; [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md) defines the exact behavioral invariant as one write-capable worker per file within a single execution step
 - explicit file allowlists
 - no recursive delegation
-- explicit human approval for high-risk work unless policy says otherwise
+- explicit human approval for high-risk work, subject to stricter policy-profile handling
 
 ### 4. Evidence Over Narrative
 
@@ -110,6 +118,8 @@ This is how the system resists long-horizon drift.
 
 Passing tests matter, but they are not enough.
 
+The bar is code worth merging and keeping, not code that only survives the happy path once.
+
 The harness should also protect for:
 
 - structural quality
@@ -118,13 +128,24 @@ The harness should also protect for:
 - security
 - operator comprehension
 
-### 7. Review Is The Bottleneck
+### 7. Durability Beats Patch Shape
+
+The harness should prefer the smallest sufficient correct change, not the smallest diff for its own sake.
+
+That means:
+
+- fix the underlying cause when it is knowable
+- prefer durable changes over brittle local patches
+- avoid changes that merely move risk into review, cleanup, or the next iteration
+- reject patch-minimization as a goal when it conflicts with correctness or maintainability
+
+### 8. Review Is The Bottleneck
 
 Agentic coding often shifts the limiting factor from code production to judgment.
 
 The harness should optimize for review efficiency, not just code volume. Good features reduce the amount of ambiguous output a human has to validate.
 
-### 8. Specification Quality Matters More Than Generation Speed
+### 9. Specification Quality Matters More Than Generation Speed
 
 A fast model with a weak brief is still a liability.
 
@@ -135,11 +156,13 @@ The harness should help narrow intent before execution through:
 - clear approvals
 - bounded clarification loops
 
-### 9. Simplicity On The Surface, Strictness Underneath
+### 10. Simplicity On The Surface, Strictness Underneath
 
 The operator experience should be easy to use.
 
 The internals should not be casual.
+
+Non-technical usability is a first-class product goal, not a replacement for technical approval or technical safety judgment.
 
 Non-technical users should see:
 
@@ -148,7 +171,17 @@ Non-technical users should see:
 - clear approvals
 - readable blocked states
 
-The kernel should still enforce the same underlying guardrails.
+The kernel should still enforce the same underlying guardrails, and technical approval should stay bound to actual scope, correctness, and evidence.
+
+### 11. Normative Docs Must Stay Honest
+
+Doctrine should explain direction. Normative docs should describe enforced behavior only.
+
+This repository should not:
+
+- hide roadmap intent inside normative language
+- use contract or schema text to imply guarantees the code does not enforce
+- let summary docs compete with the contract or evidence surfaces
 
 ## Non-Goals
 

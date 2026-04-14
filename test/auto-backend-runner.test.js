@@ -3,7 +3,8 @@ import test from "node:test";
 
 import {
   AUTO_BACKEND_MODES,
-  createAutoBackendRunner
+  createAutoBackendRunner,
+  isTrustedChangedSurfaceObservationResult
 } from "../src/auto-backend-runner.js";
 import { validateWorkerResult } from "../src/contracts.js";
 
@@ -236,4 +237,41 @@ test("auto backend runner backend selection does not throw on non-cloneable cont
   assert.equal(calls[0].context.risk, "low");
   assert.equal(typeof calls[0].context.hooks.onRoute, "string");
   assert.match(calls[0].context.hooks.onRoute, /uncloneable/i);
+});
+
+test("auto backend runner only attests changed-surface observations when process backend is selected", async () => {
+  const defaultRunner = createStubRunner("default");
+  const processBackend = createStubRunner("process");
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER
+  });
+
+  const trustedResult = await runner.run({
+    role: "implementer",
+    risk: "low",
+    allowedFiles: ["src/a.js"]
+  }, {});
+  const untrustedResult = await runner.run({
+    role: "implementer",
+    risk: "medium",
+    allowedFiles: ["src/a.js"]
+  }, {});
+
+  assert.equal(isTrustedChangedSurfaceObservationResult(trustedResult), true);
+  assert.equal(isTrustedChangedSurfaceObservationResult(untrustedResult), false);
+});
+
+test("auto backend runner does not expose a public changed-surface trust marker", async () => {
+  const moduleExports = await import("../src/auto-backend-runner.js");
+
+  assert.equal(typeof moduleExports.markTrustedChangedSurfaceObservationResult, "undefined");
+});
+
+test("legacy worker-result-attestation helper module is not importable", async () => {
+  await assert.rejects(
+    import("../src/worker-result-attestation.js"),
+    /ERR_MODULE_NOT_FOUND/i
+  );
 });

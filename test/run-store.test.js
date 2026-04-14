@@ -70,9 +70,13 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     ]);
     assert.equal(saved.lineageDepth, 2);
     assert.deepEqual(saved.actionClasses, []);
-    assert.equal(saved.policyProfile, null);
+    assert.equal(saved.policyProfile, "default");
     assert.equal(saved.validationArtifacts.length, 1);
     assert.equal(saved.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(saved.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
     assert.equal(saved.lastStatus, "running");
     assert.equal(saved.stopReasonCode, null);
     assert.equal(saved.validationOutcome, "not_run");
@@ -81,9 +85,13 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     assert.deepEqual(saved.runJournal.sourceArtifactIds, [`execution_program:${program.id}`]);
     assert.equal(saved.runJournal.lineageDepth, 1);
     assert.deepEqual(saved.runJournal.actionClasses, []);
-    assert.equal(saved.runJournal.policyProfile, null);
+    assert.equal(saved.runJournal.policyProfile, "default");
     assert.equal(saved.runJournal.validationArtifacts.length, 1);
     assert.equal(saved.runJournal.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(saved.runJournal.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
 
     const loaded = await runStore.loadRun(program.id);
     assert.equal(loaded.artifactType, "persisted_run_record");
@@ -91,6 +99,10 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     assert.equal(loaded.programId, program.id);
     assert.equal(loaded.lastStatus, "running");
     assert.equal(loaded.validationOutcome, "not_run");
+    assert.deepEqual(loaded.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
     assert.deepEqual(loaded.runJournal.pendingContractIds, initialRun.runJournal.pendingContractIds);
 
     const runFilePath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
@@ -155,7 +167,11 @@ test("run store updates a persisted run journal and preserves createdAt", async 
     assert.equal(updated.stopReasonCode, "missing_dependency");
     assert.equal(updated.validationOutcome, "blocked");
     assert.deepEqual(updated.actionClasses, ["read_repo", "write_allowed"]);
-    assert.equal(updated.policyProfile, null);
+    assert.deepEqual(updated.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+    assert.equal(updated.policyProfile, "default");
     assert.equal(updated.validationArtifacts.length, 1);
     assert.equal(updated.validationArtifacts[0].status, "not_captured");
     assert.equal(updated.createdAt <= updated.updatedAt, true);
@@ -165,11 +181,178 @@ test("run store updates a persisted run journal and preserves createdAt", async 
     assert.equal(loaded.stopReasonCode, "missing_dependency");
     assert.equal(loaded.runJournal.validationOutcome, "blocked");
     assert.deepEqual(loaded.runJournal.actionClasses, ["read_repo", "write_allowed"]);
-    assert.equal(loaded.runJournal.policyProfile, null);
+    assert.equal(loaded.runJournal.policyProfile, "default");
     assert.equal(loaded.runJournal.validationArtifacts.length, 1);
     assert.equal(loaded.runJournal.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(loaded.runJournal.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
     assert.equal(loaded.runJournal.contractRuns.length, 1);
+    assert.deepEqual(loaded.runJournal.contractRuns[0].changedSurface, {
+      capture: "not_captured",
+      paths: []
+    });
     assert.equal(loaded.createdAt, updated.createdAt);
+  });
+});
+
+test("run store persists success with placeholder-only validation evidence unless captured artifacts are supplied", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const placeholderSuccess = await runStore.saveRun({
+      programId: `${program.id}-placeholder-success`,
+      program: {
+        ...program,
+        id: `${program.id}-placeholder-success`
+      },
+      runJournal: {
+        programId: `${program.id}-placeholder-success`,
+        status: "success",
+        stopReason: null,
+        contractRuns: program.contracts.map((contract) => ({
+          contractId: contract.id,
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        })),
+        completedContractIds: program.contracts.map((contract) => contract.id),
+        pendingContractIds: []
+      }
+    });
+
+    assert.equal(placeholderSuccess.validationOutcome, "pass");
+    assert.deepEqual(placeholderSuccess.validationArtifacts, [
+      {
+        artifactType: "validation_artifact",
+        reference: null,
+        status: "not_captured",
+        validationOutcome: "pass"
+      }
+    ]);
+    assert.deepEqual(placeholderSuccess.runJournal.validationArtifacts, [
+      {
+        artifactType: "validation_artifact",
+        reference: null,
+        status: "not_captured",
+        validationOutcome: "pass"
+      }
+    ]);
+    assert.deepEqual(placeholderSuccess.reviewability, {
+      status: "not_reviewable",
+      reasons: [
+        "validation_artifacts_not_captured",
+        "provider_model_evidence_requirement_unknown"
+      ]
+    });
+
+    const capturedSuccessProgramId = `${program.id}-captured-success`;
+    const capturedSuccess = await runStore.saveRun({
+      programId: capturedSuccessProgramId,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      program: {
+        ...program,
+        id: capturedSuccessProgramId
+      },
+      runJournal: {
+        programId: capturedSuccessProgramId,
+        status: "success",
+        stopReason: null,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        contractRuns: program.contracts.map((contract) => ({
+          contractId: contract.id,
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        })),
+        completedContractIds: program.contracts.map((contract) => contract.id),
+        pendingContractIds: []
+      }
+    });
+
+    assert.equal(capturedSuccess.validationArtifacts[0].status, "captured");
+    assert.equal(capturedSuccess.validationArtifacts[0].reference, "test-run:node --test --test-isolation=none");
+    assert.equal(capturedSuccess.runJournal.validationArtifacts[0].status, "captured");
+    assert.equal(capturedSuccess.runJournal.validationArtifacts[0].reference, "test-run:node --test --test-isolation=none");
+    assert.deepEqual(capturedSuccess.reviewability, {
+      status: "unknown",
+      reasons: ["provider_model_evidence_requirement_unknown"]
+    });
+  });
+});
+
+test("run store marks success reviewability as reviewable when captured validation and provider/model evidence are present", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const reviewableProgramId = `${program.id}-reviewable-success`;
+
+    const saved = await runStore.saveRun({
+      programId: reviewableProgramId,
+      program: {
+        ...program,
+        id: reviewableProgramId
+      },
+      runJournal: {
+        programId: reviewableProgramId,
+        status: "success",
+        stopReason: null,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        contractRuns: program.contracts.map((contract) => ({
+          contractId: contract.id,
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [
+            "selected_provider: openai-codex",
+            "selected_model: gpt-5.4"
+          ],
+          openQuestions: []
+        })),
+        completedContractIds: program.contracts.map((contract) => contract.id),
+        pendingContractIds: []
+      }
+    });
+
+    assert.deepEqual(saved.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+    assert.deepEqual(saved.runJournal.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+
+    const loaded = await runStore.loadRun(reviewableProgramId);
+    assert.deepEqual(loaded.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+    assert.deepEqual(loaded.runJournal.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
   });
 });
 
@@ -211,15 +394,150 @@ test("run store load backfills lineage and evidence metadata for legacy persiste
     ]);
     assert.equal(loaded.lineageDepth, 2);
     assert.deepEqual(loaded.actionClasses, []);
-    assert.equal(loaded.policyProfile, null);
+    assert.equal(loaded.policyProfile, "default");
     assert.equal(loaded.validationArtifacts.length, 1);
     assert.equal(loaded.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(loaded.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
     assert.equal(loaded.runJournal.artifactType, "run_journal");
     assert.deepEqual(loaded.runJournal.sourceArtifactIds, [`execution_program:${program.id}`]);
     assert.equal(loaded.runJournal.lineageDepth, 1);
     assert.deepEqual(loaded.runJournal.actionClasses, []);
     assert.equal(loaded.runJournal.validationArtifacts.length, 1);
     assert.equal(loaded.runJournal.validationArtifacts[0].status, "not_captured");
+    assert.deepEqual(loaded.runJournal.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
+    assert.equal(loaded.runJournal.contractRuns.length, 0);
+  });
+});
+
+test("run store load rejects malformed present changed-surface evidence", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            changedSurface: {
+              capture: "complete",
+              paths: ["../outside.js"]
+            },
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      },
+      completedContractIds: [program.contracts[0].id],
+      pendingContractIds: program.contracts.slice(1).map((contract) => contract.id),
+      lastStatus: "blocked",
+      stopReason: "waiting for dependency",
+      stopReasonCode: "missing_dependency",
+      validationOutcome: "blocked",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.changedSurface\.paths\[0\] must not escape the repository root/u
+    );
+  });
+});
+
+test("run store load rejects present envelope type or version drift", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "unexpected_run_record",
+      formatVersion: 2,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      },
+      completedContractIds: [],
+      pendingContractIds: program.contracts.map((contract) => contract.id),
+      lastStatus: "running",
+      stopReason: null,
+      stopReasonCode: null,
+      validationOutcome: "not_run",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /persistedRun\.artifactType must be persisted_run_record|persistedRun\.formatVersion must be 1/u
+    );
+  });
+});
+
+test("run store load rejects a present embedded run journal artifact type drift", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "journal_record",
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      },
+      completedContractIds: [],
+      pendingContractIds: program.contracts.map((contract) => contract.id),
+      lastStatus: "running",
+      stopReason: null,
+      stopReasonCode: null,
+      validationOutcome: "not_run",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /persistedRun\.runJournal\.artifactType must be run_journal/u
+    );
   });
 });
 
@@ -305,6 +623,46 @@ test("run store normalizes unsupported action classes and uncaptured validation 
         validationOutcome: "blocked"
       }
     ]);
+  });
+});
+
+test("run store infers install and git mutation classes from explicit command evidence markers", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [
+              "run implementer: success",
+              "run implementer command: npm install --save-dev vitest",
+              "run implementer command: git commit -m \"checkpoint\"",
+              "run reviewer command: git diff --stat"
+            ],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    assert.deepEqual(saved.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
+    assert.deepEqual(saved.runJournal.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.deepEqual(loaded.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
+    assert.deepEqual(loaded.runJournal.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
   });
 });
 

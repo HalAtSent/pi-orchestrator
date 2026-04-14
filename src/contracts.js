@@ -1,3 +1,5 @@
+import { normalizeChangedSurfaceObservation } from "./run-evidence.js";
+
 export const ROLE_TYPES = Object.freeze([
   "explorer",
   "implementer",
@@ -69,6 +71,15 @@ export function validateWorkerResult(result) {
   assertStringArray("result.commandsRun", result.commandsRun);
   assertStringArray("result.evidence", result.evidence);
   assertStringArray("result.openQuestions", result.openQuestions);
+  try {
+    // This field is syntax-validated for runner interoperability.
+    // Promotion into persisted changed-surface evidence is gated elsewhere by trusted runner provenance.
+    result.changedSurfaceObservation = normalizeChangedSurfaceObservation(result.changedSurfaceObservation, {
+      fieldName: "result.changedSurfaceObservation"
+    });
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
   return result;
 }
 

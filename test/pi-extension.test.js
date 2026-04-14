@@ -7,7 +7,11 @@ import { dirname, join } from "node:path";
 
 import { AUTO_BACKEND_MODES } from "../src/auto-backend-runner.js";
 import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
-import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import {
+  buildProjectLifecycleArtifacts,
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
+} from "../src/project-workflows.js";
 import { createPiWorkerRunner } from "../src/pi-worker-runner.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
 import { createBuildSessionStore } from "../src/build-session-store.js";
@@ -30,6 +34,100 @@ function createUiStub() {
   return {
     notify() {},
     setStatus() {}
+  };
+}
+
+function createStubBuildSession({
+  buildId = "build-stub",
+  intake = { goal: "Build a scoped operator workflow" },
+  lifecycle,
+  approved = false,
+  approval = {},
+  execution = {}
+}) {
+  const planFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+  const approvalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
+
+  return {
+    buildId,
+    planFingerprint,
+    intake,
+    lifecycle: {
+      proposalSet: lifecycle.proposalSet,
+      blueprint: lifecycle.blueprint,
+      executionProgram: lifecycle.executionProgram,
+      auditReport: lifecycle.auditReport
+    },
+    approval: {
+      approved,
+      approvedAt: approved ? new Date().toISOString() : null,
+      programId: lifecycle.executionProgram.id,
+      planFingerprint,
+      actionClasses: approvalActionClasses,
+      policyProfile: "default",
+      ...approval
+    },
+    execution: {
+      status: approved ? "approved" : "awaiting_approval",
+      stopReason: null,
+      actionClasses: [],
+      policyProfile: "default",
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: null,
+          status: "not_captured",
+          validationOutcome: "not_run"
+        }
+      ],
+      programId: null,
+      completedContracts: 0,
+      pendingContracts: lifecycle.executionProgram.contracts.length,
+      updatedAt: new Date().toISOString(),
+      ...execution
+    }
+  };
+}
+
+function createInMemoryBuildSessionStore({
+  initialSession = null,
+  mutateCreatedSession = null
+} = {}) {
+  let currentSession = initialSession ? structuredClone(initialSession) : null;
+
+  return {
+    async createBuildSession({ intake, lifecycle, approvalRequested = false } = {}) {
+      currentSession = createStubBuildSession({
+        buildId: currentSession?.buildId ?? "build-in-memory",
+        intake,
+        lifecycle,
+        approved: Boolean(approvalRequested)
+      });
+
+      if (typeof mutateCreatedSession === "function") {
+        currentSession = structuredClone(mutateCreatedSession(structuredClone(currentSession)));
+      }
+
+      return structuredClone(currentSession);
+    },
+    async loadBuildSession(buildId) {
+      if (!currentSession || currentSession.buildId !== buildId) {
+        return null;
+      }
+
+      return structuredClone(currentSession);
+    },
+    async updateBuildSession(buildId, updater) {
+      if (!currentSession || currentSession.buildId !== buildId) {
+        throw new Error(`No build session found for build id: ${buildId}`);
+      }
+
+      currentSession = structuredClone(await updater(structuredClone(currentSession)));
+      return structuredClone(currentSession);
+    },
+    getCurrentSession() {
+      return structuredClone(currentSession);
+    }
   };
 }
 
@@ -1135,6 +1233,12 @@ Success: an owner can request their first build in one command
     assert.equal(result.status, "awaiting_approval");
     assert.equal(typeof result.buildId, "string");
     assert.match(result.text, /Build Session/u);
+    assert.match(result.text, /Changed surfaces:/u);
+    assert.match(result.text, /Proof collected:/u);
+    assert.match(result.text, /Unproven claims:/u);
+    assert.match(result.text, /Reviewability:/u);
+    assert.match(result.text, /Approval needed:/u);
+    assert.match(result.text, /Recovery \/ undo notes:/u);
     assert.match(result.text, /Intake Summary/u);
     assert.match(result.text, /Staged Plan/u);
     assert.match(result.text, /Approval Checkpoint/u);
@@ -1142,17 +1246,98 @@ Success: an owner can request their first build in one command
     assert.equal(result.lifecycle.executionProgram.contracts.length > 0, true);
 
     const persisted = await buildSessionStore.loadBuildSession(result.buildId);
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(persisted.lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(persisted.lifecycle.executionProgram);
     assert.equal(persisted.buildId, result.buildId);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
     assert.equal(persisted.execution.status, "awaiting_approval");
+    assert.equal(persisted.approval.programId, persisted.lifecycle.executionProgram.id);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(persisted.approval.policyProfile, "default");
     assert.deepEqual(persisted.execution.actionClasses, []);
-    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.policyProfile, "default");
     assert.equal(persisted.execution.validationArtifacts.length, 1);
     assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
     assert.equal(persisted.execution.validationArtifacts[0].validationOutcome, "not_run");
+    assert.deepEqual(persisted.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
     assert.equal(
       uiEvents.some((event) => typeof event.message === "string" && /awaiting approval/i.test(event.message)),
       true
     );
+  });
+});
+
+test("pi extension inline-approved build writes the approval binding before execution begins", async () => {
+  await withTempDir("pi-orchestrator-build-session-inline-approve-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const runStore = createRunStore({ rootDir });
+    let approvalDuringExecution = null;
+    let inlineApprovedBuildId = null;
+    const originalCreateBuildSession = buildSessionStore.createBuildSession.bind(buildSessionStore);
+
+    buildSessionStore.createBuildSession = async function wrappedCreateBuildSession(args) {
+      const created = await originalCreateBuildSession(args);
+      inlineApprovedBuildId = created.buildId;
+      return created;
+    };
+
+    const extension = createPiExtension({
+      runStore,
+      buildSessionStore,
+      contractExecutor: async () => {
+        if (approvalDuringExecution === null) {
+          const persistedSessions = await buildSessionStore.loadBuildSession(inlineApprovedBuildId);
+          approvalDuringExecution = persistedSessions?.approval ?? null;
+        }
+
+        return {
+          status: "success",
+          summary: "Executed the stored contract.",
+          evidence: ["contract executed"],
+          openQuestions: []
+        };
+      }
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const inlineApproved = await registeredCommands.get("build").handler(
+      "--approve Build a local intake dashboard for operations managers",
+      {
+        ui: createUiStub()
+      }
+    );
+
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(inlineApproved.lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(inlineApproved.lifecycle.executionProgram);
+
+    assert.equal(inlineApproved.status, "success");
+    assert.equal(inlineApproved.buildSession.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(inlineApproved.buildSession.approval.actionClasses, expectedApprovalActionClasses);
+
+    const persisted = await buildSessionStore.loadBuildSession(inlineApproved.buildId);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.deepEqual(approvalDuringExecution, {
+      approved: true,
+      approvedAt: persisted.approval.approvedAt,
+      programId: inlineApproved.lifecycle.executionProgram.id,
+      planFingerprint: expectedPlanFingerprint,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
+    });
   });
 });
 
@@ -1161,6 +1346,8 @@ test("pi extension build-approve executes a pending build session by build id", 
     const { createPiExtension } = await import("../src/pi-extension.js");
     const registeredCommands = new Map();
     const executedContracts = [];
+    let plannedBuildId = null;
+    let approvalDuringExecution = null;
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const runStore = createRunStore({ rootDir });
 
@@ -1168,6 +1355,10 @@ test("pi extension build-approve executes a pending build session by build id", 
       runStore,
       buildSessionStore,
       contractExecutor: async (contract) => {
+        if (plannedBuildId && approvalDuringExecution === null) {
+          const persistedDuringExecution = await buildSessionStore.loadBuildSession(plannedBuildId);
+          approvalDuringExecution = persistedDuringExecution?.approval ?? null;
+        }
         executedContracts.push(contract.id);
         return {
           status: "success",
@@ -1191,10 +1382,13 @@ test("pi extension build-approve executes a pending build session by build id", 
         ui: createUiStub()
       }
     );
+    plannedBuildId = planned.buildId;
 
     const approved = await registeredCommands.get("build-approve").handler(planned.buildId, {
       ui: createUiStub()
     });
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(approved.lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(approved.lifecycle.executionProgram);
 
     assert.equal(approved.status, "success");
     assert.equal(approved.buildId, planned.buildId);
@@ -1203,17 +1397,210 @@ test("pi extension build-approve executes a pending build session by build id", 
     assert.equal(approved.recommendedNextAction, `/build-status ${planned.buildId}`);
     assert.match(approved.text, /Approval Checkpoint/u);
     assert.match(approved.text, /Run status: success/u);
+    assert.match(approved.text, /Changed surfaces: No observed changed-path evidence is persisted for recorded runs\./u);
+    assert.match(approved.text, /Proof collected:/u);
+    assert.match(approved.text, /Unproven claims:/u);
+    assert.match(approved.text, /Reviewability:/u);
+    assert.match(approved.text, /Approval needed:/u);
+    assert.match(approved.text, /Recovery \/ undo notes:/u);
 
     const persisted = await buildSessionStore.loadBuildSession(planned.buildId);
     assert.equal(persisted.approval.approved, true);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
+    assert.equal(persisted.approval.programId, approved.lifecycle.executionProgram.id);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(persisted.approval.policyProfile, "default");
     assert.equal(persisted.execution.status, "success");
     assert.deepEqual(persisted.execution.actionClasses, []);
-    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.policyProfile, "default");
     assert.equal(persisted.execution.validationArtifacts.length, 1);
     assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
     assert.equal(persisted.execution.validationArtifacts[0].validationOutcome, "pass");
+    assert.deepEqual(persisted.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: [
+        "validation_artifacts_not_captured",
+        "provider_model_evidence_requirement_unknown"
+      ]
+    });
     assert.equal(persisted.execution.programId, approved.lifecycle.executionProgram.id);
+    assert.deepEqual(approvalDuringExecution, {
+      approved: true,
+      approvedAt: persisted.approval.approvedAt,
+      programId: approved.lifecycle.executionProgram.id,
+      planFingerprint: expectedPlanFingerprint,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
+    });
   });
+});
+
+test("pi extension build-approve blocks execution when the approved plan fingerprint no longer matches the stored plan", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const lifecycle = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const buildSessionStore = createInMemoryBuildSessionStore({
+    initialSession: createStubBuildSession({
+      buildId: "build-stale-plan",
+      lifecycle,
+      approved: false,
+      approval: {
+        planFingerprint: "stale-plan-fingerprint"
+      }
+    })
+  });
+  let executedContracts = 0;
+
+  const extension = createPiExtension({
+    buildSessionStore,
+    contractExecutor: async () => {
+      executedContracts += 1;
+      return {
+        status: "success",
+        summary: "unexpected contract execution",
+        evidence: [],
+        openQuestions: []
+      };
+    }
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const blocked = await registeredCommands.get("build-approve").handler("build-stale-plan", {
+    ui: createUiStub()
+  });
+
+  assert.equal(blocked.status, "blocked");
+  assert.equal(executedContracts, 0);
+  assert.match(blocked.stopReason, /Fresh approval is required before execution/u);
+  assert.match(blocked.stopReason, /planFingerprint/u);
+  assert.match(blocked.text, /Build Session/u);
+
+  const persisted = buildSessionStore.getCurrentSession();
+  assert.equal(persisted.approval.approved, true);
+  assert.equal(persisted.execution.status, "blocked");
+  assert.equal(persisted.execution.stopReason, blocked.stopReason);
+  assert.equal(persisted.execution.programId, lifecycle.executionProgram.id);
+});
+
+test("pi extension inline-approved build blocks execution when the current action-class scope exceeds the approved scope", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const buildSessionStore = createInMemoryBuildSessionStore({
+    mutateCreatedSession(createdSession) {
+      return {
+        ...createdSession,
+        approval: {
+          ...createdSession.approval,
+          actionClasses: ["read_repo", "write_allowed"]
+        }
+      };
+    }
+  });
+  let executedContracts = 0;
+
+  const extension = createPiExtension({
+    buildSessionStore,
+    contractExecutor: async () => {
+      executedContracts += 1;
+      return {
+        status: "success",
+        summary: "unexpected contract execution",
+        evidence: [],
+        openQuestions: []
+      };
+    }
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const blocked = await registeredCommands.get("build").handler(
+    "--approve Build an operator checklist for local support teams",
+    {
+      ui: createUiStub()
+    }
+  );
+
+  assert.equal(blocked.status, "blocked");
+  assert.equal(executedContracts, 0);
+  assert.match(blocked.stopReason, /action classes outside the approved scope/u);
+  assert.match(blocked.stopReason, /execute_local_command/u);
+  assert.match(blocked.text, /Build Session/u);
+
+  const persisted = buildSessionStore.getCurrentSession();
+  assert.equal(persisted.approval.approved, true);
+  assert.equal(persisted.execution.status, "blocked");
+  assert.equal(persisted.execution.stopReason, blocked.stopReason);
+  assert.equal(persisted.execution.programId, persisted.lifecycle.executionProgram.id);
+});
+
+test("pi extension build-approve blocks execution when newly derived install and git mutation classes exceed approved scope", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const lifecycle = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  lifecycle.executionProgram.contracts[0].verificationPlan = [
+    "npm install --save-dev vitest",
+    "git commit -m \"checkpoint\""
+  ];
+  const buildSessionStore = createInMemoryBuildSessionStore({
+    initialSession: createStubBuildSession({
+      buildId: "build-missing-command-classes",
+      lifecycle,
+      approved: false,
+      approval: {
+        actionClasses: ["read_repo", "write_allowed", "execute_local_command"]
+      }
+    })
+  });
+  let executedContracts = 0;
+
+  const extension = createPiExtension({
+    buildSessionStore,
+    contractExecutor: async () => {
+      executedContracts += 1;
+      return {
+        status: "success",
+        summary: "unexpected contract execution",
+        evidence: [],
+        openQuestions: []
+      };
+    }
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const blocked = await registeredCommands.get("build-approve").handler("build-missing-command-classes", {
+    ui: createUiStub()
+  });
+
+  assert.equal(blocked.status, "blocked");
+  assert.equal(executedContracts, 0);
+  assert.match(blocked.stopReason, /action classes outside the approved scope/u);
+  assert.match(blocked.stopReason, /install_dependency/u);
+  assert.match(blocked.stopReason, /mutate_git_state/u);
+  assert.match(blocked.text, /Build Session/u);
+
+  const persisted = buildSessionStore.getCurrentSession();
+  assert.equal(persisted.approval.approved, true);
+  assert.equal(persisted.execution.status, "blocked");
+  assert.equal(persisted.execution.stopReason, blocked.stopReason);
+  assert.equal(persisted.execution.programId, persisted.lifecycle.executionProgram.id);
 });
 
 test("pi extension build-status returns plain-English status and blocks unknown build ids", async () => {
@@ -1249,6 +1636,12 @@ test("pi extension build-status returns plain-English status and blocks unknown 
     assert.equal(status.recommendedNextAction, `/build-approve ${planned.buildId}`);
     assert.match(status.text, /Build Session/u);
     assert.match(status.text, /Execution status: awaiting_approval/u);
+    assert.match(status.text, /Changed surfaces:/u);
+    assert.match(status.text, /Proof collected:/u);
+    assert.match(status.text, /Unproven claims:/u);
+    assert.match(status.text, /Reviewability:/u);
+    assert.match(status.text, /Approval needed:/u);
+    assert.match(status.text, /Recovery \/ undo notes:/u);
 
     const missing = await registeredCommands.get("build-status").handler("build-missing-id", {
       ui: createUiStub()
@@ -1301,6 +1694,8 @@ test("pi extension build-status syncs session state from persisted run-program j
       ui: createUiStub()
     });
     assert.equal(approved.status, "success");
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(approved.lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(approved.lifecycle.executionProgram);
 
     await runStore.updateRun(approved.lifecycle.executionProgram.id, (existing) => ({
       ...existing,
@@ -1319,15 +1714,24 @@ test("pi extension build-status syncs session state from persisted run-program j
     assert.equal(status.recommendedNextAction, `/resume-program ${approved.lifecycle.executionProgram.id}`);
 
     const persisted = await buildSessionStore.loadBuildSession(planned.buildId);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
     assert.equal(persisted.execution.status, "running");
+    assert.equal(persisted.approval.programId, approved.lifecycle.executionProgram.id);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(persisted.approval.policyProfile, "default");
     assert.deepEqual(persisted.execution.actionClasses, []);
-    assert.equal(persisted.execution.policyProfile, null);
+    assert.equal(persisted.execution.policyProfile, "default");
     assert.equal(persisted.execution.validationArtifacts.length, 1);
     assert.equal(persisted.execution.validationArtifacts[0].status, "not_captured");
     assert.equal(
       persisted.execution.validationArtifacts[0].validationOutcome,
       persisted.execution.validationOutcome
     );
+    assert.deepEqual(persisted.execution.reviewability, {
+      status: "not_reviewable",
+      reasons: ["non_terminal_status"]
+    });
   });
 });
 
@@ -1337,6 +1741,8 @@ test("pi extension build-status sync normalizes unsupported action classes and u
     const registeredCommands = new Map();
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const lifecycle = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+    const expectedPlanFingerprint = createExecutionProgramPlanFingerprint(lifecycle.executionProgram);
+    const expectedApprovalActionClasses = deriveExecutionProgramActionClasses(lifecycle.executionProgram);
     const buildSession = await buildSessionStore.createBuildSession({
       intake: {
         goal: "Build a scoped release checklist for operators"
@@ -1418,8 +1824,14 @@ test("pi extension build-status sync normalizes unsupported action classes and u
     assert.equal(status.buildId, buildSession.buildId);
 
     const persisted = await buildSessionStore.loadBuildSession(buildSession.buildId);
+    assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
+    assert.equal(persisted.approval.programId, lifecycle.executionProgram.id);
+    assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
+    assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.equal(persisted.approval.policyProfile, "default");
     assert.equal(persisted.execution.status, "blocked");
     assert.deepEqual(persisted.execution.actionClasses, []);
+    assert.equal(persisted.execution.policyProfile, "default");
     assert.deepEqual(persisted.execution.validationArtifacts, [
       {
         artifactType: "validation_artifact",
@@ -1428,6 +1840,10 @@ test("pi extension build-status sync normalizes unsupported action classes and u
         validationOutcome: "blocked"
       }
     ]);
+    assert.deepEqual(persisted.execution.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
   });
 });
 

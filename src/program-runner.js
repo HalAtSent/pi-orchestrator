@@ -3,7 +3,7 @@ import {
   createRunJournal,
   validateExecutionProgram
 } from "./project-contracts.js";
-import { normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
+import { normalizeReviewability, normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
 
 const TERMINAL_STOP_STATUSES = new Set(["blocked", "failed", "repair_required"]);
 // Only journals that still represent in-progress work are resumable.
@@ -565,6 +565,7 @@ async function runProgramFromState(program, {
       summary: result.summary,
       evidence: result.evidence,
       openQuestions: result.openQuestions,
+      changedSurface: result.changedSurface,
       validationOutcome: normalizeValidationOutcome(null, {
         status: result.status
       })
@@ -726,12 +727,21 @@ export function formatProgramRunJournal(journal) {
   const journalValidationOutcome = journal.validationOutcome ?? normalizeValidationOutcome(null, {
     status: journal.status
   });
+  const journalReviewability = normalizeReviewability(journal.reviewability, {
+    status: journal.status,
+    stopReason: journal.stopReason,
+    stopReasonCode: journalStopReasonCode,
+    validationArtifacts: journal.validationArtifacts,
+    contractRuns: journal.contractRuns
+  });
   const lines = [
     `program: ${journal.programId}`,
     `status: ${journal.status}`,
     `stop_reason: ${journal.stopReason ?? "none"}`,
     `stop_reason_code: ${journalStopReasonCode ?? "none"}`,
     `validation_outcome: ${journalValidationOutcome}`,
+    `reviewability_status: ${journalReviewability.status}`,
+    `reviewability_reasons: ${journalReviewability.reasons.length > 0 ? journalReviewability.reasons.join(", ") : "none"}`,
     `completed: ${journal.completedContractIds.length}`,
     `pending: ${journal.pendingContractIds.length}`,
     "contracts:"
@@ -746,6 +756,13 @@ export function formatProgramRunJournal(journal) {
       });
       lines.push(`- ${entry.contractId} (${entry.status}): ${entry.summary}`);
       lines.push(`  validation_outcome: ${entryValidationOutcome}`);
+      lines.push(`  changed_surface_capture: ${entry.changedSurface.capture}`);
+      if (entry.changedSurface.paths.length > 0) {
+        lines.push("  changed_paths:");
+        for (const changedPath of entry.changedSurface.paths) {
+          lines.push(`  - ${changedPath}`);
+        }
+      }
       if (entry.evidence.length > 0) {
         lines.push("  evidence:");
         for (const evidence of entry.evidence) {

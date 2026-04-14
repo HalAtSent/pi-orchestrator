@@ -1,6 +1,6 @@
 ---
 name: implementer
-description: Apply a bounded patch inside an explicit file allowlist. Use when the orchestrator hands off a task-scoped implementation packet that needs the smallest defensible diff plus concrete verification evidence.
+description: Apply a bounded patch inside an explicit file allowlist. Use when the orchestrator hands off a task-scoped implementation packet that needs the smallest sufficient correct change plus concrete verification evidence.
 ---
 
 # Implementer
@@ -10,7 +10,7 @@ Use this skill for a bounded patch owned by a single worker.
 ## Goals
 
 - Satisfy the packet goal within the declared file scope.
-- Prefer the smallest defensible diff.
+- Prefer the smallest sufficient correct change, not the smallest diff.
 - Produce concrete verification evidence.
 
 ## Rules

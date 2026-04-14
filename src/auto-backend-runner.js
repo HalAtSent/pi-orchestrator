@@ -4,6 +4,7 @@ import { RISK_LEVELS } from "./contracts.js";
 const AUTO_BACKEND_MODE_PI_RUNTIME = "pi_runtime";
 const AUTO_BACKEND_MODE_LOW_RISK_PROCESS_IMPLEMENTER = "low_risk_process_implementer";
 const AUTO_BACKEND_MODE_PROCESS_SUBAGENTS = "process_subagents";
+const TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS = new WeakSet();
 
 export const AUTO_BACKEND_MODES = Object.freeze({
   PI_RUNTIME: AUTO_BACKEND_MODE_PI_RUNTIME,
@@ -15,6 +16,27 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+function isObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function markTrustedChangedSurfaceObservationResult(workerResult) {
+  if (!isObject(workerResult)) {
+    return workerResult;
+  }
+
+  TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.add(workerResult);
+  return workerResult;
+}
+
+export function isTrustedChangedSurfaceObservationResult(workerResult) {
+  if (!isObject(workerResult)) {
+    return false;
+  }
+
+  return TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.has(workerResult);
 }
 
 function clone(value) {
@@ -102,7 +124,8 @@ export function createAutoBackendRunner({
       });
 
       if (useProcessBackend) {
-        return processBackend.run(packet, context);
+        const result = await processBackend.run(packet, context);
+        return markTrustedChangedSurfaceObservationResult(result);
       }
 
       return defaultRunner.run(packet, context);
