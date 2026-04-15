@@ -1,234 +1,345 @@
 # Hardening Roadmap
 
-This document tracks future-facing contract, policy, evidence, and operator-mode hardening that is not yet fully enforced in the current repository.
+This document tracks future-facing hardening that is not yet fully enforced in
+the current repository.
 
 It is intentionally separate from the normative docs:
 
-- [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md) describes current behavioral requirements and repo-wide policy defaults that are authoritative today.
-- [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md) describes the current persisted evidence and reviewability surface.
-- [POLICY-PROFILES.md](./POLICY-PROFILES.md) describes the currently enforced profile-resolution surface.
-- [OPERATING-GUIDE.md](./OPERATING-GUIDE.md) explains how to operate the current harness.
+- [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md) describes current behavioral
+  requirements and repo-wide policy defaults that are authoritative today.
+- [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md) describes the current
+  persisted evidence and reviewability surface.
+- [POLICY-PROFILES.md](./POLICY-PROFILES.md) describes the currently enforced
+  profile-resolution surface.
+- [SKILL-GOVERNANCE.md](./SKILL-GOVERNANCE.md) describes the current governance
+  boundary for reusable method.
+- [OPERATING-GUIDE.md](./OPERATING-GUIDE.md) explains how to operate the
+  current harness.
 
-Use this file for target-state hardening only. Nothing here should be read as current enforcement unless and until the normative docs and code are updated together.
+Use this file for target-state hardening only. Nothing here should be read as
+current enforcement unless and until the normative docs and code are updated
+together.
+
+The current strategy is to improve the base execution loop before adding more
+orchestration complexity. The next leverage is better context construction, tool
+contracts, evidence, reviewability, and governed reusable method while keeping
+the control plane thin, deterministic, and legible.
+
+Strong control-plane hardening does not require a thicker orchestrator. By
+default, controller growth is downstream work that must justify itself against
+simpler improvements to evidence, contracts, context, and governed method.
 
 ## Current Baseline
 
-Today the repository has a narrower live enforcement surface than the long-term policy vocabulary:
+The repository has already moved beyond the earlier cleanup baseline in several
+important ways:
 
-- approval is primarily the workflow high-risk gate plus pre-execution scope checks against the stored plan's currently derived action-class set
-- persisted `actionClasses` are plan-derived scope or conservative post-run evidence, not a full detector-backed audit trail
-- runtime profile resolution is effectively `default` only
-- reviewability now has a narrow machine-decided persisted surface (`reviewability.status` plus explicit reason codes), but it is intentionally limited to what current evidence can prove
-- persisted evidence does not yet pass through a repository-wide redaction pipeline before storage or later worker-context forwarding
+- operator-facing summaries now expose changed surfaces, proof collected,
+  unproven claims, approval-needed guidance, recovery or undo notes, and next
+  action through the current formatter surface
+- persisted machine reviewability now exists as a first-class normalized
+  surface (`reviewability.status` plus explicit reason codes)
+- exact changed-surface capture now has a trusted provenance path for runner
+  flows that can attest it
+- plan-derived approval scope and post-run evidence now treat
+  `install_dependency` and `mutate_git_state` as concrete detector-backed
+  classes
+- the control plane already stays intentionally narrower than the broader
+  vocabulary carried by persisted artifacts
 
-The roadmap below tracks the hardening work needed to move beyond that baseline.
+Important future gaps still remain:
 
-## Target Contract Surface
+- many review-critical facts still rely on mixed embedded fields, evidence
+  strings, or formatter reconstruction
+- provider/model evidence requirements are still partly inferred rather than
+  first-class persisted facts
+- context construction and retrieval quality are not yet a first-class
+  hardening surface
+- tool and worker-result contracts are not yet audited as one coherent boundary
+- skill governance is now doctrine-backed, but not yet regression-backed
+- persisted evidence and forwarded worker context still lack a repository-wide
+  redaction pass
+- runtime profiles and operator-safe mode are still effectively narrow
+- additional orchestration work remains selectively useful, but it is no longer
+  the default growth path
 
-### Stronger Action-Class Detection And Enforcement
+## Roadmap Admission Rule
 
-Current gap:
+Tracks below are ordered by leverage and dependency, not by arbitrary category.
+Earlier tracks strengthen the evidence and execution substrate that later
+profile or orchestration work depends on.
 
-- only `read_repo`, `write_allowed`, `write_forbidden`, `write_protected`, `execute_local_command`, `install_dependency`, and `mutate_git_state` have live contract treatment with concrete derivation or enforcement owners
-- the broader vocabulary already exists in persisted evidence, but most classes are not first-class runtime gates
+Every major roadmap item should pass two admission tests:
 
-Hardening target:
+- does it reduce the amount of human judgment required per unit of trustworthy
+  output?
+- does it preserve or strengthen control boundaries?
 
-- promote `read_protected`, `access_network`, `access_connector`, `access_secret`, and `irreversible_side_effect` from vocabulary-only status into detector-backed runtime policy surfaces
-- define one code owner or derivation path per class
-- make approval, denial, and evidence semantics explicit per class
-- prevent target-only classes from appearing to be enforced until detector owners and tests exist
+More controller logic is not a roadmap goal by itself. New orchestration work is
+only justified when it clearly improves one or more of:
 
-Landing condition:
+- policy enforcement
+- context quality
+- evidence quality
+- reviewability
+- operator clarity
 
-- the contract can describe each live action class as enforced behavior rather than as roadmap intent
-- approval records and terminal evidence can distinguish requested, approved, observed, and denied classes without relying on narrative inference alone
+If a problem can be solved first by sharper evidence surfaces, better tool
+contracts, better context construction, or stronger governed skills, that path
+should win over adding more central routing or state machinery.
 
-### Mid-Run Reapproval
+Priority should bias toward:
 
-Current gap:
+- evidence and reviewability
+- context quality
+- tool and result contract quality
+- trust-boundary hardening
+- skill governance and evaluation
+- additional controller complexity only where the gains above cannot be
+  captured more simply
 
-- approval binding is checked before execution starts
-- the repository does not implement step-level reapproval when later execution would cross into a stricter class or materially wider scope
+## Evaluation Criteria
 
-Hardening target:
+Use the following as durable governance criteria for roadmap and evaluation
+decisions. This is not a benchmark plan; it is the lens for deciding whether
+the harness is getting better.
 
-- add step-level or packet-level reapproval when a running plan would newly require a stricter action class or materially different approval scope
-- fail closed before the higher-risk step executes
-- persist the escalation reason and the blocked step boundary
+- trustworthy output: does the harness produce merge-grade results under the
+  current strict boundaries, rather than merely sounding more autonomous?
+- review effort: does reviewer time or decision burden per unit of trustworthy
+  output go down?
+- evidence completeness: are approvals, changed surfaces, validation, lineage,
+  and stop reasons captured well enough to support truthful review?
+- policy-violation attempt and block rate: does the harness detect and fail
+  closed on invalid, out-of-scope, or under-approved work?
+- operator clarity: can an operator tell what happened, what changed, what is
+  still uncertain, and what exact next action is required?
+- regression rate and rework burden: does accepted output stay durable, or does
+  it create avoidable follow-on repair, rollback, or repeated review churn?
 
-Landing condition:
+These criteria should dominate apparent autonomy, routing novelty, or prompt
+cleverness when the roadmap is prioritized.
 
-- widened authority inside a running workflow cannot proceed on stale approval
-- persisted evidence shows which step triggered reapproval and why
+## Priority Tracks
 
-### Machine-Decidable Reviewability
-
-Current gap:
-
-- structural validation is stronger than narrative adequacy validation
-- the new persisted reviewability surface is intentionally narrow and does not replace deeper reviewer judgment
-- provider/model evidence requirements are still partially inferred; there is no first-class persisted `providerModelEvidenceRequired` field
-
-Hardening target:
-
-- deepen machine-checkable gates where evidence is strong enough while keeping fail-closed semantics
-- preserve the explicit separation between structural validity and reviewability
-- promote selected currently narrative-only checks into deterministic validators where the evidence model is strong enough
-
-Landing condition:
-
-- the repository can distinguish `persisted`, `structurally valid`, and `reviewable` states without relying on undocumented reviewer convention
-
-## Target Schema And Evidence Surface
-
-### Approval And Reviewability Artifacts
-
-Current gap:
-
-- approval evidence is embedded in `build_session`
-- there is no first-class persisted `approval_record`
-- there is no first-class persisted `providerModelEvidenceRequired` field
-
-Hardening target:
-
-- add immutable approval artifacts or equivalent first-class approval lineage
-- extend reviewability evidence requirements only where current machine checks are still too implicit
-- preserve backward-compatible linkage between `build_session`, `persisted_run_record`, and the linked approval surface
-
-Landing condition:
-
-- approval lineage and reviewability state are inspectable without reconstructing intent from mixed embedded fields and backend conventions
-
-### Provider/Model And Execution Evidence Gating
-
-Current gap:
-
-- provider/model facts live mainly as evidence strings emitted by the process backend
-- there is no authoritative persisted field saying whether provider/model evidence was required for a given run
-
-Hardening target:
-
-- promote provider/model selection into first-class persisted evidence when model-backed execution is part of the review claim
-- record whether provider/model evidence was required, captured, or missing
-- make evidence requirements backend-aware without overstating universal coverage
-
-Landing condition:
-
-- success reviewability no longer depends on informal inference about whether backend-emitted provider/model fields should have been present
-
-### Richer Structured Evidence Surfaces
+### 1. First-Class Reviewability And Evidence Surfaces
 
 Current gap:
 
-- command, diff, review, and cost evidence still rely heavily on string-keyed `evidence[]`, narrative summaries, or formatter output
+- approval lineage, command evidence, diff ownership, review findings, and cost
+  or validation facts still rely too heavily on mixed embedded fields, evidence
+  strings, or formatter logic
+- critical review questions are not yet answerable from typed persisted fields
+  alone
 
 Hardening target:
 
-- introduce first-class artifacts or embedded shapes for command logs, diff ownership, structured review findings, and cost records where those surfaces become approval- or review-critical
-- keep current evidence-string conventions only as compatibility shims once first-class fields exist
+- promote review-critical surfaces into typed persisted fields or dedicated
+  embedded artifacts where they matter to approval, reviewability, or operator
+  claims
+- keep string-keyed `evidence[]` conventions only as compatibility shims once a
+  typed owner exists
+- make approval lineage inspectable without reconstructing intent from mixed
+  build-session fields and backend convention
+- make changed-surface ownership and structured review findings first-class
+  where they are needed for merge-grade review
 
 Landing condition:
 
-- critical review questions can be answered from typed evidence rather than from mixed free-form summaries
+- a reviewer can answer what was approved, what ran, what changed, what was
+  validated, and what remains unproven from typed persisted evidence rather than
+  from narrative reconstruction
 
-### Redaction And Trust-Boundary Hardening
+### 2. Provider/Model Evidence Hardening
 
 Current gap:
 
-- persisted evidence and forwarded worker context do not pass through a repository-wide redaction layer
-- raw tool output, launcher text, workspace paths, and worker summaries can cross persistence or later-context boundaries unredacted
+- provider/model facts are still mainly key-value evidence strings emitted by
+  the process backend
+- there is still no authoritative persisted field saying whether
+  provider/model evidence was required for the run being reviewed
 
 Hardening target:
 
-- add a repository-wide redaction and secret-scrubbing pipeline for persisted evidence, forwarded worker context, and stored tool output
-- classify which fields may store raw text, hashed references, summaries, or redacted payloads
-- preserve enough evidence for reviewability without depending on raw secret-bearing material
+- promote requested and selected provider/model facts into first-class
+  persisted execution evidence when model-backed execution matters to the claim
+- add an explicit requirement surface that can distinguish required, captured,
+  missing, not applicable, and unknown states
+- keep the requirement backend-aware rather than pretending every successful run
+  uses the same model-backed execution path
 
 Landing condition:
 
-- stronger review claims can rely on persisted evidence without assuming upstream callers already scrubbed sensitive material correctly
+- reviewable success no longer depends on informal inference about whether
+  provider/model evidence should have existed
 
-## Target Approval And Policy Surface
-
-### Richer Runtime Profile Enforcement
+### 3. Context Construction And Retrieval Quality
 
 Current gap:
 
-- runtime profile resolution is effectively `default` only
-- there is no live multi-profile enforcement matrix over the broader action-class vocabulary
+- the harness already bounds scope, but context assembly, retrieval, pruning,
+  and carry-forward are not yet treated as first-class hardening surfaces
+- prior-run summaries, evidence, and changed-surface context can be forwarded,
+  but provenance, freshness, and selection quality are not yet explicit enough
+  for stronger review claims
 
 Hardening target:
 
-- support explicit non-default profile resolution in code
-- enforce stricter profile overlays through live denial, approval, evidence, and retention behavior
-- keep profile semantics additive-only relative to the contract floor
+- define deterministic context builders for task envelopes, repo retrieval,
+  prior-run reuse, changed-surface carry-forward, and review-context assembly
+- record why a given file, doc, skill, or prior artifact entered context when
+  that choice affects worker behavior or later review
+- add checks for stale, conflicting, oversized, or weakly grounded context
+- prefer smaller, provenance-backed context packets over broader prompt
+  accumulation
 
 Landing condition:
 
-- profiles are both selectable and detector-backed, or they stay out of normative docs
+- workers receive more relevant context with less drift, and reviewers can
+  inspect where that context came from and why it was included
 
-### Operator-Safe Profile And Escalation
+### 4. Tool And Result Contract Audit And Cleanup
 
 Current gap:
 
-- the repository does not currently ship a live operator-safe profile for zero-coding approval
-- non-technical operator restrictions, escalation rules, and archetype narrowing are not yet enforced as a separate runtime mode
+- some tool boundaries and worker-result surfaces still mix typed fields with
+  narrative convention
+- the persisted action-class vocabulary is broader than the detector-backed live
+  contract surface
+- several trust-boundary crossings are described, but not yet audited as one
+  coherent contract set
 
 Hardening target:
 
-- introduce an enforceable operator-safe profile that narrows admissible work, approver class, and summary requirements
-- hard-escalate technically hazardous work instead of leaving that decision to implied operator judgment
-- preserve fail-closed handling when a request does not fit an operator-safe archetype
+- audit each tool and worker-result boundary for canonical inputs, typed
+  outputs, stop reasons, changed-surface provenance, redaction expectations, and
+  failure semantics
+- define one code owner and one evidence path per live action class before
+  promoting it into runtime policy claims
+- only promote classes such as `read_protected`, `access_network`,
+  `access_connector`, `access_secret`, and `irreversible_side_effect` when
+  detector owners, tests, and evidence semantics are real
+- prevent vocabulary-only classes from reading as enforced behavior until that
+  backing exists
 
 Landing condition:
 
-- a non-technical operator can stay inside a bounded approval surface that is genuinely enforced rather than documented aspirationally
+- each live tool and action class has a narrow, truthful, testable contract
+  rather than a mixture of schema vocabulary and reviewer convention
 
-## Target Operator-Mode Hardening
-
-### Richer Operator-Safe Archetypes
+### 5. Skill Governance And Skill Regression
 
 Current gap:
 
-- operator-safe archetypes are not yet live classification surfaces
-- current `/build` behavior still runs under the general `default` profile
+- the repository now treats skills as the preferred reusable-method layer, but
+  current governance is still mostly documentation and review discipline
+- there is no first-class skill registry, pinning surface, or regression
+  harness, and no routine proof that high-value skills still reference valid
+  commands, files, and output expectations
 
 Hardening target:
 
-- add concrete archetypes such as docs-only, bounded wording change, small local implementation, status-only follow-up, and other operator-safe patterns
-- classify ambiguous requests into a safe archetype, guided clarification, or blocked escalation
+- add skill inventory, ownership, compatibility, or pinning surfaces only where
+  code can make them truthful
+- build regression or fixture-style checks for high-leverage skills so that
+  referenced files, commands, and output shapes stay real
+- require coupled updates when contract, schema, profile, or role changes would
+  otherwise leave a skill stale
+- move repeatable task method into governed skills before adding equivalent
+  branches to the orchestrator
 
 Landing condition:
 
-- broader non-technical usage does not depend on ad hoc technical reinterpretation of the request
+- reusable method is reviewable, testable, and governable without silently
+  becoming hidden policy or controller sprawl
 
-### Formatter-Level Summary Enforcement
+### 6. Redaction And Trust-Boundary Hardening
 
 Current gap:
 
-- the schema defines operator-readable summary content, but formatter coverage is still partial
+- persisted evidence and forwarded worker context still do not pass through a
+  repository-wide redaction or secret-scrubbing pipeline
+- raw tool output, launcher text, workspace paths, and worker summaries can
+  cross persistence or later-context boundaries unredacted
 
 Hardening target:
 
-- make approval, blocked, and terminal summaries consistently render the required operator-facing fields
-- lift the richer eight-field operator-summary model into dedicated formatter coverage: requested outcome, actual outcome, changed surfaces, proof collected, unproven claims, approval needed, recovery / undo notes, and next step
-- expose proof gaps, approval state, and next-step guidance with dedicated formatter coverage instead of relying on partial formatter behavior
+- add a repository-wide redaction layer for persisted evidence, forwarded
+  worker context, and stored tool output
+- classify which surfaces may store raw text, summaries, hashes or references,
+  or only redacted payloads
+- bind redaction behavior to the tool, result, and context-builder contracts
+  above rather than handling it as ad hoc formatter cleanup
 
 Landing condition:
 
-- operator summaries answer the required questions consistently across commands, not only in docs or reviewer expectations
+- stronger review claims can rely on persisted evidence without assuming
+  upstream callers already scrubbed sensitive material correctly
 
-## Sequencing
+### 7. Operator-Safe Profile And Runtime Enforcement
 
-Recommended order:
+Current gap:
 
-1. Finish current-doc honesty cleanup first.
-2. Harden action-class detection and pre/post-run evidence alignment.
-3. Add redaction and trust-boundary controls before depending on stronger review claims.
-4. Extend first-class approval evidence and deepen reviewability evidence requirements.
-5. Enable richer profile enforcement only after the underlying detector and evidence surfaces exist.
-6. Expand zero-coding/operator-safe mode after profile enforcement, summary rendering, and escalation paths are real.
+- runtime profile resolution is still effectively `default` only
+- the repository does not yet ship a live operator-safe profile with enforced
+  archetypes, escalation rules, and narrower evidence expectations
+- current operator summaries are stronger, but operator-safe mode is still not a
+  separate runtime envelope
+
+Hardening target:
+
+- implement explicit non-default profile resolution only after the evidence,
+  context, and tool-contract surfaces above are strong enough to support it
+- introduce an operator-safe profile that narrows admissible work, escalation
+  rules, approval handling, and retention or evidence behavior without relaxing
+  the contract floor
+- promote operator-safe archetypes only when the runtime can fail closed on
+  out-of-archetype or technically hazardous work
+
+Landing condition:
+
+- non-technical operators can stay inside a genuinely enforced runtime mode that
+  escalates hazardous work instead of relying on implied judgment
+
+### 8. Additional Orchestration Only Where It Pays For Itself
+
+Current gap:
+
+- some future hardening still points toward extra controller logic, such as
+  mid-run reapproval, packet-level escalation, or richer routing around stricter
+  tool classes
+- those changes add state-machine and integration complexity, so they should not
+  lead the roadmap
+
+Hardening target:
+
+- treat more orchestration as a downstream lever, not as the default capability
+  plan
+- add control-plane or packet-level orchestration only when earlier tracks show
+  a clear enforcement, context, evidence, reviewability, or operator-clarity
+  gain that simpler surfaces cannot provide
+- preserve worthwhile future work such as mid-run reapproval, but defer it
+  until approval lineage, action-class ownership, evidence quality, and profile
+  semantics are strong enough to justify the added complexity
+
+Landing condition:
+
+- any added orchestration demonstrably improves policy enforcement, context
+  quality, evidence quality, reviewability, or operator clarity rather than
+  merely increasing choreography
+
+## De-Emphasized But Preserved Themes
+
+The roadmap still keeps these themes, but they are no longer the front of the
+queue:
+
+- broadening the action-class matrix faster than tool contracts and evidence
+  surfaces can support
+- mid-run reapproval before approval lineage and provider/model evidence are
+  first-class
+- proliferating operator archetypes before runtime profile enforcement is real
+- formatter-only richness that outruns persisted evidence
+- controller growth as a proxy for harness capability
 
 ## Update Rule
 
@@ -236,4 +347,5 @@ When a roadmap item becomes enforced in code:
 
 1. update the code and tests
 2. move the requirement into the appropriate normative doc
-3. remove or narrow the corresponding roadmap entry so this file stays future-facing
+3. remove or narrow the corresponding roadmap entry so this file stays
+   future-facing

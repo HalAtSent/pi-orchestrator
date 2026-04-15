@@ -4,6 +4,8 @@ This document defines the normative policy-profile surface for the harness.
 
 It is the source of truth for valid `policyProfile` identifiers, default profile resolution, stricter-only overrides, and fail-closed handling for invalid or denied profile-dependent behavior.
 
+Policy profiles are live enforcement overlays on top of the contract and evidence schema. They do not define reusable procedure, role playbooks, or operator how-to guidance.
+
 Future profile models and profile-driven hardening that are not yet enforced belong in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md), not in this file's live profile surface.
 
 ## Scope
@@ -16,6 +18,8 @@ This file defines:
 - the stricter-only override rule
 - current invalid-profile and denied-action handling
 - invalid-profile conditions and fail-closed handling
+
+This file is not the authority for governed skills, role guidance, or operator-facing workflow guidance.
 
 ## Precedence
 
@@ -47,7 +51,7 @@ Current implementation note:
 
 ### `default`
 
-- Intended operator class: general repository use with the contract and evidence floors exactly as written.
+- Intended use: baseline execution with the contract and evidence floors exactly as written.
 - Allowed action classes: whatever the contract and live implementation currently permit, including detector-backed command-signal classes such as `install_dependency` and `mutate_git_state` when those signals are present.
 - Approval floor: unchanged from the contract.
 - Extra evidence requirements: none beyond the contract and evidence schema.

@@ -4,11 +4,13 @@ This document defines the normative schema surface for persisted run evidence.
 
 Unlike [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md), this file is a schema contract. It should be reviewed like an API and storage specification.
 
+It is authoritative for persisted evidence fields, normalized reviewability, and derived operator-readable rendering minimums grounded in persisted artifacts. It is not the place for architecture doctrine, role guidance, or governed procedure.
+
 Future-facing schema and evidence hardening that is not yet enforced belongs in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md), not in this file's required fields.
 
 ## Scope
 
-This schema is authoritative for the persisted evidence surfaces used by the harness and for the narrower reviewer-facing assessment rules applied to terminal states:
+This schema is authoritative for the persisted evidence surfaces used by the harness, the narrower reviewability rules applied to terminal states, and the operator-facing rendering minimums grounded in those artifacts:
 
 - top-level persisted artifacts:
   - `persisted_run_record`
@@ -27,9 +29,11 @@ This schema is authoritative for the persisted evidence surfaces used by the har
 
 Lifecycle planning artifacts such as `proposal_set`, `project_blueprint`, `execution_program`, and `audit_report` remain validated by their own constructors. This document references them only where they are embedded in persisted evidence.
 
+Governed procedure surfaces such as skills, prompts, and role guides are out of scope here except where their effects are captured in canonical persisted fields or derived rendering requirements.
+
 A persisted artifact can be structurally valid without yet being reviewable for terminal success. In current code, placeholder validation entries preserve lineage and fail closed on fabricated capture claims, but they do not by themselves prove reviewable success.
 
-Current v1 persists a first-class `reviewability` object on `persisted_run_record`, embedded `run_journal`, and `build_session.execution`.
+Current v1 persists a narrow first-class `reviewability` object on `persisted_run_record`, embedded `run_journal`, and `build_session.execution`.
 
 Current v1 still does not persist a first-class `providerModelEvidenceRequired` field. Provider/model requirements remain a narrow machine inference surface plus reviewer context.
 
@@ -228,7 +232,6 @@ Required fields:
 - `actionClasses`
 - `policyProfile`
 - `validationArtifacts`
-- `reviewability`
 - `reviewability`
 - `createdAt`
 - `updatedAt`
@@ -580,7 +583,7 @@ The following evidence claims must bind to the named fields below.
 
 ## Operator-Readable Evidence Rendering
 
-This section defines the operator-readable evidence model for approval, status, blocked, and terminal summaries. It sits alongside the persisted artifact schema, but it does not create a new required on-disk `operatorSummary` object in v1.
+This section defines the operator-readable evidence rendering minimums for approval, status, blocked, and terminal summaries. It sits alongside the persisted artifact schema, but it does not create a new required on-disk `operatorSummary` object in v1.
 
 Current applicability:
 
@@ -664,6 +667,7 @@ The current formatter binding above is the honest live surface. Additional summa
 Current v1 relies on a mix of directly stored fields and normalized or reviewer-facing inference. The distinction is normative for reviewable terminal claims.
 
 - Direct evidence is grounded in canonical persisted fields or references such as `run_journal.status`, `completedContractIds`, `contractRuns[]`, captured `validationArtifacts[]`, persisted `reviewability`, `build_session.approval.*`, `policyProfile`, `sourceArtifactIds`, and the linked lifecycle artifacts.
+- Skills, prompts, and role guides are not direct evidence by themselves; they matter here only when their effects are captured in canonical persisted fields or truthful derived render output.
 - Acceptable inference is limited to classification or summarization that current code already normalizes or that reviewers can derive from repository-local backend context, including conservative `actionClasses` and whether provider or model evidence should have existed for that run when machine status is `unknown`.
 - Acceptable inference may explain or classify directly persisted evidence. It may not replace required direct evidence for a reviewable terminal claim.
 - Placeholder `validationArtifacts[]` entries with `status = not_captured` are direct evidence that validation capture is incomplete. They are not direct evidence that validation passed.

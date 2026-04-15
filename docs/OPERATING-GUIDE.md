@@ -13,8 +13,10 @@ Future-facing hardening and zero-coding operator-mode targets live in [HARDENING
 
 The design intent is:
 
-- keep orchestration and policy in code
-- use skills only for leaf worker behavior
+- keep deterministic policy and persisted truth surfaces in code and normative docs
+- treat roles as permission and evidence envelopes
+- use governed skills for reusable procedure
+- improve context construction, tool and result contracts, and evidence quality before adding orchestration complexity
 - isolate worker context aggressively
 - trade model cost against task complexity
 - stop cleanly when policy, scope, or evidence breaks down
@@ -29,9 +31,13 @@ Current policy-surface note:
 - current runtime gating is primarily high-risk approval, allowlist and forbidden-path checks, protected-path rejection in declared scope, and pre-execution approval-scope checks against the current stored plan
 - persisted `actionClasses` should be read as plan-derived scope or conservative evidence, depending on the field, not as a complete detector-backed policy trace
 
+The harness is meant to get safer and more useful through better context assembly, tool and result boundaries, evidence quality, and fail-closed enforcement, not through multiplying lifecycle or routing complexity.
+
 ## Current Model
 
 The package is split into a control plane and a worker plane.
+
+Roles here are capability boundaries with permission and evidence duties. Reusable task method belongs in governed skills rather than in broader role semantics.
 
 - `orchestrator`
   - strongest reasoning model
@@ -58,6 +64,8 @@ The contract currently requires:
 ## Workflow Stages
 
 The package currently exposes six core lifecycle stages plus one operator shell stage.
+
+These stages are bounded interfaces, not a claim that more staging is itself the safety mechanism.
 
 ### `build`
 
@@ -87,18 +95,18 @@ Approval meaning:
 
 #### Operator-Readable Evidence Summary
 
-Operator-facing run summaries should stay readable without hiding uncertainty. The current live formatter-backed minimum is narrower than the longer-term richer summary target. The live minimums are defined in [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md); the broader summary target remains future hardening in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
+Operator-facing run summaries should stay readable without hiding uncertainty. The live minimums are defined in [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md).
 
 Current formatter coverage now includes dedicated summary lines for changed surfaces, proof collected, unproven claims, reviewability, approval needed, and recovery / undo notes.
 
-Longer-term, richer operator-facing summaries should still make clear:
+In practice, the current summary should make clear:
 
 - what was looked at
 - what changed
 - what commands or checks were run
 - what passed, failed, or was not captured
 - what remains uncertain
-- whether the current result is safe to review as complete or instead needs technical follow-up
+- whether the current result is reviewable as complete or instead needs technical follow-up
 
 This guide does not add new evidence-schema fields. The authoritative operator-readable evidence model now lives in [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md).
 
@@ -333,8 +341,8 @@ That means:
 The next highest-value work is:
 
 1. harden live Pi runtime diagnostics and capability detection across hosts
-2. expand on-disk evidence and operator controls
-3. add stronger execution-profile controls for budgets and approvals
+2. expand on-disk evidence and operator-readable review surfaces
+3. improve context construction and tool/result contract quality
 4. grow regression coverage from real day-to-day task runs
 
 ## Local Verification

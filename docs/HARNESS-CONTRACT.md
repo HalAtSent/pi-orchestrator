@@ -6,6 +6,8 @@ Unlike [HARNESS-PRINCIPLES.md](./HARNESS-PRINCIPLES.md), this file is not a doct
 
 Future-facing hardening that is not yet enforced belongs in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md), not in this contract.
 
+This contract is about the harness as a thin but strict control plane. It is authoritative for the deterministic enforcement boundary: permissions, approvals, scope, provenance, persistence, evidence normalization, truthful status and approval surfaces, and fail-closed behavior. It is not a requirement that reusable task procedure or central choreography live in controller logic.
+
 ## Scope
 
 This contract defines:
@@ -17,7 +19,7 @@ This contract defines:
 - action classes and default approval policy
 - evidence rules for terminal claims
 - approval-role boundaries and companion-update requirements
-- orchestrator and worker responsibilities
+- control-plane boundaries, governed procedure boundaries, and current orchestrator and worker responsibilities
 - run state machines
 - fail-closed rules
 
@@ -26,6 +28,8 @@ This contract defines:
 This is the v1 behavioral contract for the repository.
 
 Rules in this file describe current implemented behavior, current fail-closed normalization, or explicit repo-wide policy defaults that are authoritative for review and promotion today.
+
+Conformance is judged by whether the control-plane surfaces stay truthful, predictable, and reviewable under strict boundaries, not by apparent autonomy or controller complexity. The harness should be able to show what scope was authorized, what ran, what changed, what evidence was captured, and where execution stopped without requiring trust in procedural narration.
 
 Current code enforces or materially normalizes these parts already, especially:
 
@@ -44,8 +48,11 @@ Target-state hardening that is not enforced today is tracked separately in [HARD
 ## Normative Terms
 
 - Enforced behavior: a rule currently backed by code validation, denial, normalization, or state-machine handling in this repository.
+- Control plane: the deterministic code-owned enforcement boundary for permissions, approvals, scope, provenance, persisted status, evidence normalization, and fail-closed handling.
+- Governed procedure surface: a reviewable skill, role guide, prompt template, or reusable task method that may shape execution but is not itself a policy authority unless the contract, evidence schema, active profile, and code make it authoritative.
 - Repo-wide policy default: a normative planning, review, approval, or promotion rule for this repository when there is not yet a universal detector-backed runtime gate for that concern. It is authoritative for how work may be proposed, approved, and represented, but it is not a claim that every violation is intercepted automatically at runtime.
 - Reviewable success: a terminal result that satisfies both the execution-state rules in this contract and the evidence sufficiency rules in this contract plus [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
+- Truthful interface: a tool, status, approval, or operator-facing surface that states only what current validation, persisted evidence, normalization, and policy actually support.
 
 ## Precedence
 
@@ -65,6 +72,7 @@ If two layers conflict:
 - behavioral, state, approval, denial, and inspectability conflicts are resolved by the stricter applicable rule from this contract, [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md), or the active policy profile
 - active profile resolution must be valid under [POLICY-PROFILES.md](./POLICY-PROFILES.md)
 - an implementation is non-conformant if it permits behavior forbidden by this contract, omits required persisted-shape fields, or claims reviewable completion without the evidence required by the evidence schema
+- governed procedure surfaces such as skills, prompts, role guidance, and reusable task method may shape execution, but they never widen permissions, scope, approvals, or evidence obligations unless the normative docs and code are updated together
 - prompt text and model behavior never override a denial condition
 
 ## Completeness Rule
@@ -118,6 +126,31 @@ Current implementation notes:
 - `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]` and normalized `changedSurface` into `run_journal.contractRuns[]`.
 - No repository-wide redaction or secret-scrubbing pass currently runs across those forwarded or persisted strings. See [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) for the target redaction hardening track.
 
+## Control-Plane Boundary
+
+This contract treats the control plane as the deterministic enforcement boundary. In the current repository, that boundary is carried by code that validates permissions and scope, binds approval to stored plan identity, persists truthful run and build state, normalizes evidence, and blocks invalid execution.
+
+### Control-Plane Responsibilities
+
+- permissions, read/write capability, and role boundaries
+- declared scope, allowlists, forbidden paths, protected-path rejection, and single-writer ownership
+- approval binding to the current stored `programId`, `planFingerprint`, resolved `policyProfile`, and currently derived action-class scope
+- provenance and lineage across build sessions, execution programs, and run journals
+- persistence of approval, execution, and reviewability state in the current stores and journals
+- evidence normalization, reviewability normalization, and truthful persisted and operator-visible status surfaces
+- fail-closed handling when validation, approval coverage, or persisted state is invalid
+
+Tool and result boundaries should therefore stay narrow, truthful, and predictable. In current v1, the code-enforced pieces of that promise are the validated worker-result surface, persisted artifact normalization, approval binding, and operator summaries grounded in stored evidence.
+
+### Governed Procedure Surfaces
+
+Reusable task method may live in governed skills, role guidance, prompts, or other reviewable procedure surfaces outside the core contract.
+
+- They may shape context assembly, tool use, output structure, or review method.
+- They may not widen permissions, expand scope, relax approvals, redefine statuses, or replace required persisted evidence.
+- Reusable method does not belong in the contract unless it affects safety, policy, persisted interfaces, or evidence obligations.
+- They become contract-relevant only when those concerns are affected and the corresponding normative docs and code are updated together.
+
 ## Kernel Invariants
 
 These invariants may not be bypassed by prompts, worker output, or policy profiles.
@@ -132,10 +165,11 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 
 ### Role Boundaries
 
-- `orchestrator` owns decomposition, sequencing, integration, and denial decisions.
+- Roles are enforced primarily through permissions, file scope, read/write capability, approval gates, and structured output and evidence obligations.
+- The current implementation uses an `orchestrator` role for decomposition, sequencing, integration, and denial decisions.
 - `explorer`, `reviewer`, and `verifier` are read-only roles by default.
 - `implementer` is the primary write-capable worker role.
-- Workers may not redefine role semantics at runtime.
+- Workers, prompts, and governed procedure surfaces may not redefine role semantics, widen permissions, or relax evidence obligations at runtime.
 
 ### Policy and Approval
 
@@ -151,6 +185,7 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 - Worker results must validate before integration.
 - Persisted run artifacts must validate before resume or status sync.
 - Invalid structured output fails closed.
+- Structured execution and evidence surfaces become authoritative only through current validation and normalization, not through procedural narration alone.
 - Current worker-result and persisted-artifact validation is primarily structural. Narrative adequacy such as whether summaries or stop reasons are specific enough for human review remains reviewer guidance in the evidence schema, not a machine-decided contract gate.
 
 ### Execution Discipline
@@ -264,10 +299,11 @@ Current runtime approval binding remains enforced through stored `programId`, `p
 - Reviewable `success` requires that terminal `success` state plus enough direct evidence to inspect what was approved, what ran, what was validated, and what remains uncertain.
 - Current v1 persists a narrow machine reviewability summary (`reviewability.status` and `reviewability.reasons[]`) on run and build execution artifacts. That summary is authoritative for the machine-checkable surface, not for every reviewer judgment.
 - The following must be directly evidenced in persisted artifacts when they are applicable to the claim being made: terminal status and completed-contract state, the approval binding and active `policyProfile` when approval was required, captured validation evidence for validations actually exercised, the concrete source of any blocked, failed, or repair-required outcome, and lineage linking the build session, execution program, and run journal.
+- Evidence and reviewability surfaces are part of the runtime contract. Persisted artifacts and operator-facing summaries must distinguish observed execution facts from planned scope, normalized inference, or not-captured evidence.
 - The following may be inferred conservatively from current normalization or repository-local backend context: normalized `stopReasonCode`, normalized `validationOutcome`, conservative `actionClasses`, and whether provider or model evidence should have existed for that run.
 - Acceptable inference may classify or summarize directly persisted evidence. It may not replace missing required direct evidence.
 - If reviewable evidence is incomplete, current v1 may still persist a structurally valid terminal artifact, including persisted `success` with `validationArtifacts[].status = not_captured`. That artifact is persisted state, not reviewable `success`.
-- Missing reviewable evidence does not by itself rewrite a structurally persisted terminal status to `blocked`, `failed`, or `repair_required` after the fact. It instead limits what the orchestrator, reviewer, or caller may truthfully claim about that terminal state.
+- Missing reviewable evidence does not by itself rewrite a structurally persisted terminal status to `blocked`, `failed`, or `repair_required` after the fact. It instead limits what the control plane, reviewer, or caller may truthfully claim about that terminal state.
 - When an evidence gap is known while the run is still `running` and a repair or verification path exists inside the active plan, the orchestrator should spend that path before terminalizing.
 
 ## Forbidden Shortcuts
@@ -277,6 +313,8 @@ These are repository policy defaults. They may not be justified by time pressure
 - Do not weaken, remove, or skip validation merely to make the current slice pass, unless the approved change explicitly changes that validation contract itself.
 - Do not allow silent contract drift between the declared slice, implemented behavior, persisted evidence, and operator-facing description.
 - Do not ship a symptom-only patch when the underlying cause is already visible and can be addressed safely within the current slice.
+- Do not treat added controller complexity, routing stages, or reusable procedure inside the control plane as a substitute for explicit permissions, approvals, validation, or evidence.
+- Do not treat increased apparent autonomy as a gain if inspectability, reviewability, or control boundaries get weaker.
 - Do not widen scope silently, including companion changes that materially alter behavior, schema, or operator surface without making that widening explicit in the same slice or obtaining fresh approval.
 
 ## Approval Roles
@@ -292,6 +330,10 @@ Current runtime code persists an operator-facing approval binding. The role boun
 
 ## Orchestrator Contract
 
+The current implementation uses an orchestrator surface to carry the control-plane duties below. At contract level, the point of this surface is deterministic control and truthful state, not controller complexity.
+
+The orchestrator should stay thin and deterministic. A strong control plane is not a reason to accumulate reusable method or controller choreography in this layer unless doing so materially improves policy enforcement, context quality, evidence quality, reviewability, or operator clarity.
+
 The orchestrator is responsible for:
 
 - defining bounded goals
@@ -301,12 +343,14 @@ The orchestrator is responsible for:
 - applying risk classification and human-gate logic
 - deciding whether a run continues, blocks, fails, repairs, or succeeds
 - integrating validated worker results
+- persisting truthful status, approval, lineage, and execution-evidence surfaces through the current stores and journals
 
 The orchestrator may not:
 
 - silently widen scope after planning
 - bypass required approvals
-- treat prompt instructions as stronger than contract invariants
+- treat governed procedure or prompt instructions as stronger than contract invariants
+- claim changed scope, approval coverage, or reviewability that persisted evidence does not support
 - accept malformed worker output as success
 
 ## Worker Contract
@@ -335,6 +379,7 @@ Workers must obey all of the following:
 - a review-triggered repair attempt, when budget remains, happens inside the enclosing `running` program run rather than through a separate persisted repair state
 - they may request clarification only by returning structured open questions or blocked output
 - they may not present free-form narrative as a substitute for structured result fields
+- reusable procedure may shape how they work, but it does not widen role power or reduce output and evidence obligations
 
 Worker result fields must be valid and complete before integration.
 
@@ -446,3 +491,5 @@ A feature should not be promoted into the main harness unless all of the followi
 2. It preserves all invariants and state rules in this contract.
 3. It is fully representable in [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
 4. It is valid under at least one policy profile without weakening this contract.
+5. Any added orchestration materially improves policy enforcement, context quality, evidence quality, reviewability, or operator clarity.
+6. It does not trade stronger apparent autonomy for weaker inspectability, reviewability, or control boundaries.

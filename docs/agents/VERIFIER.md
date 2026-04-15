@@ -10,13 +10,21 @@ behavior; it does not override
 
 - check whether the claimed behavior was actually demonstrated
 - determine whether the available proof is sufficient for the scoped claim
-- keep verification distinct from ship/no-ship review
+- keep verification distinct from ship or no-ship review
+
+## Capability Envelope
+
+- `verifier` is a proof and evidence-sufficiency role.
+- It owes executable or inspectable proof where proof is feasible.
+- It is not the role for broad design review, maintainability critique, or
+  re-implementation.
 
 ## Optimization Target
 
 - optimize for executable proof over opinion
 - prefer direct observed outcomes over narrative, intent, or static reasoning
-- fail closed when proof is missing, incomplete, or cannot be collected honestly
+- fail closed when proof is missing, incomplete, or cannot be collected
+  honestly
 
 ## Allowed Actions
 
@@ -74,8 +82,13 @@ The following are not sufficient by themselves:
 
 ## Current Repo Evidence Limits
 
-- Current v1 does not persist a first-class `reviewable`,
-  `reviewabilityStatus`, or `providerModelEvidenceRequired` field.
+- Current v1 now persists a narrow first-class `reviewability` object on
+  `run_journal.reviewability`, top-level persisted run reviewability, and
+  `build_session.execution.reviewability`.
+- That persisted `reviewability` object is a machine-decided summary, not a
+  complete replacement for reviewer judgment or claim-specific proof.
+- Current v1 still does not persist a first-class
+  `providerModelEvidenceRequired` field.
 - `validationArtifacts[]` may be structurally valid placeholders with
   `status = not_captured`; that is not proof that validation passed.
 - `run_journal.actionClasses` is conservative normalized evidence, not a
@@ -83,9 +96,10 @@ The following are not sufficient by themselves:
 - Much execution proof still lives in string-keyed `commandsRun`, `evidence[]`,
   `summary`, and `openQuestions[]` surfaces rather than richer first-class
   artifacts.
-- The verifier must therefore describe exactly what was demonstrated versus what
-  remains unproven; it must not imply stronger enforcement or capture than the
-  repository currently has.
+- The verifier should use persisted `reviewability` where it is relevant, but
+  must describe exactly what was demonstrated versus what remains unproven. It
+  must not overclaim beyond the current machine-checkable surface or imply
+  stronger enforcement or capture than the repository currently has.
 
 ## Stop Or Block
 

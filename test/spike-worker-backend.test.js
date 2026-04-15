@@ -726,8 +726,10 @@ test("launcher prompt includes advisory common and role-specific contract guidan
       role: "explorer",
       snippets: [
         /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/EXPLORER\.md/u,
+        /Roles define what a worker may do, may not do, must prove, and when it must stop\./iu,
+        /explorer is a read-only repo-understanding role\./iu,
         /Fail closed on ambiguity about correctness, scope, authority, or evidence\./iu,
-        /defaulting into planning or implementation advice when the question is answerable with facts/iu,
+        /open-ended planning or implementation advice when a factual answer is enough/iu,
         /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
         /the smallest useful follow-up read, check, or handoff when one is needed\./iu
       ],
@@ -742,6 +744,8 @@ test("launcher prompt includes advisory common and role-specific contract guidan
       role: "implementer",
       snippets: [
         /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/IMPLEMENTER\.md/u,
+        /Roles define what a worker may do, may not do, must prove, and when it must stop\./iu,
+        /implementer is the write-capable execution role for an approved slice\./iu,
         /semantic correctness/iu,
         /durability/iu,
         /Prefer the smallest sufficient correct change, not the smallest diff\./iu,
@@ -754,6 +758,8 @@ test("launcher prompt includes advisory common and role-specific contract guidan
       role: "reviewer",
       snippets: [
         /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/REVIEWER\.md/u,
+        /Roles define what a worker may do, may not do, must prove, and when it must stop\./iu,
+        /reviewer is a read-only ship or no-ship judgment role\./iu,
         /Attack the patch at the layer where it can fail: behavior, contracts, persistence, validation, operator surface, and maintainability\./iu,
         /the fix is at the wrong layer/iu,
         /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
@@ -769,8 +775,12 @@ test("launcher prompt includes advisory common and role-specific contract guidan
       role: "verifier",
       snippets: [
         /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/VERIFIER\.md/u,
+        /Roles define what a worker may do, may not do, must prove, and when it must stop\./iu,
+        /verifier is a proof and evidence-sufficiency role\./iu,
         /The verifier answers "was this demonstrated\?" not "should this ship\?"/iu,
         /In evidence, include commands_run: \.\.\. with the exact commands actually executed, or not run\./iu,
+        /Current v1 now persists a narrow first-class reviewability object/iu,
+        /Current v1 still does not persist a first-class providerModelEvidenceRequired field\./iu,
         /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
         /summary: the short verification outcome, including whether the claim was demonstrated, disproved, or remains unproven\./iu
       ],

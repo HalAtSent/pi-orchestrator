@@ -2,7 +2,11 @@
 
 This repository exists to make agentic coding more useful without pretending it is safer, more reliable, or more autonomous than it really is.
 
-The target is not raw autonomy. The target is `quality-adjusted autonomy`: use models where they create real leverage, but contain the failure modes that make long-horizon software work expensive, insecure, or untrustworthy.
+The target is not raw autonomy or apparent autonomy. The target is trustworthy, reviewable, merge-grade output under strict control boundaries.
+
+`Quality-adjusted autonomy` is only useful shorthand when it still means: use models where they create real leverage, but contain the failure modes that make long-horizon software work expensive, insecure, untrustworthy, or expensive to review.
+
+Harness quality is itself a first-order capability lever. Better context construction, tool contracts, output shaping, evidence quality, and code-enforced control-plane invariants usually create more durable gains than adding more central routing, state, or orchestration ceremony.
 
 This document explains why the harness is shaped this way and what kinds of changes fit. It is doctrine, not an operational override; mandatory behavior, state rules, and inspectability requirements live in [HARNESS-CONTRACT.md](./HARNESS-CONTRACT.md), [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md), and [POLICY-PROFILES.md](./POLICY-PROFILES.md).
 
@@ -14,11 +18,17 @@ Build a trustworthy, bounded, evidence-heavy coding harness for day-to-day softw
 
 That means:
 
-- keep orchestration, policy, and risk control in code
+- keep permissions, approvals, scope, provenance, persistence, and evidence normalization authoritative in code
+- keep the control plane thin, legible, and hard to misread
+- treat prompts and skills as execution aids, not as the trust foundation
 - use subagents for scoped task work, not for owning the whole system
-- make decisions reviewable after the fact
+- make outputs reviewable after the fact
+- optimize the execution loop, not orchestration sprawl
+- treat roles mainly as capability boundaries and evidence obligations
+- prefer governed skills and procedures for reusable task method
 - fail closed when scope, evidence, or trust boundaries break down
 - optimize for merge-grade correctness, not happy-path green
+- judge progress by trustworthy output, review burden, evidence completeness, and policy correctness rather than by apparent autonomy
 - keep the surface simple for operators while preserving strict technical judgment underneath
 
 Companion specs:
@@ -50,32 +60,69 @@ In practical terms, the harness is trying to reduce:
 
 ## Core Principles
 
-### 1. Policy In Code, Not In Prompts
+### 1. Deterministic Control-Plane Invariants Belong In Code
+
+Code-enforced control-plane invariants are the main trust foundation in this repository.
 
 Prompts can help shape behavior. They are not a reliable policy boundary.
 
 Safety-critical rules belong in code:
 
-- role separation
-- file ownership
+- scope and ownership
+- provenance and approval binding
+- persistence and truthful status surfaces
+- role and permission boundaries
 - allowlists and forbidden paths
-- approval gates
-- bounded in-run repair-loop limits
-- validation of worker input and output
+- fail-closed denial conditions
+- bounded execution and repair-loop limits
+- evidence normalization and validation of worker input and output
 
-### 2. Strong Orchestrator, Narrow Workers
+### 2. Thin Control Plane, Strong Execution Loop
 
-The orchestrator owns:
+The harness should not treat more central orchestration logic as the default path to more capability.
 
-- decomposition
-- sequencing
-- risk handling
-- integration
-- stop conditions
+A strong control plane does not imply a thick orchestrator. The design center should remain a thin control plane with a strong execution loop.
 
-Workers should stay narrow, ephemeral, and task-scoped. They are execution tools, not free-roaming agents.
+The control plane should stay thin, deterministic, and legible. Capability gains should come primarily from better:
 
-### 3. Least Privilege Beats Convenience
+- task envelopes
+- context construction
+- tool contracts
+- output shaping
+- evidence-producing execution loops
+
+Minimal, truthful, well-bounded interfaces beat elaborate central choreography.
+
+### 3. Roles Are Capability Envelopes
+
+Roles should primarily define:
+
+- permissions
+- trust boundaries
+- evidence obligations
+
+Roles are not the main reusable-intelligence abstraction. Keep role semantics small, stable, and enforceable.
+
+### 4. Governed Skills Over Hidden Procedure
+
+Reusable task method should preferentially live in versioned, governed,
+reviewable skills or procedures rather than in ever-thicker orchestrator
+branches. Operational rules for that layer live in
+[SKILL-GOVERNANCE.md](./SKILL-GOVERNANCE.md).
+
+Skills can improve execution quality. They are not a substitute for policy,
+truth surfaces, or deterministic control-plane enforcement.
+
+Good procedural artifacts should shape:
+
+- context assembly
+- tool use
+- output structure
+- evidence expectations
+
+This is a better reuse layer than prompt folklore or expanding central orchestration logic.
+
+### 5. Least Privilege Beats Convenience
 
 Every extra tool, connector, hook, or permission expands blast radius.
 
@@ -87,7 +134,11 @@ The default should be:
 - no recursive delegation
 - explicit human approval for high-risk work, subject to stricter policy-profile handling
 
-### 4. Evidence Over Narrative
+### 6. Evidence And Reviewability Are Product Quality
+
+Evidence is not just audit exhaust. Reviewability is part of the product.
+
+Evidence quality and review burden are product-quality concerns, not merely audit concerns. A result that is hard to inspect is a lower-quality product even when the output looks superficially capable.
 
 The harness should produce artifacts that can be inspected without trusting the model's story about what happened.
 
@@ -95,12 +146,14 @@ Important evidence includes:
 
 - commands actually run
 - selected provider and model
+- changed surface
 - stop reason
 - persisted run journals
 - validation results
+- reviewability state
 - review and verification output
 
-### 5. Decompose Long-Horizon Work
+### 7. Decompose Long-Horizon Work
 
 Large goals should be compiled into bounded contracts with clear ownership and checkpoints.
 
@@ -114,7 +167,7 @@ The harness should prefer:
 
 This is how the system resists long-horizon drift.
 
-### 6. Tests Are Necessary, Not Sufficient
+### 8. Correctness And Durability Beat Happy-Path Green
 
 Passing tests matter, but they are not enough.
 
@@ -128,8 +181,6 @@ The harness should also protect for:
 - security
 - operator comprehension
 
-### 7. Durability Beats Patch Shape
-
 The harness should prefer the smallest sufficient correct change, not the smallest diff for its own sake.
 
 That means:
@@ -139,22 +190,18 @@ That means:
 - avoid changes that merely move risk into review, cleanup, or the next iteration
 - reject patch-minimization as a goal when it conflicts with correctness or maintainability
 
-### 8. Review Is The Bottleneck
+### 9. Harness Quality Matters More Than Generation Speed
 
-Agentic coding often shifts the limiting factor from code production to judgment.
+A fast model behind a weak harness is still a liability.
 
-The harness should optimize for review efficiency, not just code volume. Good features reduce the amount of ambiguous output a human has to validate.
+The highest-leverage harness work is usually better:
 
-### 9. Specification Quality Matters More Than Generation Speed
+- context construction
+- tool design
+- output shaping
+- evidence quality
 
-A fast model with a weak brief is still a liability.
-
-The harness should help narrow intent before execution through:
-
-- explicit planning stages
-- operator guidance
-- clear approvals
-- bounded clarification loops
+Planning and clarification still matter, but they are in service of execution quality rather than substitutes for it.
 
 ### 10. Simplicity On The Surface, Strictness Underneath
 
@@ -199,8 +246,13 @@ This harness is not trying to be:
 New features should be easier to approve when they improve one or more of these:
 
 - tighter trust boundaries
+- stronger code-enforced control-plane invariants
+- better context construction or tool contracts
+- better output shaping or evidence quality
 - clearer evidence
 - lower review burden
+- better trustworthy output per unit of human review
+- stronger governed procedure without widening role power
 - better operator comprehension
 - stronger architectural discipline
 - better control of risk, cost, or drift
@@ -208,9 +260,11 @@ New features should be easier to approve when they improve one or more of these:
 New features should be harder to approve when they mainly increase:
 
 - hidden autonomy
+- apparent autonomy that weakens inspectability, reviewability, or control boundaries
 - implicit permissions
 - prompt dependence
 - context sprawl
+- central orchestration or routing complexity without stronger evidence
 - review load without stronger evidence
 - system complexity without a clear control benefit
 
@@ -218,14 +272,18 @@ New features should be harder to approve when they mainly increase:
 
 Before promoting a feature, ask:
 
-1. Does it keep policy in code rather than relying on instruction-following?
-2. Does it reduce or expand trust boundaries?
-3. Does it improve evidence quality and post-run inspectability?
-4. Does it make long-horizon drift less likely?
-5. Does it reduce or increase the human review bottleneck?
-6. Does it preserve architecture boundaries?
-7. Does it keep the operator surface simple while leaving the kernel strict?
-8. Does it fail closed when assumptions break?
+1. Does it keep deterministic control-plane invariants in code rather than relying on instruction-following?
+2. Does it preserve a strong control plane without thickening the orchestrator by default?
+3. Does it improve the execution loop more than it grows central orchestration complexity?
+4. Does it improve context construction, tool contracts, output shaping, or evidence quality?
+5. Does it keep roles as capability boundaries rather than intelligence containers?
+6. Does it make reusable method clearer through governed skills or procedures?
+7. Does it reduce or expand trust boundaries?
+8. Does it improve evidence quality and post-run inspectability?
+9. Does it improve trustworthy output and reviewability rather than merely making the system appear more autonomous?
+10. Does it make long-horizon drift less likely?
+11. Does it keep the operator surface simple while leaving the kernel strict?
+12. Does it fail closed when assumptions break?
 
 If the answers are weak, the feature probably does not belong in the main harness.
 

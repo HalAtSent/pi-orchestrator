@@ -1,10 +1,12 @@
 # Quickstart For Non-Technical Operators
 
-This path is the thin operator shell on top of the existing orchestration kernel.
+This path is the thin operator shell on top of the existing harness kernel.
 
 Use it when you want to start from a plain-English idea and avoid low-level workflow JSON.
 
 This quickstart describes the current operator shell, which still runs under the live `default` profile. Future operator-safe profile hardening is tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md), not treated here as a live runtime toggle.
+
+The goal is plain-English intake, bounded approval, and truthful status and evidence summaries.
 
 ## Primary Command
 
@@ -76,7 +78,7 @@ Before any approval step, the operator-facing summary should answer these plain-
 - whether this operator may approve
 - whether technical approval is required instead
 
-Read the summary as operator-safe only when it stays at that level. You should not need to infer safety from raw action-class names, code diffs, stack traces, or schema details.
+Read the summary as safe for a non-technical operator only when it stays at that level. You should not need to infer safety from raw action-class names, code diffs, stack traces, or schema details.
 
 ## Approval Step
 
@@ -131,19 +133,20 @@ Use this reading frame:
 - `Technical escalation required?` `Yes` or `No`
 - `Next step:` one exact command or one exact human action
 
-If the blocked result is only technical jargon, it is not operator-safe enough. The operator should not need to reverse-engineer what happened.
+If the blocked result is only technical jargon, it is not safe enough for a non-technical operator. The operator should not need to reverse-engineer what happened.
 
 ## What Evidence Summaries Should Tell You
 
-Current formatter coverage now includes dedicated summary lines for changed surfaces, proof collected, unproven claims, reviewability, approval needed, and recovery / undo notes. The checklist below remains the longer-term richer summary target beyond that implemented set. The current live minimums are defined in [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
+Current formatter coverage now includes dedicated summary lines for changed surfaces, proof collected, unproven claims, reviewability, approval needed, and recovery / undo notes. The current live minimums are defined in [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
 
-Longer-term, operator-readable summaries should make clear:
+In practice, the current summary should make clear:
 
 - what the system looked at
 - what it changed
 - what commands or checks it ran
 - what passed, failed, or was not captured
 - what remains uncertain
+- whether the result is reviewable as complete or still needs technical follow-up
 
 Current implementation detail: `Changed surfaces` now prefers persisted observed paths from `run_journal.contractRuns[].changedSurface`. If capture is partial or not captured, the summary must say so explicitly and may fall back to planned scope.
 
@@ -151,7 +154,7 @@ That summary is for readability. The deeper contract and schema details still li
 
 ## Safe Work Versus Escalation-Only Work
 
-Typical non-technical operator-safe work includes:
+Typical work that is usually appropriate for a non-technical operator includes:
 
 - docs or copy changes
 - small bounded wording or rendering changes

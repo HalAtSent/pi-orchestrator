@@ -33,6 +33,7 @@ const ROLE_CONTRACT_DOCS = Object.freeze({
     label: "docs/agents/COMMON.md",
     url: new URL("../docs/agents/COMMON.md", import.meta.url),
     headings: [
+      "Role Envelope Model",
       "Optimization Order",
       "Required Defaults",
       "Facts And Inference",
@@ -47,6 +48,7 @@ const ROLE_CONTRACT_DOCS = Object.freeze({
     label: "docs/agents/EXPLORER.md",
     url: new URL("../docs/agents/EXPLORER.md", import.meta.url),
     headings: [
+      "Capability Envelope",
       "Optimization Target",
       "Forbidden Actions",
       "Required Evidence",
@@ -58,6 +60,7 @@ const ROLE_CONTRACT_DOCS = Object.freeze({
     label: "docs/agents/IMPLEMENTER.md",
     url: new URL("../docs/agents/IMPLEMENTER.md", import.meta.url),
     headings: [
+      "Capability Envelope",
       "Optimization Order",
       "Allowed Actions",
       "Explicit Rules",
@@ -69,6 +72,7 @@ const ROLE_CONTRACT_DOCS = Object.freeze({
     label: "docs/agents/REVIEWER.md",
     url: new URL("../docs/agents/REVIEWER.md", import.meta.url),
     headings: [
+      "Capability Envelope",
       "Optimization Target",
       "Explicit Rules",
       "Rejection Triggers",
@@ -80,6 +84,7 @@ const ROLE_CONTRACT_DOCS = Object.freeze({
     label: "docs/agents/VERIFIER.md",
     url: new URL("../docs/agents/VERIFIER.md", import.meta.url),
     headings: [
+      "Capability Envelope",
       "Optimization Target",
       "Explicit Rules",
       "Required Evidence",

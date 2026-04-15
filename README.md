@@ -2,7 +2,8 @@
 
 Personal Pi-based autonomous coding harness that favors:
 
-- a strong orchestrator over cheap worker models
+- trustworthy, reviewable output under strict boundaries
+- a strong code-enforced control plane with a thin orchestrator
 - narrow worker scopes with explicit file ownership
 - independent review and verification
 - automation with bounded blast radius
