@@ -218,7 +218,7 @@ Implemented and locally exercised today:
 
 Important limits on that claim:
 
-- the checked-in `docs/specs/*smoke*.md` files are placeholder smoke notes, not durable evidence artifacts
+- scoped regression targets should live under `test/fixtures/`, not in public-facing `docs/` material
 - `docs/RUN-EVIDENCE-SCHEMA.md` describes the current persisted reviewability surfaces, but this repo does not currently ship committed `.pi/runs` or `.pi/build-sessions` examples that prove the flows above
 - native Pi worker execution is still host-dependent, so cross-host "proven live" wording would outrun the current evidence
 

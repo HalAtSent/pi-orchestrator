@@ -21,7 +21,7 @@ test("risk becomes high for schema work", () => {
   assert.equal(risk, "high");
 });
 
-test("human gate is required for spec and infra changes", () => {
+test("human gate is required for infra changes", () => {
   assert.equal(requiresHumanGate({
     goal: "Update deployment config",
     allowedFiles: ["infra/prod/main.tf"]
@@ -48,13 +48,46 @@ test("directory scopes are not classified as low risk by default", () => {
 
 test("sensitive directory scopes remain high risk and human-gated", () => {
   assert.equal(classifyRisk({
-    goal: "Tighten deployment docs wording",
-    allowedFiles: ["./docs/specs/"]
+    goal: "Tighten worker role guidance",
+    allowedFiles: ["./docs/agents/"]
   }), "high");
   assert.equal(requiresHumanGate({
-    goal: "Tighten deployment docs wording",
-    allowedFiles: ["./docs/specs/"]
+    goal: "Tighten worker role guidance",
+    allowedFiles: ["./docs/agents/"]
   }), true);
+});
+
+test("authoritative governance docs remain high risk and human-gated by path", () => {
+  for (const documentationPath of [
+    "./docs/HARNESS-CONTRACT.md",
+    "./docs/RUN-EVIDENCE-SCHEMA.md",
+    "./docs/POLICY-PROFILES.md"
+  ]) {
+    assert.equal(classifyRisk({
+      goal: "Clarify governance wording",
+      allowedFiles: [documentationPath]
+    }), "high", documentationPath);
+    assert.equal(requiresHumanGate({
+      goal: "Clarify governance wording",
+      allowedFiles: [documentationPath]
+    }), true, documentationPath);
+  }
+});
+
+test("doctrine and skill-governance docs are not auto-high-risk by path alone", () => {
+  for (const documentationPath of [
+    "./docs/HARNESS-PRINCIPLES.md",
+    "./docs/SKILL-GOVERNANCE.md"
+  ]) {
+    assert.equal(classifyRisk({
+      goal: "Clarify wording",
+      allowedFiles: [documentationPath]
+    }), "low", documentationPath);
+    assert.equal(requiresHumanGate({
+      goal: "Clarify wording",
+      allowedFiles: [documentationPath]
+    }), false, documentationPath);
+  }
 });
 
 test("protected allowlist entries are rejected before packet creation", () => {
@@ -139,8 +172,8 @@ test("medium and high risk workflows include independent review", () => {
 
 test("initial workflow uses role-specific packet goals for read-only roles", () => {
   const workflow = createInitialWorkflow({
-    goal: "Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop.",
-    allowedFiles: ["docs/specs/model-evidence-smoke.md"]
+    goal: "Update schema evidence wording in README.md and stop.",
+    allowedFiles: ["README.md"]
   });
 
   const explorerPacket = workflow.packets.find((packet) => packet.role === "explorer");
@@ -153,7 +186,7 @@ test("initial workflow uses role-specific packet goals for read-only roles", () 
   assert.match(verifierPacket.goal, /^Verify the scoped implementation against the original goal/i);
   assert.equal(
     implementerPacket.goal,
-    "Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop."
+    "Update schema evidence wording in README.md and stop."
   );
 });
 

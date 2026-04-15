@@ -426,7 +426,6 @@ function modulesFor(projectType) {
           "src/pi-spawn.js",
           "src/pi-worker-runner.js",
           "src/process-worker-backend.js",
-          "src/spike-worker-backend.js",
           "src/worker-runner.js",
           "skills/"
         ],
@@ -592,11 +591,11 @@ function contractsForBlueprint(blueprint) {
         id: "package-readiness",
         title: "Package Readiness Review",
         goal: "Prepare the package for real Pi runtime validation and a first production-like task.",
-        summary: "Document runtime assumptions, validate commands, and define the first live smoke test.",
+        summary: "Document runtime assumptions, validate commands, and define the first live runtime validation task.",
         scopePaths: ["README.md", "docs/", "examples/"],
         dependsOn: ["harden-regressions-and-audit"],
         brief: blueprint.brief,
-        deliverables: ["runtime validation checklist", "first live smoke test plan", "release notes"]
+        deliverables: ["runtime validation checklist", "first live runtime validation plan", "release notes"]
       })
     ];
   }

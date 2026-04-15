@@ -21,7 +21,10 @@ const HIGH_RISK_KEYWORDS = [
 const HUMAN_GATE_PATH_PATTERNS = [
   /^infra\//i,
   /^platform\/contracts\//i,
-  /^docs\/specs\//i,
+  /^docs\/agents\//i,
+  /^docs\/HARNESS-CONTRACT\.md$/i,
+  /^docs\/RUN-EVIDENCE-SCHEMA\.md$/i,
+  /^docs\/POLICY-PROFILES\.md$/i,
   /migration/i,
   /schema/i,
   /\.env/i

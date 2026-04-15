@@ -11,7 +11,7 @@ test("normalizeScopedPath collapses dot segments while keeping relative paths", 
   assert.equal(normalizeScopedPath("./src/a.js"), "src/a.js");
   assert.equal(normalizeScopedPath("src/a.js"), "src/a.js");
   assert.equal(normalizeScopedPath("src/./nested/../a.js"), "src/a.js");
-  assert.equal(normalizeScopedPath("./docs/specs/"), "docs/specs/");
+  assert.equal(normalizeScopedPath("./test/fixtures/"), "test/fixtures/");
 });
 
 test("normalizeScopedPath rejects non-string values", () => {

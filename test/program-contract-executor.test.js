@@ -328,7 +328,7 @@ test("program contract executor threads program execution context into packet wo
   });
   const executeContract = createProgramContractExecutor({ runner });
   const contractContext = {
-    programId: "program-smoke",
+    programId: "program-context-check",
     completedContractIds: ["bootstrap-package"],
     pendingContractIds: ["contract-low-risk"],
     contractRuns: [
@@ -347,12 +347,12 @@ test("program contract executor threads program execution context into packet wo
 
   assert.equal(result.status, "success");
   assert.equal(calls.length, 2);
-  assert.equal(calls[0].context.programId, "program-smoke");
+  assert.equal(calls[0].context.programId, "program-context-check");
   assert.deepEqual(calls[0].context.completedContractIds, ["bootstrap-package"]);
   assert.deepEqual(calls[0].context.pendingContractIds, ["contract-low-risk"]);
   assert.equal(calls[0].context.contractRuns.length, 1);
   assert.equal(calls[0].context.priorResults.length, 0);
-  assert.equal(calls[1].context.programId, "program-smoke");
+  assert.equal(calls[1].context.programId, "program-context-check");
   assert.equal(calls[1].context.priorResults.at(-1).role, "implementer");
   assert.equal(calls[1].context.priorResults.at(-1).status, "success");
 });

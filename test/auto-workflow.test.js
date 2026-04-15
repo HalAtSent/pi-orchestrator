@@ -105,7 +105,7 @@ test("auto workflow runs one repair loop after an independent review finding", a
 test("formatWorkflowExecution includes run evidence and commands", () => {
   const formatted = formatWorkflowExecution({
     workflow: {
-      workflowId: "workflow-evidence-smoke",
+      workflowId: "workflow-evidence-check",
       risk: "high",
       humanGate: true
     },
@@ -121,7 +121,7 @@ test("formatWorkflowExecution includes run evidence and commands", () => {
         result: {
           status: "success",
           summary: "Applied scoped changes.",
-          changedFiles: ["docs/specs/model-evidence-smoke.md"],
+          changedFiles: ["test/fixtures/model-evidence-target.md"],
           commandsRun: ["pi -p --provider openai-codex --model gpt-5.3-codex"],
           evidence: [
             "selected_provider: openai-codex",

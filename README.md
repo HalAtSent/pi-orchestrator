@@ -44,7 +44,7 @@ The strongest repo-local runtime evidence currently centers on the process-backe
   - approval gating
   - persisted resume flow
   - UI launch summaries that surface selected provider/model information
-- The checked-in `docs/specs/*smoke*.md` files are placeholder smoke notes used by scoped tasks and tests; they are not durable run-evidence artifacts by themselves.
+- Scoped regression targets belong under `test/fixtures/`, not in public-facing `docs/` surfaces.
 - Persisted `.pi/runs/*.json` and `.pi/build-sessions/*.json` records are the intended evidence-bearing surfaces described in `docs/RUN-EVIDENCE-SCHEMA.md`, but this repo does not currently ship committed examples of those artifacts.
 
 ## Current Process-Backend Provider/Model Selection
@@ -73,11 +73,10 @@ These are selected explicitly in the current process backend path rather than in
 - `src/pi-adapter.js`: live Pi worker adapter boundary
 - `src/process-worker-backend.js`: role-aware process backend with temp-workspace isolation and read-only/write enforcement
 - `src/auto-backend-runner.js`: `/auto` backend selector for `pi_runtime`, `low_risk_process_implementer`, and `process_subagents`
-- `src/spike-worker-backend.js`: compatibility exports for existing spike imports
 - `src/program-runner.js`: sequential execution-program runner with stop states
 - `src/run-store.js`: local JSON-backed persisted run journals
 - `src/pi-extension.js`: Pi extension entrypoint and orchestration tools
-- `examples/spike-worker-smoke.js`: local smoke helper that runs the process backend once
+- `examples/`: sample workflow inputs and reference model notes
 - `docs/OPERATING-GUIDE.md`: how to run and evolve the workflow
 - `docs/QUICKSTART.md`: non-technical operator quickstart path
 - `skills/`: worker role instructions

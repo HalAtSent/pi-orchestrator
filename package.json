@@ -11,8 +11,7 @@
     "agent"
   ],
   "scripts": {
-    "test": "node --test",
-    "smoke:spike-worker": "node examples/spike-worker-smoke.js"
+    "test": "node --test"
   },
   "pi": {
     "extensions": [

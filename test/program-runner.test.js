@@ -657,7 +657,7 @@ test("resumeExecutionProgram resumes a persisted running journal from the next p
 
 test("formatProgramRunJournal includes contract evidence", () => {
   const formatted = formatProgramRunJournal({
-    programId: "program-evidence-smoke",
+    programId: "program-evidence-check",
     status: "success",
     stopReason: null,
     validationOutcome: "pass",

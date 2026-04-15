@@ -8,9 +8,7 @@ import test from "node:test";
 
 import { createTaskPacket, validateWorkerResult } from "../src/contracts.js";
 import {
-  createPiCliLauncher
-} from "../src/spike-worker-backend.js";
-import {
+  createPiCliLauncher,
   createProcessRoleArgsBuilder,
   createProcessWorkerBackend,
   loadRoleContractGuidance,
@@ -20,13 +18,13 @@ import {
 
 function createPacket(role = "implementer", overrides = {}) {
   return createTaskPacket({
-    id: `spike-${role}-packet`,
-    parentTaskId: "spike-backend-test",
+    id: `process-${role}-packet`,
+    parentTaskId: "process-backend-test",
     role,
     risk: "low",
-    goal: "Spike worker bounded smoke task",
+    goal: "Process worker bounded execution task",
     nonGoals: ["Do not edit files outside the allowlist."],
-    allowedFiles: ["examples/smoke-worker-output.md"],
+    allowedFiles: ["test/fixtures/process-worker-output.md"],
     forbiddenFiles: [],
     acceptanceChecks: ["The allowed file contains exact deterministic content."],
     stopConditions: ["Stop if the worker launcher cannot execute."],
@@ -153,21 +151,21 @@ test("process backend maps launcher output into a contract-compatible worker res
         return {
           launcher: "fake_launcher",
           exitCode: 0,
-          stdout: "created smoke output",
+          stdout: "created process output",
           stderr: "",
-          commandsRun: ["fake-worker --write-smoke"]
+          commandsRun: ["fake-worker --write-output"]
         };
       }
     });
 
     const result = await backend.run(createPacket("implementer"), {
-      workflowId: "spike-test-workflow"
+      workflowId: "process-test-workflow"
     });
 
     validateWorkerResult(result);
     assert.equal(result.status, "success");
-    assert.deepEqual(result.changedFiles, ["examples/smoke-worker-output.md"]);
-    assert.deepEqual(result.commandsRun, ["fake-worker --write-smoke"]);
+    assert.deepEqual(result.changedFiles, ["test/fixtures/process-worker-output.md"]);
+    assert.deepEqual(result.commandsRun, ["fake-worker --write-output"]);
     assert.equal(result.openQuestions.length, 0);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
@@ -189,9 +187,9 @@ test("process backend handles non-cloneable context values without crashing", as
         return {
           launcher: "fake_launcher",
           exitCode: 0,
-          stdout: "created smoke output",
+          stdout: "created process output",
           stderr: "",
-          commandsRun: ["fake-worker --write-smoke"]
+          commandsRun: ["fake-worker --write-output"]
         };
       }
     });
@@ -234,19 +232,19 @@ test("process backend applies implementer changes back to the repository root on
         return {
           launcher: "fake_launcher",
           exitCode: 0,
-          stdout: "created smoke output",
+          stdout: "created process output",
           stderr: "",
-          commandsRun: ["fake-worker --write-smoke"]
+          commandsRun: ["fake-worker --write-output"]
         };
       }
     });
 
     const result = await backend.run(createPacket("implementer"), {
-      workflowId: "spike-test-workflow"
+      workflowId: "process-test-workflow"
     });
 
     assert.equal(result.status, "success");
-    const repoFile = await readFile(join(repositoryRoot, "examples", "smoke-worker-output.md"), "utf8");
+    const repoFile = await readFile(join(repositoryRoot, "test", "fixtures", "process-worker-output.md"), "utf8");
     assert.equal(repoFile, "updated from process backend");
     assert.equal(
       result.evidence.includes("repository_changes_applied: true"),
@@ -254,7 +252,7 @@ test("process backend applies implementer changes back to the repository root on
     );
     assert.deepEqual(result.changedSurfaceObservation, {
       capture: "complete",
-      paths: ["examples/smoke-worker-output.md"]
+      paths: ["test/fixtures/process-worker-output.md"]
     });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
@@ -277,7 +275,7 @@ test("process backend marks no-op implementer success as not applied while still
     });
 
     const result = await backend.run(createPacket("implementer"), {
-      workflowId: "spike-test-workflow-noop"
+      workflowId: "process-test-workflow-noop"
     });
 
     assert.equal(result.status, "success");
@@ -339,7 +337,7 @@ test("process backend rolls back repository writes when apply fails mid-commit",
     const result = await backend.run(createPacket("implementer", {
       allowedFiles: ["examples/a.md", "examples/b.md"]
     }), {
-      workflowId: "spike-test-workflow"
+      workflowId: "process-test-workflow"
     });
 
     assert.equal(result.status, "failed");
@@ -694,8 +692,8 @@ test("explorer launcher prompt treats a missing target file as inspectable conte
     await launcher({
       packet: createPacket("explorer", {
         risk: "high",
-        goal: "Inspect the scoped codebase context for this task and report what the implementer should change: Create docs/specs/model-evidence-smoke.md containing exactly MODEL EVIDENCE SMOKE OK and stop.",
-        allowedFiles: ["docs/specs/model-evidence-smoke.md"]
+        goal: "Inspect the scoped codebase context for this task and report what the implementer should change: Create test/fixtures/model-evidence-target.md containing exactly MODEL EVIDENCE TARGET OK and stop.",
+        allowedFiles: ["test/fixtures/model-evidence-target.md"]
       }),
       context: {},
       workspaceRoot
@@ -708,7 +706,7 @@ test("explorer launcher prompt treats a missing target file as inspectable conte
     );
     assert.match(
       capturedPrompt,
-      /ORIGINAL_IMPLEMENTER_TASK: Inspect the scoped codebase context for this task and report what the implementer should change: Create docs\/specs\/model-evidence-smoke\.md containing exactly MODEL EVIDENCE SMOKE OK and stop\./i
+      /ORIGINAL_IMPLEMENTER_TASK: Inspect the scoped codebase context for this task and report what the implementer should change: Create test\/fixtures\/model-evidence-target\.md containing exactly MODEL EVIDENCE TARGET OK and stop\./i
     );
     assert.match(
       capturedPrompt,
@@ -1088,10 +1086,10 @@ test("pi launcher command evidence uses resolved pi script path in non-interacti
 
   const result = await launcher({
     packet: createPacket("implementer"),
-    context: { workflowId: "spike-workflow" },
+    context: { workflowId: "process-workflow" },
     workspaceRoot: "/tmp/work",
-    targetRelativePath: "examples/smoke-worker-output.md",
-    targetContent: "SMOKE TEST OK"
+    targetRelativePath: "test/fixtures/process-worker-output.md",
+    targetContent: "PROCESS WORKER OUTPUT OK"
   });
 
   assert.equal(result.launcher, "pi_script_via_node");

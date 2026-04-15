@@ -78,7 +78,6 @@ test("blueprint freezes repository layout and execution profile", () => {
     "src/pi-spawn.js",
     "src/pi-worker-runner.js",
     "src/process-worker-backend.js",
-    "src/spike-worker-backend.js",
     "src/worker-runner.js",
     "skills/"
   ]);
