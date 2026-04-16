@@ -51,8 +51,10 @@ Important future gaps still remain:
 
 - many review-critical facts still rely on mixed embedded fields, evidence
   strings, or formatter reconstruction
-- provider/model evidence requirements are still partly inferred rather than
-  first-class persisted facts
+- provider/model hardening is only partially landed: typed packet persistence
+  now exists for trusted process-backend metadata, and per-contract requirement
+  state now exists as a narrow provenance-derived `required` | `unknown`
+  surface rather than a backend-complete applicability model
 - context construction and retrieval quality are not yet a first-class
   hardening surface
 - tool and worker-result contracts are not yet audited as one coherent boundary
@@ -120,6 +122,15 @@ the harness is getting better.
 These criteria should dominate apparent autonomy, routing novelty, or prompt
 cleverness when the roadmap is prioritized.
 
+Current implementation note:
+
+- the canonical criteria above are now instrumented in lifecycle artifacts as
+  `ExecutionProgram.evaluationCriteria[]` and `AuditReport.evaluationCoverage[]`
+- this is structural instrumentation, not runtime measurement; coverage means
+  expected hook surfaces exist and are non-empty in planning artifacts
+- coverage does not claim the underlying outcome was achieved; outcome quality
+  still depends on later execution evidence and technical review
+
 ## Priority Tracks
 
 ### 1. First-Class Reviewability And Evidence Surfaces
@@ -152,26 +163,40 @@ Landing condition:
 
 ### 2. Provider/Model Evidence Hardening
 
+Partial landing already shipped:
+
+- trusted process-backend worker metadata now promotes requested/selected
+  provider/model packet entries into first-class persisted
+  `run_journal.contractRuns[].providerModelSelections[]` when trusted typed
+  packet entries are promoted
+- per-contract provider/model evidence requirement is now persisted as
+  `run_journal.contractRuns[].providerModelEvidenceRequirement` with the narrow
+  enum `required` | `unknown`
+- this requirement value is derived only from code-owned backend provenance in
+  `src/program-contract-executor.js` (`required` when at least one packet run
+  carries trusted provider/model provenance; `unknown` otherwise)
+- compatibility provider/model evidence strings remain for human trace and
+  legacy interoperability; they are not the first-class persisted truth when
+  typed packet entries exist
+
 Current gap:
 
-- provider/model facts are still mainly key-value evidence strings emitted by
-  the process backend
-- there is still no authoritative persisted field saying whether
-  provider/model evidence was required for the run being reviewed
+- there is still no backend-complete applicability model beyond this narrow
+  provenance-derived requirement slice
+- `required`/`unknown` truth is still intentionally conservative and does not
+  claim full backend-wide applicability semantics
 
 Hardening target:
 
-- promote requested and selected provider/model facts into first-class
-  persisted execution evidence when model-backed execution matters to the claim
-- add an explicit requirement surface that can distinguish required, captured,
-  missing, not applicable, and unknown states
 - keep the requirement backend-aware rather than pretending every successful run
   uses the same model-backed execution path
+- extend the model only when code-owned runtime facts can truthfully support
+  additional states
 
 Landing condition:
 
 - reviewable success no longer depends on informal inference about whether
-  provider/model evidence should have existed
+  provider/model evidence should have existed for fresh runs
 
 ### 3. Context Construction And Retrieval Quality
 

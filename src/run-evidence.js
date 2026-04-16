@@ -72,6 +72,21 @@ export const CHANGED_SURFACE_OBSERVATION_CAPTURE_MODES = Object.freeze([
   "complete",
   "not_captured"
 ]);
+export const PROVIDER_MODEL_SELECTION_FIELDS = Object.freeze([
+  "requestedProvider",
+  "requestedModel",
+  "selectedProvider",
+  "selectedModel"
+]);
+export const PROVIDER_MODEL_SELECTION_ENTRY_FIELDS = Object.freeze([
+  "role",
+  "iteration",
+  ...PROVIDER_MODEL_SELECTION_FIELDS
+]);
+export const PROVIDER_MODEL_EVIDENCE_REQUIREMENTS = Object.freeze([
+  "required",
+  "unknown"
+]);
 
 const ROLE_TO_ACTION_CLASSES = Object.freeze({
   explorer: ["read_repo"],
@@ -163,12 +178,55 @@ function parseEvidenceKeyValue(entry) {
   };
 }
 
+function hasOwnProviderModelSelections(value) {
+  return isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, "providerModelSelections");
+}
+
+function hasOwnProviderModelEvidenceRequirement(value) {
+  return isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, "providerModelEvidenceRequirement");
+}
+
+function normalizeProviderModelFieldValue(value, { fieldName } = {}) {
+  const normalized = normalizeString(value);
+  if (normalized.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (normalized.toLowerCase() === "unknown") {
+    throw new Error(`${fieldName} must not be unknown`);
+  }
+  return normalized;
+}
+
 function collectProviderModelEvidenceSignals(contractRuns) {
   let hasAnySignals = false;
   let hasSelectedProvider = false;
   let hasSelectedModel = false;
 
   for (const contractRun of contractRuns) {
+    if (hasOwnProviderModelSelections(contractRun)) {
+      const providerModelSelections = Array.isArray(contractRun.providerModelSelections)
+        ? contractRun.providerModelSelections
+        : [];
+
+      for (const selection of providerModelSelections) {
+        if (!isPlainObject(selection)) {
+          continue;
+        }
+
+        hasAnySignals = true;
+        const selectedProvider = normalizeString(selection.selectedProvider);
+        const selectedModel = normalizeString(selection.selectedModel);
+        if (selectedProvider.length > 0 && selectedProvider.toLowerCase() !== "unknown") {
+          hasSelectedProvider = true;
+        }
+        if (selectedModel.length > 0 && selectedModel.toLowerCase() !== "unknown") {
+          hasSelectedModel = true;
+        }
+      }
+
+      continue;
+    }
+
     const evidenceEntries = Array.isArray(contractRun?.evidence) ? contractRun.evidence : [];
     for (const evidenceEntry of evidenceEntries) {
       const parsed = parseEvidenceKeyValue(evidenceEntry);
@@ -190,6 +248,145 @@ function collectProviderModelEvidenceSignals(contractRuns) {
     hasSelectedProvider,
     hasSelectedModel
   };
+}
+
+function collectProviderModelEvidenceSignalsFromTypedSelections(contractRun) {
+  let hasAnySignals = false;
+  let hasSelectedProvider = false;
+  let hasSelectedModel = false;
+
+  if (!hasOwnProviderModelSelections(contractRun)) {
+    return {
+      hasAnySignals,
+      hasSelectedProvider,
+      hasSelectedModel
+    };
+  }
+
+  const providerModelSelections = Array.isArray(contractRun.providerModelSelections)
+    ? contractRun.providerModelSelections
+    : [];
+  for (const selection of providerModelSelections) {
+    if (!isPlainObject(selection)) {
+      continue;
+    }
+
+    hasAnySignals = true;
+    const selectedProvider = normalizeString(selection.selectedProvider);
+    const selectedModel = normalizeString(selection.selectedModel);
+    if (selectedProvider.length > 0 && selectedProvider.toLowerCase() !== "unknown") {
+      hasSelectedProvider = true;
+    }
+    if (selectedModel.length > 0 && selectedModel.toLowerCase() !== "unknown") {
+      hasSelectedModel = true;
+    }
+  }
+
+  return {
+    hasAnySignals,
+    hasSelectedProvider,
+    hasSelectedModel
+  };
+}
+
+function normalizeProviderModelSelectionEntry(value, {
+  fieldName = "providerModelSelections[]"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const role = normalizeString(value.role);
+  if (role.length === 0) {
+    throw new Error(`${fieldName}.role must be a non-empty string`);
+  }
+
+  if (!Number.isInteger(value.iteration) || value.iteration < 0) {
+    throw new Error(`${fieldName}.iteration must be an integer >= 0`);
+  }
+
+  return {
+    role,
+    iteration: value.iteration,
+    requestedProvider: normalizeProviderModelFieldValue(value.requestedProvider, {
+      fieldName: `${fieldName}.requestedProvider`
+    }),
+    requestedModel: normalizeProviderModelFieldValue(value.requestedModel, {
+      fieldName: `${fieldName}.requestedModel`
+    }),
+    selectedProvider: normalizeProviderModelFieldValue(value.selectedProvider, {
+      fieldName: `${fieldName}.selectedProvider`
+    }),
+    selectedModel: normalizeProviderModelFieldValue(value.selectedModel, {
+      fieldName: `${fieldName}.selectedModel`
+    })
+  };
+}
+
+export function normalizeProviderModelSelection(value, {
+  fieldName = "providerModelSelection"
+} = {}) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  return {
+    requestedProvider: normalizeProviderModelFieldValue(value.requestedProvider, {
+      fieldName: `${fieldName}.requestedProvider`
+    }),
+    requestedModel: normalizeProviderModelFieldValue(value.requestedModel, {
+      fieldName: `${fieldName}.requestedModel`
+    }),
+    selectedProvider: normalizeProviderModelFieldValue(value.selectedProvider, {
+      fieldName: `${fieldName}.selectedProvider`
+    }),
+    selectedModel: normalizeProviderModelFieldValue(value.selectedModel, {
+      fieldName: `${fieldName}.selectedModel`
+    })
+  };
+}
+
+export function normalizeProviderModelSelections(value, {
+  fieldName = "providerModelSelections",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    return allowMissing ? null : [];
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  return value.map((entry, index) => normalizeProviderModelSelectionEntry(entry, {
+    fieldName: `${fieldName}[${index}]`
+  }));
+}
+
+export function normalizeProviderModelEvidenceRequirement(value, {
+  fieldName = "providerModelEvidenceRequirement",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+
+  const normalized = normalizeString(value);
+  if (normalized.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!PROVIDER_MODEL_EVIDENCE_REQUIREMENTS.includes(normalized)) {
+    throw new Error(`${fieldName} must be one of: ${PROVIDER_MODEL_EVIDENCE_REQUIREMENTS.join(", ")}`);
+  }
+
+  return normalized;
 }
 
 function splitCommandSegments(command) {
@@ -1019,11 +1216,35 @@ export function inferReviewability({
       ? contractRuns.filter((contractRun) => normalizeString(contractRun?.status) === "success")
       : [];
     if (successfulContractRuns.length > 0) {
-      const providerModelSignals = collectProviderModelEvidenceSignals(successfulContractRuns);
-      if (!providerModelSignals.hasAnySignals) {
-        reasons.push("provider_model_evidence_requirement_unknown");
-      } else if (!providerModelSignals.hasSelectedProvider || !providerModelSignals.hasSelectedModel) {
-        reasons.push("provider_model_evidence_missing");
+      const legacyContractRuns = [];
+
+      for (const contractRun of successfulContractRuns) {
+        if (!hasOwnProviderModelEvidenceRequirement(contractRun)) {
+          legacyContractRuns.push(contractRun);
+          continue;
+        }
+
+        const requirement = normalizeProviderModelEvidenceRequirement(contractRun.providerModelEvidenceRequirement, {
+          fieldName: "contractRuns[].providerModelEvidenceRequirement"
+        });
+        if (requirement === "unknown") {
+          reasons.push("provider_model_evidence_requirement_unknown");
+          continue;
+        }
+
+        const typedSignals = collectProviderModelEvidenceSignalsFromTypedSelections(contractRun);
+        if (!typedSignals.hasAnySignals || !typedSignals.hasSelectedProvider || !typedSignals.hasSelectedModel) {
+          reasons.push("provider_model_evidence_missing");
+        }
+      }
+
+      if (legacyContractRuns.length > 0) {
+        const providerModelSignals = collectProviderModelEvidenceSignals(legacyContractRuns);
+        if (!providerModelSignals.hasAnySignals) {
+          reasons.push("provider_model_evidence_requirement_unknown");
+        } else if (!providerModelSignals.hasSelectedProvider || !providerModelSignals.hasSelectedModel) {
+          reasons.push("provider_model_evidence_missing");
+        }
       }
     }
   } else {

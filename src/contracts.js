@@ -1,4 +1,7 @@
-import { normalizeChangedSurfaceObservation } from "./run-evidence.js";
+import {
+  normalizeChangedSurfaceObservation,
+  normalizeProviderModelSelection
+} from "./run-evidence.js";
 
 export const ROLE_TYPES = Object.freeze([
   "explorer",
@@ -76,6 +79,15 @@ export function validateWorkerResult(result) {
     // Promotion into persisted changed-surface evidence is gated elsewhere by trusted runner provenance.
     result.changedSurfaceObservation = normalizeChangedSurfaceObservation(result.changedSurfaceObservation, {
       fieldName: "result.changedSurfaceObservation"
+    });
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
+  try {
+    // This field is syntax-validated for runner interoperability.
+    // Promotion into persisted provider/model evidence is gated elsewhere by trusted runner provenance.
+    result.providerModelSelection = normalizeProviderModelSelection(result.providerModelSelection, {
+      fieldName: "result.providerModelSelection"
     });
   } catch (error) {
     throw new Error(`${error.message}`);

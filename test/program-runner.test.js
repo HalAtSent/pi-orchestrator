@@ -11,8 +11,11 @@ import {
   resumeExecutionProgram,
   runExecutionProgram
 } from "../src/program-runner.js";
+import { createProgramContractExecutor } from "../src/program-contract-executor.js";
+import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
 import { createRunStore } from "../src/run-store.js";
+import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
@@ -88,6 +91,128 @@ test("program runner executes contracts in dependency order", async () => {
   ]);
   assert.deepEqual(journal.completedContractIds, executed);
   assert.deepEqual(journal.pendingContractIds, []);
+});
+
+test("runExecutionProgram omits empty providerModelSelections from contract runs", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [
+          "selected_provider: openai-codex",
+          "selected_model: gpt-5.4"
+        ],
+        providerModelSelections: [],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    for (const entry of journal.contractRuns) {
+      assert.equal(entry.providerModelEvidenceRequirement, "unknown");
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "providerModelSelections"), false);
+    }
+
+    const persisted = await runStore.loadRun(program.id);
+    for (const entry of persisted.runJournal.contractRuns) {
+      assert.equal(entry.providerModelEvidenceRequirement, "unknown");
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "providerModelSelections"), false);
+    }
+  });
+});
+
+test("runExecutionProgram persists required provider/model evidence requirement from trusted process-backed execution", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const defaultRunner = createScriptedWorkerRunner([]);
+    const processBackend = createLocalWorkerRunner({
+      handlers: {
+        explorer: async () => ({
+          status: "success",
+          summary: "Explorer step completed.",
+          changedFiles: [],
+          commandsRun: ["rg --files"],
+          evidence: ["explorer succeeded"],
+          openQuestions: [],
+          providerModelSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.3-codex",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.3-codex"
+          }
+        }),
+        implementer: async () => ({
+          status: "success",
+          summary: "Implementer step completed.",
+          changedFiles: [],
+          commandsRun: ["node --check src/helpers.js"],
+          evidence: ["implementer succeeded"],
+          openQuestions: [],
+          providerModelSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.3-codex",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.3-codex"
+          }
+        }),
+        reviewer: async () => ({
+          status: "success",
+          summary: "Reviewer step completed.",
+          changedFiles: [],
+          commandsRun: ["git diff --stat"],
+          evidence: ["reviewer succeeded"],
+          openQuestions: [],
+          providerModelSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.4",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.4"
+          }
+        }),
+        verifier: async () => ({
+          status: "success",
+          summary: "Verifier step completed.",
+          changedFiles: [],
+          commandsRun: ["node --test"],
+          evidence: ["verifier succeeded"],
+          openQuestions: [],
+          providerModelSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.4-mini",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.4-mini"
+          }
+        })
+      }
+    });
+    const runner = createAutoBackendRunner({
+      defaultRunner,
+      processBackend,
+      mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+    });
+    const contractExecutor = createProgramContractExecutor({ runner });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor,
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    for (const entry of journal.contractRuns) {
+      assert.equal(entry.providerModelEvidenceRequirement, "required");
+    }
+
+    const persisted = await runStore.loadRun(program.id);
+    for (const entry of persisted.runJournal.contractRuns) {
+      assert.equal(entry.providerModelEvidenceRequirement, "required");
+    }
+  });
 });
 
 test("program runner stops on the first blocked contract", async () => {
@@ -248,6 +373,50 @@ test("runExecutionProgram converts malformed evidence/openQuestions returns into
     const persisted = await runStore.loadRun(program.id);
     assert.equal(persisted.lastStatus, "blocked");
     assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram fails closed when contract executor returns malformed provider/model evidence requirement", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed provider/model requirement payload.",
+            evidence: [],
+            providerModelEvidenceRequirement: "not_applicable",
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(
+      journal.stopReason,
+      /contractExecutionResult\.providerModelEvidenceRequirement must be one of: required, unknown/i
+    );
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
   });
 });
 

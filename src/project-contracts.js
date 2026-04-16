@@ -1,6 +1,12 @@
 import { RISK_LEVELS, ROLE_TYPES, validateTaskPacket } from "./contracts.js";
 import {
+  validateEvaluationCoverage,
+  validateEvaluationCriteria
+} from "./doctrine-evaluation.js";
+import {
   normalizeChangedSurface,
+  normalizeProviderModelEvidenceRequirement,
+  normalizeProviderModelSelections,
   normalizeReviewability,
   normalizeStopReasonCode,
   normalizeValidationOutcome
@@ -160,6 +166,9 @@ export function validateExecutionProgram(program) {
   validateBriefContext("program.brief", program.brief);
   assertStringArray("program.integrationPoints", program.integrationPoints);
   assertStringArray("program.completionChecks", program.completionChecks);
+  program.evaluationCriteria = validateEvaluationCriteria(program.evaluationCriteria, {
+    fieldName: "program.evaluationCriteria"
+  });
   assertArrayOfObjects("program.contracts", program.contracts);
 
   for (const contract of program.contracts) {
@@ -206,6 +215,9 @@ export function validateAuditReport(report) {
   assertStringArray("auditReport.strengths", report.strengths);
   assertStringArray("auditReport.recommendedNextContracts", report.recommendedNextContracts);
   assertStringArray("auditReport.evidence", report.evidence);
+  report.evaluationCoverage = validateEvaluationCoverage(report.evaluationCoverage, {
+    fieldName: "auditReport.evaluationCoverage"
+  });
   assertArrayOfObjects("auditReport.findings", report.findings);
 
   for (const finding of report.findings) {
@@ -234,6 +246,35 @@ export function validateContractExecutionResult(result) {
   } catch (error) {
     throw new Error(`${error.message}`);
   }
+  if (Object.prototype.hasOwnProperty.call(result, "providerModelEvidenceRequirement")) {
+    try {
+      result.providerModelEvidenceRequirement = normalizeProviderModelEvidenceRequirement(
+        result.providerModelEvidenceRequirement,
+        {
+          fieldName: "contractExecutionResult.providerModelEvidenceRequirement"
+        }
+      );
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  } else {
+    result.providerModelEvidenceRequirement = "unknown";
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "providerModelSelections")) {
+    try {
+      const normalizedProviderModelSelections = normalizeProviderModelSelections(result.providerModelSelections, {
+        fieldName: "contractExecutionResult.providerModelSelections",
+        allowMissing: true
+      });
+      if (normalizedProviderModelSelections === null) {
+        delete result.providerModelSelections;
+      } else {
+        result.providerModelSelections = normalizedProviderModelSelections;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   return result;
 }
 
@@ -253,6 +294,33 @@ export function validateRunJournalEntry(entry) {
     });
   } catch (error) {
     throw new Error(`${error.message}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "providerModelEvidenceRequirement")) {
+    try {
+      entry.providerModelEvidenceRequirement = normalizeProviderModelEvidenceRequirement(
+        entry.providerModelEvidenceRequirement,
+        {
+          fieldName: "runJournalEntry.providerModelEvidenceRequirement"
+        }
+      );
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "providerModelSelections")) {
+    try {
+      const normalizedProviderModelSelections = normalizeProviderModelSelections(entry.providerModelSelections, {
+        fieldName: "runJournalEntry.providerModelSelections",
+        allowMissing: true
+      });
+      if (normalizedProviderModelSelections === null) {
+        delete entry.providerModelSelections;
+      } else {
+        entry.providerModelSelections = normalizedProviderModelSelections;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
   }
   try {
     entry.validationOutcome = normalizeValidationOutcome(entry.validationOutcome, {

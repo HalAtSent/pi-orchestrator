@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { classifyRisk } from "./policies.js";
 import { compileExecutionContract } from "./program-compiler.js";
+import { getDoctrineEvaluationDefinitions } from "./doctrine-evaluation.js";
 import {
   createAuditReport,
   createBootstrapContract,
@@ -75,6 +76,97 @@ function stableSerialize(value) {
 
 function unique(values) {
   return [...new Set(values)];
+}
+
+function hasNonEmptyStringArray(value) {
+  return Array.isArray(value) &&
+    value.length > 0 &&
+    value.every((item) => typeof item === "string" && item.trim().length > 0);
+}
+
+function everyContractFieldIsNonEmpty(program, fieldName) {
+  return Array.isArray(program.contracts) &&
+    program.contracts.length > 0 &&
+    program.contracts.every((contract) => hasNonEmptyStringArray(contract[fieldName]));
+}
+
+function isHookStructurallyCovered(hookRef, { blueprint, program }) {
+  if (hookRef === "brief.successCriteria") {
+    return hasNonEmptyStringArray(blueprint.brief?.successCriteria);
+  }
+
+  if (hookRef === "blueprint.qualityGates") {
+    return hasNonEmptyStringArray(blueprint.qualityGates);
+  }
+
+  if (hookRef === "program.completionChecks") {
+    return hasNonEmptyStringArray(program.completionChecks);
+  }
+
+  if (hookRef === "program.integrationPoints") {
+    return hasNonEmptyStringArray(program.integrationPoints);
+  }
+
+  if (hookRef === "program.contracts[].successCriteria") {
+    return everyContractFieldIsNonEmpty(program, "successCriteria");
+  }
+
+  if (hookRef === "program.contracts[].verificationPlan") {
+    return everyContractFieldIsNonEmpty(program, "verificationPlan");
+  }
+
+  if (hookRef === "program.contracts[].stopConditions") {
+    return everyContractFieldIsNonEmpty(program, "stopConditions");
+  }
+
+  throw new Error(`Unsupported doctrine evaluation hook ref: ${hookRef}`);
+}
+
+function computeDoctrineEvaluationCoverage({ blueprint, program }) {
+  const canonicalCriteria = getDoctrineEvaluationDefinitions();
+  const declaredCriteriaById = new Map(
+    program.evaluationCriteria.map((criterion) => [criterion.id, criterion])
+  );
+
+  return canonicalCriteria.map((canonicalCriterion) => {
+    const declaredCriterion = declaredCriteriaById.get(canonicalCriterion.id) ?? null;
+    const declaredHookSet = new Set(declaredCriterion?.artifactHooks ?? []);
+    const evidenceHooks = [];
+    const missingHooks = [];
+    const missingDeclaredHooks = [];
+    const structurallyEmptyHooks = [];
+
+    for (const hookRef of canonicalCriterion.artifactHooks) {
+      const declared = declaredHookSet.has(hookRef);
+      const structurallyCovered = isHookStructurallyCovered(hookRef, { blueprint, program });
+
+      if (!declared) {
+        missingDeclaredHooks.push(hookRef);
+      }
+
+      if (!structurallyCovered) {
+        structurallyEmptyHooks.push(hookRef);
+      }
+
+      if (declared && structurallyCovered) {
+        evidenceHooks.push(hookRef);
+      } else {
+        missingHooks.push(hookRef);
+      }
+    }
+
+    return {
+      criterionId: canonicalCriterion.id,
+      status: missingHooks.length === 0 ? "covered" : "missing",
+      evidenceHooks,
+      missingHooks,
+      details: {
+        declared: declaredCriterion !== null,
+        missingDeclaredHooks,
+        structurallyEmptyHooks
+      }
+    };
+  });
 }
 
 function normalizeProjectType(value) {
@@ -384,6 +476,7 @@ function modulesFor(projectType) {
         purpose: "Owns planning, policy, orchestration, and integration decisions.",
         paths: [
           "src/contracts.js",
+          "src/doctrine-evaluation.js",
           "src/boolean-flags.js",
           "src/helpers.js",
           "src/orchestrator.js",
@@ -741,7 +834,8 @@ export function sliceProject({ blueprint } = {}) {
       "Every contract has explicit verification steps and stop conditions.",
       "The bootstrap contract precedes all other work.",
       "The final contract leaves a clear path to runtime validation or release readiness."
-    ]
+    ],
+    evaluationCriteria: getDoctrineEvaluationDefinitions()
   });
 }
 
@@ -965,6 +1059,46 @@ export function auditProject({ blueprint, executionProgram } = {}) {
     }
   }
 
+  const doctrineCoverage = computeDoctrineEvaluationCoverage({
+    blueprint,
+    program
+  });
+  const evaluationCoverage = doctrineCoverage.map((entry) => ({
+    criterionId: entry.criterionId,
+    status: entry.status,
+    evidenceHooks: entry.evidenceHooks,
+    missingHooks: entry.missingHooks
+  }));
+
+  for (const entry of doctrineCoverage) {
+    if (!entry.details.declared) {
+      findings.push({
+        id: `missing-evaluation-criterion-${entry.criterionId}`,
+        severity: "high",
+        summary: `Execution program is missing the canonical doctrine evaluation criterion ${entry.criterionId}.`,
+        recommendation: "Regenerate or repair program.evaluationCriteria so every canonical criterion id is present."
+      });
+    }
+
+    if (entry.details.declared && entry.details.missingDeclaredHooks.length > 0) {
+      findings.push({
+        id: `missing-evaluation-hook-refs-${entry.criterionId}`,
+        severity: "high",
+        summary: `Criterion ${entry.criterionId} is missing required artifact hook refs: ${entry.details.missingDeclaredHooks.join(", ")}.`,
+        recommendation: "Keep criterion artifactHooks aligned with the canonical doctrine hook set."
+      });
+    }
+
+    if (entry.details.structurallyEmptyHooks.length > 0) {
+      findings.push({
+        id: `empty-evaluation-hook-targets-${entry.criterionId}`,
+        severity: "high",
+        summary: `Criterion ${entry.criterionId} has structurally empty artifact hooks: ${entry.details.structurallyEmptyHooks.join(", ")}.`,
+        recommendation: "Populate those lifecycle surfaces with explicit, non-empty structural entries before autonomous execution."
+      });
+    }
+  }
+
   const status = findings.length === 0 ? "pass" : "attention_required";
 
   return createAuditReport({
@@ -983,10 +1117,12 @@ export function auditProject({ blueprint, executionProgram } = {}) {
     recommendedNextContracts: status === "pass"
       ? program.contracts.slice(0, 2).map((contract) => contract.id)
       : findings.map((finding) => finding.id),
+    evaluationCoverage,
     evidence: [
       `Repository layout includes ${blueprint.repositoryLayout.length} planned paths.`,
       `Execution program contains ${program.contracts.length} milestone contracts.`,
-      `Execution mode is ${blueprint.executionProfile.autonomyMode} with ${blueprint.executionProfile.humanGatePolicy}.`
+      `Execution mode is ${blueprint.executionProfile.autonomyMode} with ${blueprint.executionProfile.humanGatePolicy}.`,
+      `Doctrine evaluation coverage includes ${evaluationCoverage.length} canonical criteria.`
     ]
   });
 }

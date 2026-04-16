@@ -42,6 +42,7 @@ test("default program contract executor returns blocked when no worker handler e
   const result = await executeContract(buildLowRiskContract());
 
   assert.equal(result.status, "blocked");
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
   assert.match(result.summary, /No local worker handler is configured for the implementer role/i);
   assert.equal(result.evidence.some((line) => line.includes("compiled workflow:")), true);
 });
@@ -81,6 +82,8 @@ test("default program contract executor can succeed with a scripted worker runne
     capture: "not_captured",
     paths: []
   });
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(runner.getPendingStepCount(), 0);
 });
 
@@ -98,6 +101,12 @@ test("program contract executor does not promote exact changed-surface evidence 
         changedSurfaceObservation: {
           capture: "complete",
           paths: ["src/helpers.js"]
+        },
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
         }
       }
     },
@@ -122,6 +131,8 @@ test("program contract executor does not promote exact changed-surface evidence 
     capture: "not_captured",
     paths: []
   });
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
 });
 
 test("program contract executor promotes exact changed-surface evidence only for trusted process-backend runs", async () => {
@@ -139,6 +150,12 @@ test("program contract executor promotes exact changed-surface evidence only for
         changedSurfaceObservation: {
           capture: "complete",
           paths: ["src/helpers.js"]
+        },
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
         }
       }
     },
@@ -150,7 +167,13 @@ test("program contract executor promotes exact changed-surface evidence only for
         changedFiles: [],
         commandsRun: ["node --test --test-name-pattern helpers"],
         evidence: ["Verification command passed."],
-        openQuestions: []
+        openQuestions: [],
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.4-mini",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.4-mini"
+        }
       }
     }
   ]);
@@ -168,6 +191,71 @@ test("program contract executor promotes exact changed-surface evidence only for
     capture: "complete",
     paths: ["src/helpers.js"]
   });
+  assert.equal(result.providerModelEvidenceRequirement, "required");
+  assert.deepEqual(result.providerModelSelections, [
+    {
+      role: "implementer",
+      iteration: 0,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    },
+    {
+      role: "verifier",
+      iteration: 0,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.4-mini",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.4-mini"
+    }
+  ]);
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor promotes trusted provider/model selections from failed process-backend runs", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "failed",
+        summary: "process worker failed: launcher timed out",
+        changedFiles: [],
+        commandsRun: ["node /tmp/pi/dist/pi.js -p --no-session --provider openai-codex --model gpt-5.3-codex"],
+        evidence: ["timed_out: true"],
+        openQuestions: ["Reduce prompt complexity or increase launcher timeout."],
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
+        }
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.providerModelEvidenceRequirement, "required");
+  assert.deepEqual(result.providerModelSelections, [
+    {
+      role: "implementer",
+      iteration: 0,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    }
+  ]);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
@@ -237,6 +325,12 @@ test("program contract executor marks changed-surface evidence partial when only
         changedSurfaceObservation: {
           capture: "complete",
           paths: ["src/helpers.js"]
+        },
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
         }
       }
     },
@@ -248,7 +342,13 @@ test("program contract executor marks changed-surface evidence partial when only
         changedFiles: [],
         commandsRun: ["git diff --stat"],
         evidence: ["repair needed"],
-        openQuestions: ["Apply one more scoped rename."]
+        openQuestions: ["Apply one more scoped rename."],
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.4",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.4"
+        }
       }
     },
     {
@@ -259,7 +359,13 @@ test("program contract executor marks changed-surface evidence partial when only
         changedFiles: ["src/helpers.js"],
         commandsRun: ["node --check src/helpers.js"],
         evidence: ["repository_changes_applied: true"],
-        openQuestions: []
+        openQuestions: [],
+        providerModelSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
+        }
       }
     },
     {
@@ -301,6 +407,33 @@ test("program contract executor marks changed-surface evidence partial when only
     capture: "partial",
     paths: ["src/helpers.js"]
   });
+  assert.equal(result.providerModelEvidenceRequirement, "required");
+  assert.deepEqual(result.providerModelSelections, [
+    {
+      role: "implementer",
+      iteration: 0,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    },
+    {
+      role: "reviewer",
+      iteration: 0,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.4",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.4"
+    },
+    {
+      role: "implementer",
+      iteration: 1,
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    }
+  ]);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });

@@ -343,6 +343,10 @@ test("run store marks success reviewability as reviewable when captured validati
       status: "reviewable",
       reasons: []
     });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(saved.runJournal.contractRuns[0], "providerModelSelections"),
+      false
+    );
 
     const loaded = await runStore.loadRun(reviewableProgramId);
     assert.deepEqual(loaded.reviewability, {
@@ -350,6 +354,145 @@ test("run store marks success reviewability as reviewable when captured validati
       reasons: []
     });
     assert.deepEqual(loaded.runJournal.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(loaded.runJournal.contractRuns[0], "providerModelSelections"),
+      false
+    );
+  });
+});
+
+test("run store treats present empty providerModelSelections as authoritative and skips legacy fallback", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const emptyTypedProgramId = `${program.id}-empty-typed-provider-model`;
+
+    const saved = await runStore.saveRun({
+      programId: emptyTypedProgramId,
+      program: {
+        ...program,
+        id: emptyTypedProgramId
+      },
+      runJournal: {
+        programId: emptyTypedProgramId,
+        status: "success",
+        stopReason: null,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        contractRuns: program.contracts.map((contract) => ({
+          contractId: contract.id,
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [
+            "selected_provider: openai-codex",
+            "selected_model: gpt-5.4"
+          ],
+          providerModelSelections: [],
+          openQuestions: []
+        })),
+        completedContractIds: program.contracts.map((contract) => contract.id),
+        pendingContractIds: []
+      }
+    });
+
+    assert.deepEqual(saved.reviewability, {
+      status: "unknown",
+      reasons: ["provider_model_evidence_requirement_unknown"]
+    });
+    assert.deepEqual(saved.runJournal.contractRuns[0].providerModelSelections, []);
+
+    const loaded = await runStore.loadRun(emptyTypedProgramId);
+    assert.deepEqual(loaded.reviewability, {
+      status: "unknown",
+      reasons: ["provider_model_evidence_requirement_unknown"]
+    });
+    assert.deepEqual(loaded.runJournal.contractRuns[0].providerModelSelections, []);
+  });
+});
+
+test("run store persists typed providerModelSelections and keeps execution-order entries intact", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const typedProgramId = `${program.id}-typed-provider-model`;
+
+    const typedSelections = [
+      {
+        role: "implementer",
+        iteration: 0,
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.3-codex",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.3-codex"
+      },
+      {
+        role: "reviewer",
+        iteration: 0,
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.4",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.4"
+      },
+      {
+        role: "implementer",
+        iteration: 1,
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.3-codex",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.3-codex"
+      }
+    ];
+
+    const saved = await runStore.saveRun({
+      programId: typedProgramId,
+      program: {
+        ...program,
+        id: typedProgramId
+      },
+      runJournal: {
+        programId: typedProgramId,
+        status: "success",
+        stopReason: null,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        contractRuns: program.contracts.map((contract) => ({
+          contractId: contract.id,
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          providerModelEvidenceRequirement: "required",
+          providerModelSelections: typedSelections,
+          openQuestions: []
+        })),
+        completedContractIds: program.contracts.map((contract) => contract.id),
+        pendingContractIds: []
+      }
+    });
+
+    assert.deepEqual(saved.runJournal.contractRuns[0].providerModelSelections, typedSelections);
+    assert.equal(saved.runJournal.contractRuns[0].providerModelEvidenceRequirement, "required");
+    assert.deepEqual(saved.reviewability, {
+      status: "reviewable",
+      reasons: []
+    });
+
+    const loaded = await runStore.loadRun(typedProgramId);
+    assert.deepEqual(loaded.runJournal.contractRuns[0].providerModelSelections, typedSelections);
+    assert.equal(loaded.runJournal.contractRuns[0].providerModelEvidenceRequirement, "required");
+    assert.deepEqual(loaded.reviewability, {
       status: "reviewable",
       reasons: []
     });
@@ -461,6 +604,70 @@ test("run store load rejects malformed present changed-surface evidence", async 
     await assert.rejects(
       () => runStore.loadRun(program.id),
       /runJournalEntry\.changedSurface\.paths\[0\] must not escape the repository root/u
+    );
+  });
+});
+
+test("run store load rejects malformed present provider/model evidence requirement values", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "success",
+        stopReason: null,
+        validationArtifacts: [
+          {
+            artifactType: "validation_artifact",
+            reference: "test-run:node --test --test-isolation=none",
+            status: "captured"
+          }
+        ],
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            providerModelEvidenceRequirement: "not_applicable",
+            providerModelSelections: [
+              {
+                role: "implementer",
+                iteration: 0,
+                requestedProvider: "openai-codex",
+                requestedModel: "gpt-5.3-codex",
+                selectedProvider: "openai-codex",
+                selectedModel: "gpt-5.3-codex"
+              }
+            ],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      },
+      completedContractIds: [program.contracts[0].id],
+      pendingContractIds: program.contracts.slice(1).map((contract) => contract.id),
+      lastStatus: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationOutcome: "pass",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.providerModelEvidenceRequirement must be one of: required, unknown/u
     );
   });
 });

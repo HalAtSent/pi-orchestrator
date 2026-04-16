@@ -1,7 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { createExecutionProgram } from "../src/project-contracts.js";
+import {
+  createAuditReport,
+  createExecutionProgram
+} from "../src/project-contracts.js";
+import {
+  DOCTRINE_EVALUATION_CRITERION_IDS,
+  getDoctrineEvaluationDefinitions
+} from "../src/doctrine-evaluation.js";
 
 import {
   auditProject,
@@ -16,6 +23,12 @@ import {
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
+}
+
+function findEntryIndexBy(entries, key, value) {
+  const index = entries.findIndex((entry) => entry[key] === value);
+  assert.notEqual(index, -1, `expected ${key}=${value} to exist in fixture`);
+  return index;
 }
 
 test("brainstorm returns structured alternatives for an automation package", () => {
@@ -48,6 +61,7 @@ test("blueprint freezes repository layout and execution profile", () => {
   );
   assert.deepEqual(modulePathsById["control-plane"], [
     "src/contracts.js",
+    "src/doctrine-evaluation.js",
     "src/boolean-flags.js",
     "src/helpers.js",
     "src/orchestrator.js",
@@ -181,11 +195,21 @@ test("slice returns an execution program with ordered milestone contracts", () =
   const brief = loadFixture("project-brief.json");
   const { blueprint } = buildProjectLifecycleArtifacts(brief);
   const executionProgram = sliceProject({ blueprint });
+  const canonicalCriteria = getDoctrineEvaluationDefinitions();
 
   assert.equal(executionProgram.contracts[0].id, "bootstrap-package");
   assert.deepEqual(executionProgram.contracts[1].dependsOn, ["bootstrap-package"]);
   assert.ok(executionProgram.contracts.some((contract) => contract.id === "package-readiness"));
   assert.ok(executionProgram.completionChecks.length >= 3);
+  assert.equal(executionProgram.evaluationCriteria.length, canonicalCriteria.length);
+  assert.deepEqual(
+    executionProgram.evaluationCriteria.map((criterion) => criterion.id),
+    canonicalCriteria.map((criterion) => criterion.id)
+  );
+  assert.deepEqual(
+    executionProgram.evaluationCriteria.map((criterion) => criterion.artifactHooks),
+    canonicalCriteria.map((criterion) => criterion.artifactHooks)
+  );
 });
 
 test("execution program approval helpers derive a stable fingerprint and pre-execution action classes", () => {
@@ -240,6 +264,193 @@ test("audit passes on the generated lifecycle scaffolding", () => {
   assert.equal(auditReport.status, "pass");
   assert.equal(auditReport.findings.length, 0);
   assert.ok(auditReport.recommendedNextContracts.includes("bootstrap-package"));
+  assert.equal(auditReport.evaluationCoverage.length, DOCTRINE_EVALUATION_CRITERION_IDS.length);
+  assert.deepEqual(
+    auditReport.evaluationCoverage.map((entry) => entry.criterionId),
+    DOCTRINE_EVALUATION_CRITERION_IDS
+  );
+  assert.ok(auditReport.evaluationCoverage.every((entry) => entry.status === "covered"));
+});
+
+test("audit marks doctrine coverage as missing when required structural hooks are empty", () => {
+  const brief = loadFixture("project-brief.json");
+  const { blueprint, executionProgram } = buildProjectLifecycleArtifacts(brief);
+  const brokenProgram = structuredClone(executionProgram);
+  brokenProgram.completionChecks = [];
+  brokenProgram.contracts[0].verificationPlan = [];
+
+  const auditReport = auditProject({
+    blueprint,
+    executionProgram: brokenProgram
+  });
+
+  assert.equal(auditReport.status, "attention_required");
+  assert.ok(
+    auditReport.evaluationCoverage.some((entry) => {
+      return entry.status === "missing" && entry.missingHooks.includes("program.completionChecks");
+    })
+  );
+  assert.ok(
+    auditReport.findings.some((finding) => finding.id.startsWith("empty-evaluation-hook-targets-"))
+  );
+});
+
+test("ExecutionProgram rejects malformed evaluationCriteria hook refs", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCriteria = structuredClone(executionProgram);
+  malformedCriteria.evaluationCriteria[0].artifactHooks = ["program.invalidHook"];
+
+  assert.throws(
+    () => createExecutionProgram(malformedCriteria),
+    /program\.evaluationCriteria\[0\]\.artifactHooks contains unsupported hook ref: program\.invalidHook/u
+  );
+});
+
+test("ExecutionProgram rejects criterion-specific evaluation hook drift", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const driftedCriteria = structuredClone(executionProgram);
+  const criterionIndex = findEntryIndexBy(driftedCriteria.evaluationCriteria, "id", "trustworthy_output");
+  driftedCriteria.evaluationCriteria[criterionIndex].artifactHooks = ["blueprint.qualityGates"];
+
+  assert.throws(
+    () => createExecutionProgram(driftedCriteria),
+    /program\.evaluationCriteria\[\d+\]\.artifactHooks must match canonical hook refs for criterion trustworthy_output/u
+  );
+});
+
+test("ExecutionProgram rejects criterion-specific evaluation question drift", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const driftedCriteria = structuredClone(executionProgram);
+  const criterionIndex = findEntryIndexBy(driftedCriteria.evaluationCriteria, "id", "trustworthy_output");
+  driftedCriteria.evaluationCriteria[criterionIndex].question = "Edited question drift";
+
+  assert.throws(
+    () => createExecutionProgram(driftedCriteria),
+    /program\.evaluationCriteria\[\d+\]\.question must match canonical question for criterion trustworthy_output/u
+  );
+});
+
+test("ExecutionProgram rejects missing canonical doctrine evaluation criteria", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const missingCriterionProgram = structuredClone(executionProgram);
+  missingCriterionProgram.evaluationCriteria = missingCriterionProgram.evaluationCriteria.filter((criterion) => {
+    return criterion.id !== "operator_clarity";
+  });
+
+  assert.throws(
+    () => createExecutionProgram(missingCriterionProgram),
+    /program\.evaluationCriteria must contain exactly 6 canonical criteria/u
+  );
+});
+
+test("ExecutionProgram rejects reordered canonical doctrine evaluation criteria", () => {
+  const { executionProgram } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const reorderedCriteriaProgram = structuredClone(executionProgram);
+  [reorderedCriteriaProgram.evaluationCriteria[0], reorderedCriteriaProgram.evaluationCriteria[1]] = [
+    reorderedCriteriaProgram.evaluationCriteria[1],
+    reorderedCriteriaProgram.evaluationCriteria[0]
+  ];
+
+  assert.throws(
+    () => createExecutionProgram(reorderedCriteriaProgram),
+    /program\.evaluationCriteria\[0\]\.id must be canonical id trustworthy_output at index 0/u
+  );
+});
+
+test("AuditReport rejects malformed evaluationCoverage entries", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  malformedCoverage.evaluationCoverage[0].status = "pass";
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[0\]\.status must be one of: covered, missing/u
+  );
+});
+
+test("AuditReport rejects evaluationCoverage hook drift across criteria", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  const coverageIndex = findEntryIndexBy(malformedCoverage.evaluationCoverage, "criterionId", "trustworthy_output");
+  malformedCoverage.evaluationCoverage[coverageIndex].status = "missing";
+  malformedCoverage.evaluationCoverage[coverageIndex].evidenceHooks = ["blueprint.qualityGates"];
+  malformedCoverage.evaluationCoverage[coverageIndex].missingHooks = [
+    "brief.successCriteria",
+    "program.completionChecks",
+    "program.contracts[].successCriteria"
+  ];
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[\d+\]\.evidenceHooks contains hook ref not allowed for criterion trustworthy_output: blueprint\.qualityGates/u
+  );
+});
+
+test("AuditReport rejects evaluationCoverage partitions that omit canonical hooks", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  const coverageIndex = findEntryIndexBy(malformedCoverage.evaluationCoverage, "criterionId", "trustworthy_output");
+  malformedCoverage.evaluationCoverage[coverageIndex].status = "missing";
+  malformedCoverage.evaluationCoverage[coverageIndex].evidenceHooks = ["brief.successCriteria"];
+  malformedCoverage.evaluationCoverage[coverageIndex].missingHooks = ["program.completionChecks"];
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[\d+\] must partition canonical hook refs for criterion trustworthy_output; missing from evidenceHooks and missingHooks: program\.contracts\[\]\.successCriteria/u
+  );
+});
+
+test("AuditReport rejects evaluationCoverage partitions with hook overlap", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  const coverageIndex = findEntryIndexBy(malformedCoverage.evaluationCoverage, "criterionId", "trustworthy_output");
+  malformedCoverage.evaluationCoverage[coverageIndex].status = "missing";
+  malformedCoverage.evaluationCoverage[coverageIndex].evidenceHooks = ["brief.successCriteria"];
+  malformedCoverage.evaluationCoverage[coverageIndex].missingHooks = [
+    "brief.successCriteria",
+    "program.completionChecks",
+    "program.contracts[].successCriteria"
+  ];
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[\d+\]\.evidenceHooks and auditReport\.evaluationCoverage\[\d+\]\.missingHooks must not overlap for criterion trustworthy_output/u
+  );
+});
+
+test("AuditReport rejects covered status when missingHooks are present", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  const coverageIndex = findEntryIndexBy(malformedCoverage.evaluationCoverage, "criterionId", "trustworthy_output");
+  malformedCoverage.evaluationCoverage[coverageIndex].status = "covered";
+  malformedCoverage.evaluationCoverage[coverageIndex].evidenceHooks = ["brief.successCriteria"];
+  malformedCoverage.evaluationCoverage[coverageIndex].missingHooks = [
+    "program.completionChecks",
+    "program.contracts[].successCriteria"
+  ];
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[\d+\]\.status cannot be covered when missingHooks is non-empty for criterion trustworthy_output/u
+  );
+});
+
+test("AuditReport rejects missing status when canonical hooks are fully covered", () => {
+  const { auditReport } = buildProjectLifecycleArtifacts(loadFixture("project-brief.json"));
+  const malformedCoverage = structuredClone(auditReport);
+  const coverageIndex = findEntryIndexBy(malformedCoverage.evaluationCoverage, "criterionId", "trustworthy_output");
+  malformedCoverage.evaluationCoverage[coverageIndex].status = "missing";
+  malformedCoverage.evaluationCoverage[coverageIndex].evidenceHooks = [
+    "brief.successCriteria",
+    "program.completionChecks",
+    "program.contracts[].successCriteria"
+  ];
+  malformedCoverage.evaluationCoverage[coverageIndex].missingHooks = [];
+
+  assert.throws(
+    () => createAuditReport(malformedCoverage),
+    /auditReport\.evaluationCoverage\[\d+\]\.status cannot be missing when canonical hooks are fully covered for criterion trustworthy_output/u
+  );
 });
 
 test("lifecycle artifacts preserve the original brief constraints and non-goals", () => {

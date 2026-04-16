@@ -140,6 +140,12 @@ Evidence is not just audit exhaust. Reviewability is part of the product.
 
 Evidence quality and review burden are product-quality concerns, not merely audit concerns. A result that is hard to inspect is a lower-quality product even when the output looks superficially capable.
 
+Roadmap evaluation criteria are now instrumented as first-class lifecycle
+fields so they are explicit and auditable. That instrumentation is a structural
+coverage signal only: it verifies that expected artifact hooks exist and are
+populated, and does not claim the quality outcomes themselves were already
+achieved.
+
 The harness should produce artifacts that can be inspected without trusting the model's story about what happened.
 
 Important evidence includes:

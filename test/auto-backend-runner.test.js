@@ -4,7 +4,8 @@ import test from "node:test";
 import {
   AUTO_BACKEND_MODES,
   createAutoBackendRunner,
-  isTrustedChangedSurfaceObservationResult
+  isTrustedChangedSurfaceObservationResult,
+  isTrustedProviderModelSelectionResult
 } from "../src/auto-backend-runner.js";
 import { validateWorkerResult } from "../src/contracts.js";
 
@@ -239,7 +240,7 @@ test("auto backend runner backend selection does not throw on non-cloneable cont
   assert.match(calls[0].context.hooks.onRoute, /uncloneable/i);
 });
 
-test("auto backend runner only attests changed-surface observations when process backend is selected", async () => {
+test("auto backend runner only attests backend-owned changed-surface and provider/model observations when process backend is selected", async () => {
   const defaultRunner = createStubRunner("default");
   const processBackend = createStubRunner("process");
   const runner = createAutoBackendRunner({
@@ -261,6 +262,8 @@ test("auto backend runner only attests changed-surface observations when process
 
   assert.equal(isTrustedChangedSurfaceObservationResult(trustedResult), true);
   assert.equal(isTrustedChangedSurfaceObservationResult(untrustedResult), false);
+  assert.equal(isTrustedProviderModelSelectionResult(trustedResult), true);
+  assert.equal(isTrustedProviderModelSelectionResult(untrustedResult), false);
 });
 
 test("auto backend runner does not expose a public changed-surface trust marker", async () => {

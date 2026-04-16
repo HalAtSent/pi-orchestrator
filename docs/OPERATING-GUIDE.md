@@ -177,6 +177,14 @@ Current `audit` surface:
 - autonomous-mode versus interactive-gate conflict detection
 - missing verification-plan detection
 - missing scope-path detection
+- structural doctrine evaluation coverage over canonical criteria in
+  `ExecutionProgram.evaluationCriteria[]` and `AuditReport.evaluationCoverage[]`
+- findings for missing canonical criteria, missing required hook refs, and
+  structurally empty hook targets
+
+Coverage here means lifecycle hooks are present and populated. It is not a
+runtime score and does not claim outcomes such as lower review effort were
+already achieved.
 
 ### `auto`
 

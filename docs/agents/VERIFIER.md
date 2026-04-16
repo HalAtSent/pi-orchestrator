@@ -87,8 +87,25 @@ The following are not sufficient by themselves:
   `build_session.execution.reviewability`.
 - That persisted `reviewability` object is a machine-decided summary, not a
   complete replacement for reviewer judgment or claim-specific proof.
-- Current v1 still does not persist a first-class
-  `providerModelEvidenceRequired` field.
+- Partial Track 2 landing: current v1 now persists trusted packet-level
+  provider/model metadata on
+  `run_journal.contractRuns[].providerModelSelections[]` when trusted typed
+  packet entries are promoted.
+- Partial Track 2 landing: current v1 also persists per-contract
+  `run_journal.contractRuns[].providerModelEvidenceRequirement` with the narrow
+  enum `required` | `unknown`.
+- That requirement truth is derived from code-owned backend provenance in
+  `src/program-contract-executor.js`, not from prompt text, role names, or
+  compatibility provider/model evidence strings.
+- when no trusted typed provider/model packet entries are promoted for a
+  contract run, `providerModelSelections` is omitted and machine reviewability
+  may still fall back to legacy provider/model `evidence[]` parsing only for
+  legacy run entries where `providerModelEvidenceRequirement` is absent.
+- That typed provider/model surface is promoted only from trusted
+  process-backend worker metadata; compatibility provider/model evidence strings
+  still exist and remain secondary when typed packet entries are present.
+- Current v1 still has no broader backend-complete provider/model applicability
+  model beyond this narrow `required` / `unknown` slice.
 - `validationArtifacts[]` may be structurally valid placeholders with
   `status = not_captured`; that is not proof that validation passed.
 - `run_journal.actionClasses` is conservative normalized evidence, not a

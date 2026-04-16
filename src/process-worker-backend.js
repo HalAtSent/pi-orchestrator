@@ -402,7 +402,8 @@ function createFailedResult(summary, {
   changedFiles = [],
   commandsRun = [],
   evidence = [],
-  openQuestions = []
+  openQuestions = [],
+  providerModelSelection = null
 } = {}) {
   return createWorkerResult({
     status: "failed",
@@ -410,7 +411,8 @@ function createFailedResult(summary, {
     changedFiles: normalizeStringArray(changedFiles),
     commandsRun: normalizeStringArray(commandsRun),
     evidence: normalizeStringArray(evidence),
-    openQuestions: normalizeStringArray(openQuestions)
+    openQuestions: normalizeStringArray(openQuestions),
+    providerModelSelection
   });
 }
 
@@ -418,7 +420,8 @@ function createSuccessResult(summary, {
   changedFiles = [],
   commandsRun = [],
   evidence = [],
-  changedSurfaceObservation = null
+  changedSurfaceObservation = null,
+  providerModelSelection = null
 } = {}) {
   return createWorkerResult({
     status: "success",
@@ -427,8 +430,48 @@ function createSuccessResult(summary, {
     commandsRun: normalizeStringArray(commandsRun),
     evidence: normalizeStringArray(evidence),
     openQuestions: [],
-    changedSurfaceObservation
+    changedSurfaceObservation,
+    providerModelSelection
   });
+}
+
+function getProviderModelSelectionFromLaunchSelection(launchSelection) {
+  if (!launchSelection || typeof launchSelection !== "object" || Array.isArray(launchSelection)) {
+    return null;
+  }
+
+  const hasKnownValue = (value) => typeof value === "string"
+    && value.trim().length > 0
+    && value.trim().toLowerCase() !== "unknown";
+
+  const requestedProvider = typeof launchSelection.requestedProvider === "string" && launchSelection.requestedProvider.trim().length > 0
+    ? launchSelection.requestedProvider.trim()
+    : null;
+  const requestedModel = typeof launchSelection.requestedModel === "string" && launchSelection.requestedModel.trim().length > 0
+    ? launchSelection.requestedModel.trim()
+    : null;
+  const selectedProvider = typeof launchSelection.selectedProvider === "string" && launchSelection.selectedProvider.trim().length > 0
+    ? launchSelection.selectedProvider.trim()
+    : null;
+  const selectedModel = typeof launchSelection.selectedModel === "string" && launchSelection.selectedModel.trim().length > 0
+    ? launchSelection.selectedModel.trim()
+    : null;
+
+  if (
+    !hasKnownValue(requestedProvider)
+    || !hasKnownValue(requestedModel)
+    || !hasKnownValue(selectedProvider)
+    || !hasKnownValue(selectedModel)
+  ) {
+    return null;
+  }
+
+  return {
+    requestedProvider,
+    requestedModel,
+    selectedProvider,
+    selectedModel
+  };
 }
 
 function normalizeRelativeFilePath(pathValue, fieldName) {
@@ -1585,6 +1628,7 @@ export function createProcessWorkerBackend({
       let workspaceRoot = null;
       let changedFiles = [];
       let launchResult = null;
+      let providerModelSelection = null;
       const copiedSeedFiles = [];
       const missingSeedFiles = [];
 
@@ -1642,6 +1686,10 @@ export function createProcessWorkerBackend({
           targetRelativePath: allowedFiles[0] ?? null,
           targetAbsolutePath: targetAbsolutePaths[0] ?? null
         });
+        const initialProviderModelSelection = getProviderModelSelectionFromLaunchSelection(launchResult?.launchSelection);
+        if (initialProviderModelSelection) {
+          providerModelSelection = initialProviderModelSelection;
+        }
 
         const afterSnapshot = await snapshotFiles(workspaceRoot);
         changedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
@@ -1691,7 +1739,8 @@ export function createProcessWorkerBackend({
             evidence: unique(evidence),
             openQuestions: [
               "Reduce prompt complexity or increase launcher timeout."
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1702,7 +1751,8 @@ export function createProcessWorkerBackend({
             evidence: unique(evidence),
             openQuestions: [
               "Inspect launcher stdout/stderr and verify non-interactive worker command syntax."
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1716,7 +1766,8 @@ export function createProcessWorkerBackend({
             ]),
             openQuestions: [
               `Tighten ${packet.role} prompt and runner constraints to keep the role read-only.`
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1753,6 +1804,12 @@ export function createProcessWorkerBackend({
             promptOverride: retryPrompt,
             launchSelectionOverride: retryLaunchSelectionOverride ? clone(retryLaunchSelectionOverride) : null
           });
+          if (!providerModelSelection) {
+            const retryProviderModelSelection = getProviderModelSelectionFromLaunchSelection(launchResult?.launchSelection);
+            if (retryProviderModelSelection) {
+              providerModelSelection = retryProviderModelSelection;
+            }
+          }
 
           const retrySnapshot = await snapshotFiles(workspaceRoot);
           changedFiles = diffSnapshots(beforeSnapshot, retrySnapshot);
@@ -1796,7 +1853,8 @@ export function createProcessWorkerBackend({
               ]),
               openQuestions: [
                 "Reduce prompt complexity or increase launcher timeout."
-              ]
+              ],
+              providerModelSelection
             });
           }
 
@@ -1811,7 +1869,8 @@ export function createProcessWorkerBackend({
               ]),
               openQuestions: [
                 "Inspect launcher stdout/stderr and verify non-interactive worker command syntax."
-              ]
+              ],
+              providerModelSelection
             });
           }
 
@@ -1826,7 +1885,8 @@ export function createProcessWorkerBackend({
               ]),
               openQuestions: [
                 `Tighten ${packet.role} prompt and runner constraints to keep the role read-only.`
-              ]
+              ],
+              providerModelSelection
             });
           }
 
@@ -1861,7 +1921,8 @@ export function createProcessWorkerBackend({
             ]),
             openQuestions: [
               "Tighten worker instructions to enforce allowlist-only writes."
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1876,7 +1937,8 @@ export function createProcessWorkerBackend({
             ]),
             openQuestions: [
               "Narrow the packet scope or remove conflicting forbidden paths."
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1895,7 +1957,8 @@ export function createProcessWorkerBackend({
               "recursive_delegation_forbidden: true",
               "repository_changes_applied: not_applicable"
             ]),
-            openQuestions: structuredReadOnlyOutput.openQuestions
+            openQuestions: structuredReadOnlyOutput.openQuestions,
+            providerModelSelection
           });
         }
 
@@ -1911,7 +1974,8 @@ export function createProcessWorkerBackend({
             ]),
             openQuestions: [
               `Return valid JSON for ${packet.role} with status, summary, evidence, and openQuestions; output one JSON object only.`
-            ]
+            ],
+            providerModelSelection
           });
         }
 
@@ -1944,7 +2008,8 @@ export function createProcessWorkerBackend({
               capture: "complete",
               paths: changedFiles
             }
-            : null
+            : null,
+          providerModelSelection
         });
       } catch (error) {
         const commandsRun = inferCommandsRun(launchResult);
@@ -1965,7 +2030,8 @@ export function createProcessWorkerBackend({
           changedFiles,
           commandsRun,
           evidence,
-          openQuestions: ["Inspect process-worker-backend runtime logs and launcher setup."]
+          openQuestions: ["Inspect process-worker-backend runtime logs and launcher setup."],
+          providerModelSelection
         });
       } finally {
         if (!keepWorkspace && workspaceRoot) {

@@ -86,6 +86,20 @@ test("createWorkerResult rejects malformed changedSurfaceObservation payloads", 
   );
 });
 
+test("createWorkerResult rejects malformed providerModelSelection payloads", () => {
+  assert.throws(
+    () => createWorkerResult(validWorkerResult({
+      providerModelSelection: {
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.3-codex",
+        selectedProvider: "unknown",
+        selectedModel: "gpt-5.3-codex"
+      }
+    })),
+    /result\.providerModelSelection\.selectedProvider must not be unknown/u
+  );
+});
+
 test("existing valid payloads still pass and optional arrays can be omitted", () => {
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket()));
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket({
@@ -93,4 +107,12 @@ test("existing valid payloads still pass and optional arrays can be omitted", ()
     commands: undefined
   })));
   assert.doesNotThrow(() => createWorkerResult(validWorkerResult()));
+  assert.doesNotThrow(() => createWorkerResult(validWorkerResult({
+    providerModelSelection: {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    }
+  })));
 });

@@ -559,17 +559,22 @@ async function runProgramFromState(program, {
     }
 
     pendingContractIdSet.delete(contract.id);
-    contractRuns.push({
+    const contractRunEntry = {
       contractId: contract.id,
       status: result.status,
       summary: result.summary,
       evidence: result.evidence,
+      providerModelEvidenceRequirement: result.providerModelEvidenceRequirement,
       openQuestions: result.openQuestions,
       changedSurface: result.changedSurface,
       validationOutcome: normalizeValidationOutcome(null, {
         status: result.status
       })
-    });
+    };
+    if (Array.isArray(result.providerModelSelections) && result.providerModelSelections.length > 0) {
+      contractRunEntry.providerModelSelections = result.providerModelSelections;
+    }
+    contractRuns.push(contractRunEntry);
 
     if (result.status === "success") {
       completedContractIdSet.add(contract.id);

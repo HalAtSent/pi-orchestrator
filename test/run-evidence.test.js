@@ -12,6 +12,9 @@ import {
   normalizePolicyProfile,
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
+  normalizeProviderModelEvidenceRequirement,
+  normalizeProviderModelSelection,
+  normalizeProviderModelSelections,
   normalizeReviewability,
   normalizeSourceArtifactIds,
   normalizeStopReasonCode,
@@ -328,6 +331,78 @@ test("run evidence infers reviewability states from terminal evidence truthfully
       contractRuns: [
         {
           status: "success",
+          providerModelSelections: [
+            {
+              role: "implementer",
+              iteration: 0,
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          ]
+        }
+      ]
+    }),
+    {
+      status: "reviewable",
+      reasons: []
+    }
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelSelections: [
+            {
+              role: "implementer",
+              iteration: 0,
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          ],
+          evidence: [
+            "selected_provider: unknown",
+            "selected_model: unknown"
+          ]
+        }
+      ]
+    }),
+    {
+      status: "reviewable",
+      reasons: []
+    }
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
           evidence: [
             "selected_provider: openai-codex",
             "selected_model: gpt-5.4"
@@ -338,6 +413,99 @@ test("run evidence infers reviewability states from terminal evidence truthfully
     {
       status: "reviewable",
       reasons: []
+    }
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelSelections: [],
+          evidence: [
+            "selected_provider: openai-codex",
+            "selected_model: gpt-5.4"
+          ]
+        }
+      ]
+    }),
+    {
+      status: "unknown",
+      reasons: ["provider_model_evidence_requirement_unknown"]
+    }
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelEvidenceRequirement: "required",
+          evidence: [
+            "selected_provider: openai-codex",
+            "selected_model: gpt-5.4"
+          ]
+        }
+      ]
+    }),
+    {
+      status: "not_reviewable",
+      reasons: ["provider_model_evidence_missing"]
+    }
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-isolation=none",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelEvidenceRequirement: "unknown",
+          providerModelSelections: [
+            {
+              role: "implementer",
+              iteration: 0,
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          ]
+        }
+      ]
+    }),
+    {
+      status: "unknown",
+      reasons: ["provider_model_evidence_requirement_unknown"]
     }
   );
 
@@ -507,5 +675,79 @@ test("run evidence changed-surface observation normalization allows complete/not
       fieldName: "result.changedSurfaceObservation"
     }),
     /result\.changedSurfaceObservation\.capture must be one of: complete, not_captured/u
+  );
+});
+
+test("run evidence normalizes typed provider/model selection fields and rejects unknown sentinels", () => {
+  assert.deepEqual(
+    normalizeProviderModelSelection({
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    }),
+    {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    }
+  );
+
+  assert.deepEqual(
+    normalizeProviderModelSelections([
+      {
+        role: "implementer",
+        iteration: 0,
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.3-codex",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.3-codex"
+      }
+    ]),
+    [
+      {
+        role: "implementer",
+        iteration: 0,
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.3-codex",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.3-codex"
+      }
+    ]
+  );
+
+  assert.throws(
+    () => normalizeProviderModelSelection({
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "unknown",
+      selectedModel: "gpt-5.3-codex"
+    }),
+    /providerModelSelection\.selectedProvider must not be unknown/u
+  );
+});
+
+test("run evidence normalizes provider/model evidence requirements and fails closed on malformed present values", () => {
+  assert.equal(normalizeProviderModelEvidenceRequirement("required"), "required");
+  assert.equal(
+    normalizeProviderModelEvidenceRequirement(undefined, {
+      allowMissing: true
+    }),
+    null
+  );
+
+  assert.throws(
+    () => normalizeProviderModelEvidenceRequirement(null, {
+      fieldName: "runJournalEntry.providerModelEvidenceRequirement"
+    }),
+    /runJournalEntry\.providerModelEvidenceRequirement must be a non-empty string/u
+  );
+
+  assert.throws(
+    () => normalizeProviderModelEvidenceRequirement("not_applicable", {
+      fieldName: "runJournalEntry.providerModelEvidenceRequirement"
+    }),
+    /runJournalEntry\.providerModelEvidenceRequirement must be one of: required, unknown/u
   );
 });

@@ -2,7 +2,10 @@ import { buildTaskPacket, createInitialWorkflow } from "./orchestrator.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
 import { safeClone } from "./safe-clone.js";
-import { isTrustedChangedSurfaceObservationResult } from "./auto-backend-runner.js";
+import {
+  isTrustedChangedSurfaceObservationResult,
+  isTrustedProviderModelSelectionResult
+} from "./auto-backend-runner.js";
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 
@@ -204,10 +207,12 @@ async function executePacket({
   });
   let result;
   let changedSurfaceObservationTrusted = false;
+  let providerModelSelectionTrusted = false;
 
   try {
     result = await runner.run(packet, context);
     changedSurfaceObservationTrusted = isTrustedChangedSurfaceObservationResult(result);
+    providerModelSelectionTrusted = isTrustedProviderModelSelectionResult(result);
   } catch (error) {
     result = createExecutionFailureResult({
       packet,
@@ -226,13 +231,15 @@ async function executePacket({
       priorResult: result
     });
     changedSurfaceObservationTrusted = false;
+    providerModelSelectionTrusted = false;
   }
 
   const run = {
     packet: clone(packet),
     result: clone(result),
     provenance: {
-      changedSurfaceObservationTrusted
+      changedSurfaceObservationTrusted,
+      providerModelSelectionTrusted
     },
     iteration
   };

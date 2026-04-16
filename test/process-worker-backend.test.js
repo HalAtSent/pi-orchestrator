@@ -172,6 +172,84 @@ test("process backend maps launcher output into a contract-compatible worker res
   }
 });
 
+test("process backend preserves trusted provider/model selection on launcher timeout failures", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-timeout-selection-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: null,
+        timedOut: true,
+        stdout: "",
+        stderr: "",
+        commandsRun: ["fake-worker --timeout"],
+        launchSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.3-codex",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.3-codex"
+        }
+      })
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "timeout-selection-failure"
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /launcher timed out/i);
+    assert.deepEqual(result.providerModelSelection, {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    });
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend preserves trusted provider/model selection on launcher non-zero exit failures", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-exit-selection-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: 9,
+        timedOut: false,
+        stdout: "",
+        stderr: "non-zero exit",
+        commandsRun: ["fake-worker --non-zero"],
+        launchSelection: {
+          requestedProvider: "openai-codex",
+          requestedModel: "gpt-5.4-mini",
+          selectedProvider: "openai-codex",
+          selectedModel: "gpt-5.4-mini"
+        }
+      })
+    });
+
+    const result = await backend.run(createPacket("verifier"), {
+      workflowId: "non-zero-selection-failure"
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /launcher exited with code 9/i);
+    assert.deepEqual(result.providerModelSelection, {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.4-mini",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.4-mini"
+    });
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend handles non-cloneable context values without crashing", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-non-cloneable-context-"));
 
@@ -329,7 +407,13 @@ test("process backend rolls back repository writes when apply fails mid-commit",
           exitCode: 0,
           stdout: "updated two files",
           stderr: "",
-          commandsRun: ["fake-worker --write-two-files"]
+          commandsRun: ["fake-worker --write-two-files"],
+          launchSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.3-codex",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.3-codex"
+          }
         };
       }
     });
@@ -342,6 +426,12 @@ test("process backend rolls back repository writes when apply fails mid-commit",
 
     assert.equal(result.status, "failed");
     assert.match(result.summary, /failed to apply changed files atomically/i);
+    assert.deepEqual(result.providerModelSelection, {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    });
 
     const repoA = await readFile(join(repositoryRoot, "examples", "a.md"), "utf8");
     const repoB = await readFile(join(repositoryRoot, "examples", "b.md"), "utf8");
@@ -578,6 +668,38 @@ test("process backend does not fail open for read-only plain-text output", async
   }
 });
 
+test("process backend preserves trusted provider/model selection on invalid structured read-only output after retry", async () => {
+  const backend = createProcessWorkerBackend({
+    launcher: async () => ({
+      launcher: "fake_launcher",
+      exitCode: 0,
+      stdout: "reviewer plain text output",
+      stderr: "",
+      commandsRun: ["fake-worker --reviewer"],
+      launchSelection: {
+        requestedProvider: "openai-codex",
+        requestedModel: "gpt-5.4",
+        selectedProvider: "openai-codex",
+        selectedModel: "gpt-5.4"
+      }
+    })
+  });
+
+  const result = await backend.run(createPacket("reviewer"), {
+    workflowId: "reviewer-invalid-json-selection"
+  });
+
+  validateWorkerResult(result);
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /invalid structured read-only output/i);
+  assert.deepEqual(result.providerModelSelection, {
+    requestedProvider: "openai-codex",
+    requestedModel: "gpt-5.4",
+    selectedProvider: "openai-codex",
+    selectedModel: "gpt-5.4"
+  });
+});
+
 test("process backend converts invalid read-only first output into structured retry output", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-readonly-retry-success-"));
   let launchCount = 0;
@@ -778,7 +900,8 @@ test("launcher prompt includes advisory common and role-specific contract guidan
         /The verifier answers "was this demonstrated\?" not "should this ship\?"/iu,
         /In evidence, include commands_run: \.\.\. with the exact commands actually executed, or not run\./iu,
         /Current v1 now persists a narrow first-class reviewability object/iu,
-        /Current v1 still does not persist a first-class providerModelEvidenceRequired field\./iu,
+        /run_journal\.contractRuns\[\]\.providerModelEvidenceRequirement/iu,
+        /required\s*\|\s*unknown/iu,
         /Return exactly one JSON object using the enforced worker-result schema fields: status, summary, evidence, and openQuestions\./iu,
         /summary: the short verification outcome, including whether the claim was demonstrated, disproved, or remains unproven\./iu
       ],
@@ -1164,6 +1287,12 @@ test("process backend launcher passes explicit openai-codex provider and preferr
     assert.equal(result.evidence.includes("model_selection_mode: direct"), true);
     assert.equal(result.evidence.includes("model_selection_reason: preferred_model_supported"), true);
     assert.equal(result.evidence.includes("effective_launcher_mode: explicit_provider_model_override"), true);
+    assert.deepEqual(result.providerModelSelection, {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.3-codex",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.3-codex"
+    });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -1245,6 +1374,12 @@ test("process backend retry preserves explicit openai-codex provider/model selec
       result.evidence.includes("read_only_json_repair_retry_attempted: true"),
       true
     );
+    assert.deepEqual(result.providerModelSelection, {
+      requestedProvider: "openai-codex",
+      requestedModel: "gpt-5.4",
+      selectedProvider: "openai-codex",
+      selectedModel: "gpt-5.4"
+    });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }

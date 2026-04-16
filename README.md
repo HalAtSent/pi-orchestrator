@@ -17,6 +17,7 @@ Current implemented scope includes:
 
 - core task and result contracts
 - project-lifecycle contracts for brainstorming, blueprinting, slicing, bootstrapping, and audit
+- doctrine evaluation criteria instrumentation in `ExecutionProgram.evaluationCriteria[]` plus structural coverage in `AuditReport.evaluationCoverage[]` (coverage is artifact-structure only, not runtime scoring)
 - operator-facing `/build` sessions with persisted `buildId` state, plain-English status views, and plan-scoped approval-by-id
 - policy heuristics for risk and human gates
 - workflow planning and execution-program helpers

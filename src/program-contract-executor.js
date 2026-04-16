@@ -1,9 +1,15 @@
 import { runPlannedWorkflow } from "./auto-workflow.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { compileExecutionContract } from "./program-compiler.js";
-import { normalizeChangedSurface, normalizeChangedSurfaceObservation } from "./run-evidence.js";
+import {
+  normalizeChangedSurface,
+  normalizeChangedSurfaceObservation,
+  normalizeProviderModelSelection
+} from "./run-evidence.js";
 
 const IMPLEMENTER_ROLE = "implementer";
+const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED = "required";
+const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN = "unknown";
 
 function assert(condition, message) {
   if (!condition) {
@@ -20,6 +26,7 @@ function toBlockedContractResult(contractId, reason, { evidence = [], openQuesti
     status: "blocked",
     summary: `Execution blocked for ${contractId}: ${reason}`,
     evidence: [...evidence],
+    providerModelEvidenceRequirement: PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN,
     changedSurface: normalizeChangedSurface(null),
     openQuestions: [
       ...openQuestions
@@ -85,6 +92,16 @@ function getObservedChangedSurface(runResult) {
   }
 }
 
+function getObservedProviderModelSelection(runResult) {
+  try {
+    return normalizeProviderModelSelection(runResult?.providerModelSelection, {
+      fieldName: "workerResult.providerModelSelection"
+    });
+  } catch {
+    return null;
+  }
+}
+
 function deriveChangedSurface(execution) {
   const runs = Array.isArray(execution?.runs) ? execution.runs : [];
   const successfulImplementerRuns = runs.filter((run) => (
@@ -120,30 +137,80 @@ function deriveChangedSurface(execution) {
   });
 }
 
+function deriveProviderModelSelections(execution) {
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+  const observedSelections = [];
+
+  for (const run of runs) {
+    if (run?.provenance?.providerModelSelectionTrusted !== true) {
+      continue;
+    }
+
+    const selection = getObservedProviderModelSelection(run?.result);
+    if (!selection) {
+      continue;
+    }
+
+    const role = typeof run?.packet?.role === "string" && run.packet.role.trim().length > 0
+      ? run.packet.role.trim()
+      : null;
+    if (!role) {
+      continue;
+    }
+
+    const iteration = Number.isInteger(run?.iteration) && run.iteration >= 0
+      ? run.iteration
+      : 0;
+
+    observedSelections.push({
+      role,
+      iteration,
+      requestedProvider: selection.requestedProvider,
+      requestedModel: selection.requestedModel,
+      selectedProvider: selection.selectedProvider,
+      selectedModel: selection.selectedModel
+    });
+  }
+
+  return observedSelections;
+}
+
+function deriveProviderModelEvidenceRequirement(execution) {
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+  const hasTrustedProviderModelProvenance = runs.some(
+    (run) => run?.provenance?.providerModelSelectionTrusted === true
+  );
+
+  return hasTrustedProviderModelProvenance
+    ? PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED
+    : PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN;
+}
+
 function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution) {
   const status = normalizeContractStatus(execution.status);
   const evidence = createExecutionEvidence(compiledPlan, execution);
   const openQuestions = createExecutionOpenQuestions(execution);
   const changedSurface = deriveChangedSurface(execution);
+  const providerModelSelections = deriveProviderModelSelections(execution);
+  const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(execution);
+  const summary = status === "success"
+    ? `Executed ${contractId} through ${execution.runs.length} bounded packet run(s).`
+    : `Contract ${contractId} ${status}: ${execution.stopReason ?? "execution stopped without an explicit reason"}`;
 
-  if (status === "success") {
-    return {
-      status,
-      summary: `Executed ${contractId} through ${execution.runs.length} bounded packet run(s).`,
-      evidence,
-      changedSurface,
-      openQuestions
-    };
-  }
-
-  const reason = execution.stopReason ?? "execution stopped without an explicit reason";
-  return {
+  const contractResult = {
     status,
-    summary: `Contract ${contractId} ${status}: ${reason}`,
+    summary,
     evidence,
+    providerModelEvidenceRequirement,
     changedSurface,
     openQuestions
   };
+
+  if (providerModelSelections.length > 0) {
+    contractResult.providerModelSelections = providerModelSelections;
+  }
+
+  return contractResult;
 }
 
 export function createProgramContractExecutor({

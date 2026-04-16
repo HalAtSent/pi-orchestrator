@@ -123,7 +123,9 @@ Current implementation notes:
 
 - `worker_output -> prompt_or_context` also exists in practice: `src/auto-workflow.js` forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects.
 - Current process-backed prompts in `src/process-worker-backend.js` do not interpolate that forwarded context into prompt text, but `src/pi-worker-runner.js` still passes the context object through the runner and adapter surface.
-- `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]` and normalized `changedSurface` into `run_journal.contractRuns[]`.
+- `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]`, normalized `changedSurface`, promoted `providerModelSelections`, and per-contract `providerModelEvidenceRequirement` into `run_journal.contractRuns[]`.
+- first-class `providerModelSelections` persistence is a trusted-metadata path only: process-backend typed worker metadata (`result.providerModelSelection`) is promoted only when backend-owned provenance attests trust (`run.provenance.providerModelSelectionTrusted = true`).
+- first-class `providerModelEvidenceRequirement` persistence is also a trusted-metadata path only: `src/program-contract-executor.js` derives `required` or `unknown` from backend-owned provenance (`run.provenance.providerModelSelectionTrusted`) and does not derive that requirement from prompt text, role labels, or compatibility `evidence[]` strings.
 - No repository-wide redaction or secret-scrubbing pass currently runs across those forwarded or persisted strings. See [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) for the target redaction hardening track.
 
 ## Control-Plane Boundary

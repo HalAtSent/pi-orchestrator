@@ -5,6 +5,7 @@ const AUTO_BACKEND_MODE_PI_RUNTIME = "pi_runtime";
 const AUTO_BACKEND_MODE_LOW_RISK_PROCESS_IMPLEMENTER = "low_risk_process_implementer";
 const AUTO_BACKEND_MODE_PROCESS_SUBAGENTS = "process_subagents";
 const TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS = new WeakSet();
+const TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS = new WeakSet();
 
 export const AUTO_BACKEND_MODES = Object.freeze({
   PI_RUNTIME: AUTO_BACKEND_MODE_PI_RUNTIME,
@@ -28,6 +29,7 @@ function markTrustedChangedSurfaceObservationResult(workerResult) {
   }
 
   TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.add(workerResult);
+  TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS.add(workerResult);
   return workerResult;
 }
 
@@ -37,6 +39,14 @@ export function isTrustedChangedSurfaceObservationResult(workerResult) {
   }
 
   return TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.has(workerResult);
+}
+
+export function isTrustedProviderModelSelectionResult(workerResult) {
+  if (!isObject(workerResult)) {
+    return false;
+  }
+
+  return TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS.has(workerResult);
 }
 
 function clone(value) {

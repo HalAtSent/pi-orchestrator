@@ -35,7 +35,7 @@ A persisted artifact can be structurally valid without yet being reviewable for 
 
 Current v1 persists a narrow first-class `reviewability` object on `persisted_run_record`, embedded `run_journal`, and `build_session.execution`.
 
-Current v1 still does not persist a first-class `providerModelEvidenceRequired` field. Provider/model requirements remain a narrow machine inference surface plus reviewer context.
+Current v1 now persists a narrow first-class `providerModelEvidenceRequirement` field on `run_journal.contractRuns[]`. This requirement surface is a partial Track 2 landing and is derived only from code-owned backend provenance.
 
 ## Normative Terms
 
@@ -353,7 +353,8 @@ Required fields:
 
 Optional fields:
 
-- none
+- `providerModelEvidenceRequirement`
+- `providerModelSelections`
 
 Required invariants:
 
@@ -364,6 +365,22 @@ Required invariants:
 - `changedSurface.capture` must be one of `complete`, `partial`, or `not_captured`.
 - `changedSurface.paths[]` must contain repo-relative normalized paths when present.
 - `changedSurface.capture = not_captured` requires `changedSurface.paths = []`.
+- `providerModelEvidenceRequirement`, when present, must be one of:
+  - `required`
+  - `unknown`
+- `providerModelSelections[]` entries, when present, must be execution-order packets captured from trusted process-backend metadata only, with exactly:
+  - `role`
+  - `iteration`
+  - `requestedProvider`
+  - `requestedModel`
+  - `selectedProvider`
+  - `selectedModel`
+
+Provider/model field omission note:
+
+- `contractRuns[]` may omit `providerModelEvidenceRequirement` for legacy compatibility.
+- `contractRuns[]` may omit `providerModelSelections`; omission means no trusted typed provider/model packet entries were promoted for that run entry.
+- reviewability logic falls back to legacy `evidence[]` provider/model parsing only for those omitted-entry cases.
 
 Reviewer guidance for narrative fields:
 
@@ -381,19 +398,29 @@ Current implemented special case:
 
 Provider and model evidence:
 
-- Current v1 grounding for provider/model evidence is the key-value string surface in `contractRuns[].evidence[]`.
-- `src/process-worker-backend.js` currently emits:
+- Partial Track 2 landing: current v1 now has a first-class persisted provider/model packet surface at `run_journal.contractRuns[].providerModelSelections[]` and a first-class persisted per-contract requirement surface at `run_journal.contractRuns[].providerModelEvidenceRequirement`.
+- `src/process-worker-backend.js` emits typed worker metadata as `result.providerModelSelection` only from trusted launcher metadata (`launchResult.launchSelection`) and never uses `unknown` sentinels in that typed field.
+- `src/auto-backend-runner.js` owns trusted provenance attestation for this typed metadata through `run.provenance.providerModelSelectionTrusted`; there is no generic public trust-marker helper for arbitrary runners.
+- `src/program-contract-executor.js` is the only promoter into persisted truth for both fields. It sets `contractRuns[].providerModelSelections[]` only when both are true:
+  - typed worker metadata is present (`result.providerModelSelection`)
+  - trusted provenance is true (`run.provenance.providerModelSelectionTrusted = true`)
+- `src/program-contract-executor.js` derives `contractRuns[].providerModelEvidenceRequirement` from trusted backend provenance only:
+  - `required` when at least one packet run has trusted provider/model provenance (`run.provenance.providerModelSelectionTrusted = true`)
+  - `unknown` otherwise
+- This requirement field is not derived from prompt text, role names, or compatibility `evidence[]` strings.
+- when no trusted typed provider/model packet entries are promoted for a run entry, `contractRuns[]` omits `providerModelSelections` rather than persisting an empty-array sentinel
+- Compatibility evidence strings are still emitted and persisted for traceability:
   - `requested_provider`
   - `requested_model`
   - `selected_provider`
   - `selected_model`
-- Current v1 grounding for exact changed-path capture is `contractRuns[].changedSurface`, derived by the contract executor from successful implementer runs that satisfy both conditions:
+- Those string entries are compatibility and human-trace surfaces, not the first-class persisted truth when typed packet entries exist.
+- Current v1 grounding for exact changed-path capture remains `contractRuns[].changedSurface`, derived by the contract executor from successful implementer runs that satisfy both conditions:
   - typed worker-result metadata is present (`result.changedSurfaceObservation.capture = complete`)
   - the run carries trusted changed-surface provenance attested by backend routing (`run.provenance.changedSurfaceObservationTrusted = true`)
   - trusted provenance attestation is module-private to `src/auto-backend-runner.js`; there is no generic public marker helper for arbitrary runners
-- Current limitation: persisted-artifact validators do not infer whether every success path was model-backed, and the schema has no authoritative field that records whether provider/model evidence was required for a given run.
+- Current limitation: there is still no broader backend-complete applicability model beyond what this slice can truthfully prove from trusted backend provenance. `providerModelEvidenceRequirement` is intentionally narrow (`required` or `unknown`) and does not claim full backend-wide applicability semantics.
 - Current limitation: exact changed-path capture is not universal across all runners. When a run path cannot provide trustworthy changed-path observation, `changedSurface.capture` remains `not_captured` and operator summaries must fall back to planned scope with an explicit caveat.
-- Therefore provider/model entries remain process-backend evidence conventions and review aids, not universal persisted-schema conformance gates in v1. `result.changedSurfaceObservation` is syntax-validated as runner metadata, but promotion into persisted `contractRuns[].changedSurface` requires trusted run provenance as described above.
 
 ### `build_session@v1`
 
@@ -479,7 +506,7 @@ Current build-session reviewability note:
 - `build_session.execution` is the authoritative persisted location for build-scoped execution summary before and after run-journal synchronization.
 - `build_session.execution.reviewability` now persists a narrow machine summary (`reviewable`, `not_reviewable`, or `unknown`) plus explicit reason codes.
 - this summary does not replace deeper reviewer assessment of narrative evidence quality.
-- there is still no standalone persisted `providerModelEvidenceRequired` field.
+- `build_session.execution` remains a summary-only execution surface and does not carry per-contract `providerModelEvidenceRequirement`.
 - Reviewers need the linked `run_journal` and its `contractRuns[]` evidence for detailed after-the-fact assessment; `build_session.execution` is only a synchronized summary surface.
 
 Current action-class note:
@@ -576,7 +603,7 @@ The following evidence claims must bind to the named fields below.
 | observed changed-path evidence | `run_journal.contractRuns[].changedSurface` where `capture = complete` or `partial`; when capture is unavailable, operator rendering may fall back to planned scope with explicit caveats |
 | terminal repair-required state | `run_journal.status = repair_required`, supporting `validationArtifacts[]` or repair-related `contractRuns[]`, and terminal `stopReason` text |
 | machine reviewability summary | `run_journal.reviewability`, mirrored by `persisted_run_record.reviewability` and `build_session.execution.reviewability` |
-| provider/model evidence on success | process-backend `contractRuns[].evidence[]` convention using `requested_provider`, `requested_model`, `selected_provider`, and `selected_model` |
+| provider/model evidence on success | first-class `run_journal.contractRuns[].providerModelEvidenceRequirement` decides requirement semantics when present (`required` or `unknown`), and first-class `run_journal.contractRuns[].providerModelSelections[]` carries typed packet entries when promoted; legacy fallback is process-backend `contractRuns[].evidence[]` convention only for runs where the requirement field is absent |
 | approved plan identity | `build_session.planFingerprint` and `build_session.approval.planFingerprint` |
 | approved action scope | `build_session.approval.actionClasses`, understood as the prospective plan-derived scope rather than post-run inferred evidence |
 | active policy profile | `build_session.approval.policyProfile` for approval evidence; `policyProfile` on persisted execution-bearing artifacts |
@@ -690,13 +717,19 @@ Current derivation rules are intentionally narrow:
 - non-terminal statuses are `not_reviewable` with `non_terminal_status`
 - `success` requires captured validation evidence; placeholder-only validation capture yields `not_reviewable` with `validation_artifacts_not_captured`
 - for `success` runs with successful contract entries:
-  - if provider/model key-value signals are present but selected provider/model values are incomplete, status is `not_reviewable` with `provider_model_evidence_missing`
-  - if provider/model requirement cannot be machine-decided from current signals, status is `unknown` with `provider_model_evidence_requirement_unknown`
+  - when `contractRuns[].providerModelEvidenceRequirement` is present:
+    - `required` means reviewability evaluates first-class typed `contractRuns[].providerModelSelections[]` only
+    - `required` with absent or incomplete typed selections yields `not_reviewable` with `provider_model_evidence_missing`
+    - `unknown` yields `unknown` with `provider_model_evidence_requirement_unknown`
+  - when `contractRuns[].providerModelEvidenceRequirement` is absent, checks preserve legacy behavior:
+    - prefer first-class `contractRuns[].providerModelSelections[]` when that field is present on the run entry
+    - if the typed field is absent on a run entry, fall back to legacy provider/model key-value evidence parsing from `contractRuns[].evidence[]`
+    - if provider/model requirement cannot be machine-decided from current signals, status is `unknown` with `provider_model_evidence_requirement_unknown`
 - `blocked`, `failed`, and `repair_required` require both stop reason and stop reason code for machine reviewability; missing either yields `not_reviewable` with the corresponding reason code
 
 Current limitation:
 
-- there is still no first-class persisted `providerModelEvidenceRequired` field
+- there is still no broader backend-complete applicability model beyond the narrow provenance-derived `required`/`unknown` contract-run field
 - `reviewability.status = reviewable` means current machine-checkable gates pass; it does not claim that every narrative-quality or domain-specific reviewer judgment is fully automated
 
 ## Reviewer-Facing Terminal Assessment
@@ -726,7 +759,7 @@ Current v1 behavior:
 
 - no repository-wide redaction pass runs over `stopReason`, `contractRuns[].summary`, `contractRuns[].evidence[]`, `contractRuns[].openQuestions[]`, or `validationArtifacts[]` before persistence
 - `src/process-worker-backend.js` currently copies truncated launcher `stdout` and `stderr`, plus launcher metadata and workspace paths, into worker `evidence[]`
-- `src/program-runner.js` currently persists worker `summary`, `evidence`, `openQuestions`, and normalized `changedSurface` into `run_journal.contractRuns[]` without an additional redaction pass
+- `src/program-runner.js` currently persists worker `summary`, `evidence`, `openQuestions`, normalized `changedSurface`, promoted `providerModelSelections`, and `providerModelEvidenceRequirement` into `run_journal.contractRuns[]` without an additional redaction pass
 - `src/auto-workflow.js` currently forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects
 - current process-backed prompts do not interpolate that forwarded context into prompt text, but the forwarding boundary exists at the runner and adapter surface
 
@@ -748,8 +781,8 @@ The following surfaces are intentionally not part of the current required persis
 - standalone `command_log_entry` artifact with structured command metadata
 - standalone `diff_artifact` artifact with first-class changed-file ownership checks
 - standalone `cost_record` artifact
-- first-class structured provider/model selection fields that replace current evidence-string grounding
-- first-class persisted `providerModelEvidenceRequired` or equivalent evidence-requirement field that replaces current partial inference
+- complete replacement of compatibility provider/model evidence strings with typed-only persistence
+- first-class backend-complete provider/model applicability semantics beyond the current narrow `required` / `unknown` contract-run requirement field
 - first-class structured review findings separate from `validationArtifacts[]` and `contractRuns[].evidence[]`
 - first-class persisted `operator_summary` or equivalent operator-readable evidence object with dedicated fields such as exact changed surfaces, unproven claims, approval class, recovery notes, and next step
 
