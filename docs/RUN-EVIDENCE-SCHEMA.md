@@ -35,7 +35,10 @@ A persisted artifact can be structurally valid without yet being reviewable for 
 
 Current v1 persists a narrow first-class `reviewability` object on `persisted_run_record`, embedded `run_journal`, and `build_session.execution`.
 
-Current v1 now persists a narrow first-class `providerModelEvidenceRequirement` field on `run_journal.contractRuns[]`. This requirement surface is a partial Track 2 landing and is derived only from code-owned backend provenance.
+Current v1 now persists narrow first-class per-contract fields on `run_journal.contractRuns[]` for:
+
+- `providerModelEvidenceRequirement` (partial Track 2 landing, derived from code-owned backend provenance)
+- `commandObservations[]` (typed command/tool observation surface for currently detector-backed command classes)
 
 ## Normative Terms
 
@@ -245,7 +248,7 @@ Current field provenance:
 - `program` and embedded `runJournal` are the primary stored payloads. The top-level summary fields mirror the normalized embedded journal and are not an independent source of truth.
 - `stopReasonCode` is authoritative only as the persisted normalized value. When omitted or null, current code derives it with `normalizeStopReasonCode()` from `status` plus substring heuristics over `stopReason`.
 - `validationOutcome` is authoritative only as the persisted normalized value. When omitted, current code derives it from `status`.
-- `actionClasses` is authoritative only as the persisted normalized output. Current code validates any supplied array against the enum, then recomputes the stored value from `runJournal.contractRuns[].evidence[]` role markers plus limited `stopReasonCode` mappings.
+- `actionClasses` is authoritative only as the persisted normalized output. Current code validates any supplied array against the enum, then recomputes the stored value from normalized role evidence, typed `runJournal.contractRuns[].commandObservations[]` when present, legacy command-evidence fallback when that typed field is absent, and limited `stopReasonCode` mappings.
 - `validationArtifacts`, `reviewability`, `policyProfile`, `sourceArtifactIds`, `lineageDepth`, and embedded `runJournal.artifactType` may be backfilled or normalized during persistence even when absent in the input object.
 
 Required invariants:
@@ -309,7 +312,7 @@ Current field provenance:
 - `contractRuns[].changedSurface` is normalized per contract run and defaults to `capture = not_captured` for legacy records that omit it.
 - `stopReasonCode` is stored in the persisted journal, but when it is omitted or null current code infers it from `status` plus substring heuristics over `stopReason`. It is therefore a normalized classification, not always an original event type emitted directly by the executor.
 - `validationOutcome` is stored in the persisted journal, but when omitted current code derives it from `status`.
-- `actionClasses` is recomputed by current persistence normalization from `contractRuns[].evidence[]` role markers, explicit command-evidence markers, and selected `stopReasonCode` mappings. The stored array is conservative derived evidence, not a first-class complete action log.
+- `actionClasses` is recomputed by current persistence normalization from role evidence, typed `contractRuns[].commandObservations[]` when present, legacy command-evidence markers when that typed field is absent, and selected `stopReasonCode` mappings. The stored array is conservative derived evidence, not a first-class complete action log.
 - `policyProfile`, `validationArtifacts`, `reviewability`, `sourceArtifactIds`, `lineageDepth`, and `artifactType` are normalized or backfilled at persistence time.
 
 Required invariants:
@@ -327,7 +330,8 @@ Current `actionClasses` semantics:
 
 - `run_journal.actionClasses` is currently normalized from contract-run evidence strings plus selected `stopReasonCode` mappings
 - current role-based inference primarily surfaces `read_repo`
-- explicit command-evidence markers can additionally surface `install_dependency` and `mutate_git_state`
+- typed `contractRuns[].commandObservations[]` is the first-class command/tool evidence surface for currently detector-backed command classes and can surface `execute_local_command`, `install_dependency`, and `mutate_git_state`
+- when a run entry omits the typed field, legacy command-evidence markers can still surface `install_dependency` and `mutate_git_state` for compatibility
 - current stop-reason-code inference can additionally surface `write_forbidden` and `write_protected`
 - this is intentionally conservative and may omit target-policy classes that exist in the enum but do not yet have first-class runtime detectors
 - therefore `run_journal.actionClasses` should be read as current evidence about observed or normalized behavior, not as a complete policy audit trail
@@ -353,6 +357,7 @@ Required fields:
 
 Optional fields:
 
+- `commandObservations`
 - `providerModelEvidenceRequirement`
 - `providerModelSelections`
 
@@ -365,6 +370,16 @@ Required invariants:
 - `changedSurface.capture` must be one of `complete`, `partial`, or `not_captured`.
 - `changedSurface.paths[]` must contain repo-relative normalized paths when present.
 - `changedSurface.capture = not_captured` requires `changedSurface.paths = []`.
+- `commandObservations[]`, when present, must contain typed command/tool observations with exactly:
+  - `command` (non-empty string)
+  - `source` (`worker_reported` or `process_backend_launcher`)
+  - `actionClasses` (closed subset of detector-backed command classes only)
+- `commandObservations[].actionClasses[]` must be drawn from:
+  - `execute_local_command`
+  - `install_dependency`
+  - `mutate_git_state`
+- `commandObservations[].actionClasses[]` must include `execute_local_command`.
+- `commandObservations[].actionClasses[]` may include `install_dependency` and/or `mutate_git_state` only when those classes are command-detector-backed for that same `command`.
 - `providerModelEvidenceRequirement`, when present, must be one of:
   - `required`
   - `unknown`
@@ -375,6 +390,12 @@ Required invariants:
   - `requestedModel`
   - `selectedProvider`
   - `selectedModel`
+
+Command observation omission note:
+
+- `contractRuns[]` may omit `commandObservations[]` for legacy compatibility.
+- When present, malformed values fail closed.
+- Current normalization omits empty-array `commandObservations[]` sentinels rather than persisting them.
 
 Provider/model field omission note:
 
@@ -397,6 +418,19 @@ Current implemented special case:
 - If a resume attempt targets a persisted terminal run, current implementation returns a fresh `blocked` refusal artifact with `stopReasonCode = terminal_resume_rejected`; that refusal does not continue the original run.
 
 Provider and model evidence:
+
+- Current command/tool landing: current v1 now has first-class typed `run_journal.contractRuns[].commandObservations[]` as the persisted command/tool evidence surface for currently detector-backed command classes.
+- `src/program-contract-executor.js` is the canonical promoter into persisted per-contract command observations:
+  - it prefers typed worker `run.result.commandObservations[]` when present
+  - for entries without that typed field, it can derive observations from code-owned `run.result.commandsRun[]` at the contract boundary
+  - it marks source as `process_backend_launcher` for process-backend-attested runs and `worker_reported` otherwise
+  - it does not synthesize process-backend typed observations for trusted `blocked` runs that omitted the typed field
+- `src/process-worker-backend.js` emits typed worker-result `result.commandObservations[]` with source `process_backend_launcher` from launcher-observed commands only; blocked launcher-invocation failure paths may still carry compatibility `commandsRun[]` strings while omitting typed command observations.
+- Current typed command-observation action-class support is intentionally narrow and limited to:
+  - `execute_local_command`
+  - `install_dependency`
+  - `mutate_git_state`
+- broader action-class vocabulary (for example `access_network`, `access_connector`, `access_secret`, `irreversible_side_effect`) is not claimed as detector-backed by this slice.
 
 - Partial Track 2 landing: current v1 now has a first-class persisted provider/model packet surface at `run_journal.contractRuns[].providerModelSelections[]` and a first-class persisted per-contract requirement surface at `run_journal.contractRuns[].providerModelEvidenceRequirement`.
 - `src/process-worker-backend.js` emits typed worker metadata as `result.providerModelSelection` only from trusted launcher metadata (`launchResult.launchSelection`) and never uses `unknown` sentinels in that typed field.
@@ -603,6 +637,7 @@ The following evidence claims must bind to the named fields below.
 | observed changed-path evidence | `run_journal.contractRuns[].changedSurface` where `capture = complete` or `partial`; when capture is unavailable, operator rendering may fall back to planned scope with explicit caveats |
 | terminal repair-required state | `run_journal.status = repair_required`, supporting `validationArtifacts[]` or repair-related `contractRuns[]`, and terminal `stopReason` text |
 | machine reviewability summary | `run_journal.reviewability`, mirrored by `persisted_run_record.reviewability` and `build_session.execution.reviewability` |
+| detector-backed command/tool evidence for runtime action-class normalization | first-class `run_journal.contractRuns[].commandObservations[]`; when that field is absent on a run entry, compatibility fallback is explicit command markers in `contractRuns[].evidence[]` |
 | provider/model evidence on success | first-class `run_journal.contractRuns[].providerModelEvidenceRequirement` decides requirement semantics when present (`required` or `unknown`), and first-class `run_journal.contractRuns[].providerModelSelections[]` carries typed packet entries when promoted; legacy fallback is process-backend `contractRuns[].evidence[]` convention only for runs where the requirement field is absent |
 | approved plan identity | `build_session.planFingerprint` and `build_session.approval.planFingerprint` |
 | approved action scope | `build_session.approval.actionClasses`, understood as the prospective plan-derived scope rather than post-run inferred evidence |
@@ -759,7 +794,7 @@ Current v1 behavior:
 
 - no repository-wide redaction pass runs over `stopReason`, `contractRuns[].summary`, `contractRuns[].evidence[]`, `contractRuns[].openQuestions[]`, or `validationArtifacts[]` before persistence
 - `src/process-worker-backend.js` currently copies truncated launcher `stdout` and `stderr`, plus launcher metadata and workspace paths, into worker `evidence[]`
-- `src/program-runner.js` currently persists worker `summary`, `evidence`, `openQuestions`, normalized `changedSurface`, promoted `providerModelSelections`, and `providerModelEvidenceRequirement` into `run_journal.contractRuns[]` without an additional redaction pass
+- `src/program-runner.js` currently persists worker `summary`, `evidence`, `openQuestions`, typed `commandObservations[]` when present, normalized `changedSurface`, promoted `providerModelSelections`, and `providerModelEvidenceRequirement` into `run_journal.contractRuns[]` without an additional redaction pass
 - `src/auto-workflow.js` currently forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects
 - current process-backed prompts do not interpolate that forwarded context into prompt text, but the forwarding boundary exists at the runner and adapter surface
 
@@ -778,7 +813,7 @@ Additional redaction hardening is tracked in [HARDENING-ROADMAP.md](./HARDENING-
 The following surfaces are intentionally not part of the current required persisted validation target:
 
 - standalone `approval_record` artifact
-- standalone `command_log_entry` artifact with structured command metadata
+- standalone `command_log_entry` artifact separate from embedded `run_journal.contractRuns[].commandObservations[]`
 - standalone `diff_artifact` artifact with first-class changed-file ownership checks
 - standalone `cost_record` artifact
 - complete replacement of compatibility provider/model evidence strings with typed-only persistence

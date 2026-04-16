@@ -2,6 +2,15 @@ import { buildTaskPacket, createInitialWorkflow } from "./orchestrator.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
 import { safeClone } from "./safe-clone.js";
+import { validateTaskPacket } from "./contracts.js";
+import {
+  buildChangedSurfaceContextManifest,
+  buildPacketContextManifest,
+  buildPriorResultContextManifest,
+  buildReviewResultContextManifest,
+  mergeContextManifestEntries,
+  normalizeContextManifest
+} from "./context-manifest.js";
 import {
   isTrustedChangedSurfaceObservationResult,
   isTrustedProviderModelSelectionResult
@@ -85,8 +94,17 @@ function normalizePlannedWorkflowInput(input) {
   assert(Array.isArray(input.workflow.roleSequence), "workflow.roleSequence must be an array");
   assert(Array.isArray(input.workflow.packets), "workflow.packets must be an array");
 
+  const workflow = clone(input.workflow);
+  workflow.packets = workflow.packets.map((packet, index) => {
+    try {
+      return validateTaskPacket(packet);
+    } catch (error) {
+      throw new Error(`workflow.packets[${index}] ${toErrorMessage(error)}`);
+    }
+  });
+
   return {
-    workflow: clone(input.workflow),
+    workflow,
     approvedHighRisk: parseBooleanFlag(input.approvedHighRisk, {
       flagName: "approvedHighRisk",
       defaultValue: false
@@ -119,6 +137,77 @@ function sanitizePriorResults(runs) {
   }));
 }
 
+function sanitizeReviewResult(reviewResult) {
+  if (!reviewResult) {
+    return null;
+  }
+
+  return {
+    status: reviewResult.status,
+    summary: reviewResult.summary,
+    evidence: clone(reviewResult.evidence),
+    openQuestions: clone(reviewResult.openQuestions)
+  };
+}
+
+function resolvePacketContextManifest(packet) {
+  if (
+    Object.prototype.hasOwnProperty.call(packet, "contextManifest")
+    && packet.contextManifest !== undefined
+  ) {
+    return normalizeContextManifest(packet.contextManifest, {
+      fieldName: "packet.contextManifest",
+      allowMissing: false
+    });
+  }
+
+  return buildPacketContextManifest(packet.contextFiles ?? []);
+}
+
+function sanitizeChangedSurfaceContext(runs) {
+  const changedSurfaceContext = [];
+
+  for (const run of runs) {
+    if (run?.provenance?.changedSurfaceObservationTrusted !== true) {
+      continue;
+    }
+
+    const packetId = typeof run?.packet?.id === "string" && run.packet.id.trim().length > 0
+      ? run.packet.id
+      : null;
+    const role = typeof run?.packet?.role === "string" && run.packet.role.trim().length > 0
+      ? run.packet.role
+      : null;
+    if (!packetId || !role) {
+      continue;
+    }
+
+    const observation = run?.result?.changedSurfaceObservation;
+    if (!observation || observation.capture !== "complete") {
+      continue;
+    }
+
+    const observedPaths = Array.isArray(observation.paths)
+      ? unique(
+        observation.paths
+          .filter((pathValue) => typeof pathValue === "string" && pathValue.trim().length > 0)
+          .map(normalizePath)
+      )
+      : [];
+    if (observedPaths.length === 0) {
+      continue;
+    }
+
+    changedSurfaceContext.push({
+      packetId,
+      role,
+      paths: observedPaths
+    });
+  }
+
+  return changedSurfaceContext;
+}
+
 function toErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -149,7 +238,19 @@ function createExecutionFailureResult({
   };
 }
 
-function buildRunContext({ workflow, runs, repairCount, reviewResult, baseContext = {} }) {
+function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, baseContext = {} }) {
+  const priorResults = sanitizePriorResults(runs);
+  const normalizedReviewResult = sanitizeReviewResult(reviewResult);
+  const changedSurfaceContext = sanitizeChangedSurfaceContext(runs);
+  const contextManifest = mergeContextManifestEntries(
+    resolvePacketContextManifest(packet),
+    buildPriorResultContextManifest(priorResults),
+    buildReviewResultContextManifest(normalizedReviewResult),
+    buildChangedSurfaceContextManifest(
+      changedSurfaceContext.map((entry) => `${entry.packetId}:${entry.role}`)
+    )
+  );
+
   return {
     ...clone(baseContext),
     workflowId: workflow.workflowId,
@@ -157,13 +258,10 @@ function buildRunContext({ workflow, runs, repairCount, reviewResult, baseContex
     risk: workflow.risk,
     roleSequence: clone(workflow.roleSequence),
     repairCount,
-    priorResults: sanitizePriorResults(runs),
-    reviewResult: reviewResult ? {
-      status: reviewResult.status,
-      summary: reviewResult.summary,
-      evidence: clone(reviewResult.evidence),
-      openQuestions: clone(reviewResult.openQuestions)
-    } : null
+    contextManifest,
+    priorResults,
+    reviewResult: normalizedReviewResult,
+    changedSurfaceContext
   };
 }
 
@@ -200,6 +298,7 @@ async function executePacket({
 }) {
   const context = buildRunContext({
     workflow,
+    packet,
     runs,
     repairCount,
     reviewResult,

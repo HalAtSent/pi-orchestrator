@@ -150,6 +150,14 @@ test("runner builds the expected worker request payload", async () => {
     allowedFiles: ["src/helpers.js", "src/utils.js"],
     forbiddenFiles: ["src/forbidden.js", "src/generated.js"],
     contextFiles: ["README.md", "docs/OPERATING-GUIDE.md"],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      }
+    ],
     acceptanceChecks: ["helper rename compiles", "tests pass"],
     stopConditions: ["stop on scope drift"],
     commands: ["node --check src/helpers.js", "node --test --test-isolation=none"]
@@ -167,6 +175,14 @@ test("runner builds the expected worker request payload", async () => {
   assert.deepEqual(capturedRequest.allowedFiles, ["src/helpers.js", "src/utils.js"]);
   assert.deepEqual(capturedRequest.forbiddenFiles, ["src/forbidden.js", "src/generated.js"]);
   assert.deepEqual(capturedRequest.contextFiles, ["README.md", "docs/OPERATING-GUIDE.md"]);
+  assert.deepEqual(capturedRequest.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    }
+  ]);
   assert.deepEqual(capturedRequest.acceptanceChecks, ["helper rename compiles", "tests pass"]);
   assert.deepEqual(capturedRequest.stopConditions, ["stop on scope drift"]);
   assert.deepEqual(capturedRequest.commands, ["node --check src/helpers.js", "node --test --test-isolation=none"]);

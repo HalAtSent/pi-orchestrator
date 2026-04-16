@@ -27,6 +27,14 @@ test("compiler preserves contract scope, constraints, and contract guards", () =
 
   for (const packet of compiled.workflow.packets) {
     assert.deepEqual(packet.allowedFiles, contract.scopePaths);
+    assert.deepEqual(packet.contextManifest, [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      }
+    ]);
     for (const check of contract.acceptanceChecks) {
       assert.equal(packet.acceptanceChecks.includes(check), true);
     }

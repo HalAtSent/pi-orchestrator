@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  deriveCommandObservationsFromCommands,
   derivePlannedActionClassesFromWorkflow,
   inferActionClasses,
   inferStopReasonCode,
@@ -12,6 +13,7 @@ import {
   normalizePolicyProfile,
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
+  normalizeCommandObservations,
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelection,
   normalizeProviderModelSelections,
@@ -125,6 +127,49 @@ test("run evidence infers install and git mutation classes only from explicit co
   );
 });
 
+test("run evidence derives execute/install/git classes from typed command observations", () => {
+  assert.deepEqual(
+    inferActionClasses({
+      contractRuns: [
+        {
+          evidence: ["run implementer: success"],
+          commandObservations: deriveCommandObservationsFromCommands([
+            "npm install --save-dev vitest",
+            "git commit -m \"checkpoint\""
+          ], {
+            source: "worker_reported"
+          })
+        }
+      ]
+    }),
+    ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]
+  );
+});
+
+test("run evidence treats typed command observations as authoritative when present", () => {
+  assert.deepEqual(
+    inferActionClasses({
+      contractRuns: [
+        {
+          evidence: [
+            "run implementer: success",
+            "run implementer command: npm install --save-dev vitest",
+            "run implementer command: git commit -m \"checkpoint\""
+          ],
+          commandObservations: [
+            {
+              command: "node --test --test-name-pattern helpers",
+              source: "worker_reported",
+              actionClasses: ["execute_local_command"]
+            }
+          ]
+        }
+      ]
+    }),
+    ["write_allowed", "execute_local_command"]
+  );
+});
+
 test("run evidence derives planned action classes from workflow packets without post-hoc inference", () => {
   assert.deepEqual(
     derivePlannedActionClassesFromWorkflow({
@@ -228,6 +273,53 @@ test("run evidence action class normalization does not persist unsupported calle
       ]
     }),
     ["read_repo"]
+  );
+});
+
+test("run evidence normalizes typed command observations and fails closed on malformed present values", () => {
+  assert.deepEqual(
+    normalizeCommandObservations([
+      {
+        command: "npm install --save-dev vitest",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "install_dependency"]
+      }
+    ], {
+      fieldName: "runJournalEntry.commandObservations"
+    }),
+    [
+      {
+        command: "npm install --save-dev vitest",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "install_dependency"]
+      }
+    ]
+  );
+
+  assert.throws(
+    () => normalizeCommandObservations([
+      {
+        command: "npm install --save-dev vitest",
+        source: "worker_reported",
+        actionClasses: ["install_dependency"]
+      }
+    ], {
+      fieldName: "runJournalEntry.commandObservations"
+    }),
+    /runJournalEntry\.commandObservations\[0\]\.actionClasses must include execute_local_command/u
+  );
+
+  assert.throws(
+    () => normalizeCommandObservations([
+      {
+        command: "node --test --test-name-pattern helpers",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "install_dependency"]
+      }
+    ], {
+      fieldName: "runJournalEntry.commandObservations"
+    }),
+    /runJournalEntry\.commandObservations\[0\]\.actionClasses includes install_dependency, which is not command-detector-backed for this command/u
   );
 });
 

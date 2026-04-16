@@ -564,6 +564,9 @@ async function runProgramFromState(program, {
       status: result.status,
       summary: result.summary,
       evidence: result.evidence,
+      ...(Array.isArray(result.commandObservations) && result.commandObservations.length > 0
+        ? { commandObservations: result.commandObservations }
+        : {}),
       providerModelEvidenceRequirement: result.providerModelEvidenceRequirement,
       openQuestions: result.openQuestions,
       changedSurface: result.changedSurface,

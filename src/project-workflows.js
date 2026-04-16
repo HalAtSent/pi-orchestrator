@@ -476,6 +476,7 @@ function modulesFor(projectType) {
         purpose: "Owns planning, policy, orchestration, and integration decisions.",
         paths: [
           "src/contracts.js",
+          "src/context-manifest.js",
           "src/doctrine-evaluation.js",
           "src/boolean-flags.js",
           "src/helpers.js",

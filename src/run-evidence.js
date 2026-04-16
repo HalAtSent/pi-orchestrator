@@ -87,6 +87,15 @@ export const PROVIDER_MODEL_EVIDENCE_REQUIREMENTS = Object.freeze([
   "required",
   "unknown"
 ]);
+export const COMMAND_OBSERVATION_SOURCES = Object.freeze([
+  "worker_reported",
+  "process_backend_launcher"
+]);
+export const COMMAND_OBSERVATION_ACTION_CLASSES = Object.freeze([
+  "execute_local_command",
+  "install_dependency",
+  "mutate_git_state"
+]);
 
 const ROLE_TO_ACTION_CLASSES = Object.freeze({
   explorer: ["read_repo"],
@@ -184,6 +193,10 @@ function hasOwnProviderModelSelections(value) {
 
 function hasOwnProviderModelEvidenceRequirement(value) {
   return isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, "providerModelEvidenceRequirement");
+}
+
+function hasOwnCommandObservations(value) {
+  return isPlainObject(value) && Object.prototype.hasOwnProperty.call(value, "commandObservations");
 }
 
 function normalizeProviderModelFieldValue(value, { fieldName } = {}) {
@@ -693,6 +706,134 @@ export function inferActionClassesFromCommands(commandsInput) {
   return ACTION_CLASSES.filter((actionClass) => inferred.has(actionClass));
 }
 
+function deriveCommandObservationActionClassesFromCommand(command) {
+  const inferred = new Set([
+    "execute_local_command",
+    ...inferActionClassesFromCommands([command])
+  ]);
+  return COMMAND_OBSERVATION_ACTION_CLASSES.filter((actionClass) => inferred.has(actionClass));
+}
+
+function normalizeCommandObservationActionClasses(value, { fieldName = "commandObservation.actionClasses" } = {}) {
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  const seen = new Set();
+  for (let index = 0; index < value.length; index += 1) {
+    const actionClass = normalizeString(value[index]);
+    if (actionClass.length === 0) {
+      throw new Error(`${fieldName}[${index}] must be a non-empty string`);
+    }
+    if (!COMMAND_OBSERVATION_ACTION_CLASSES.includes(actionClass)) {
+      throw new Error(
+        `${fieldName}[${index}] must be one of: ${COMMAND_OBSERVATION_ACTION_CLASSES.join(", ")}`
+      );
+    }
+    seen.add(actionClass);
+  }
+
+  if (seen.size === 0) {
+    throw new Error(`${fieldName} must include at least one action class`);
+  }
+  if (!seen.has("execute_local_command")) {
+    throw new Error(`${fieldName} must include execute_local_command`);
+  }
+
+  return COMMAND_OBSERVATION_ACTION_CLASSES.filter((actionClass) => seen.has(actionClass));
+}
+
+function normalizeCommandObservationSource(value, { fieldName = "commandObservation.source" } = {}) {
+  const source = normalizeString(value);
+  if (source.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!COMMAND_OBSERVATION_SOURCES.includes(source)) {
+    throw new Error(`${fieldName} must be one of: ${COMMAND_OBSERVATION_SOURCES.join(", ")}`);
+  }
+  return source;
+}
+
+function normalizeCommandObservationEntry(value, {
+  fieldName = "commandObservations[]"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const command = normalizeString(value.command);
+  if (command.length === 0) {
+    throw new Error(`${fieldName}.command must be a non-empty string`);
+  }
+
+  const source = normalizeCommandObservationSource(value.source, {
+    fieldName: `${fieldName}.source`
+  });
+  const actionClasses = normalizeCommandObservationActionClasses(value.actionClasses, {
+    fieldName: `${fieldName}.actionClasses`
+  });
+
+  const expectedActionClasses = new Set(deriveCommandObservationActionClassesFromCommand(command));
+  for (const actionClass of actionClasses) {
+    if (!expectedActionClasses.has(actionClass)) {
+      throw new Error(
+        `${fieldName}.actionClasses includes ${actionClass}, which is not command-detector-backed for this command`
+      );
+    }
+  }
+
+  return {
+    command,
+    source,
+    actionClasses
+  };
+}
+
+export function normalizeCommandObservations(value, {
+  fieldName = "commandObservations",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  return value.map((entry, index) => normalizeCommandObservationEntry(entry, {
+    fieldName: `${fieldName}[${index}]`
+  }));
+}
+
+export function deriveCommandObservationsFromCommands(commandsInput, {
+  source = "worker_reported",
+  fieldName = "commandObservations"
+} = {}) {
+  const normalizedSource = normalizeCommandObservationSource(source, {
+    fieldName: `${fieldName}.source`
+  });
+  const commands = Array.isArray(commandsInput) ? commandsInput : [];
+  const observations = [];
+
+  for (const rawCommand of commands) {
+    const command = normalizeString(rawCommand);
+    if (command.length === 0) {
+      continue;
+    }
+    observations.push({
+      command,
+      source: normalizedSource,
+      actionClasses: deriveCommandObservationActionClassesFromCommand(command)
+    });
+  }
+
+  return observations;
+}
+
 function normalizeRepoRelativePath(value, { fieldName = "path" } = {}) {
   const raw = normalizeString(value);
   if (raw.length === 0) {
@@ -971,12 +1112,26 @@ export function inferActionClasses({ contractRuns = [], stopReasonCode = null } 
             inferred.add(actionClass);
           }
         }
+      }
 
-        const commandActionClasses = inferActionClassesFromCommands(
-          extractCommandsFromEvidenceEntry(evidenceEntry)
-        );
-        for (const actionClass of commandActionClasses) {
-          inferred.add(actionClass);
+      if (hasOwnCommandObservations(run)) {
+        const commandObservations = normalizeCommandObservations(run.commandObservations, {
+          fieldName: "contractRuns[].commandObservations",
+          allowMissing: false
+        });
+        for (const observation of commandObservations) {
+          for (const actionClass of observation.actionClasses) {
+            inferred.add(actionClass);
+          }
+        }
+      } else {
+        for (const evidenceEntry of evidenceEntries) {
+          const commandActionClasses = inferActionClassesFromCommands(
+            extractCommandsFromEvidenceEntry(evidenceEntry)
+          );
+          for (const actionClass of commandActionClasses) {
+            inferred.add(actionClass);
+          }
         }
       }
     }

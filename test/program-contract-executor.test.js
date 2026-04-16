@@ -82,9 +82,73 @@ test("default program contract executor can succeed with a scripted worker runne
     capture: "not_captured",
     paths: []
   });
+  assert.deepEqual(result.commandObservations, [
+    {
+      command: "node --test --test-name-pattern helpers",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command"]
+    },
+    {
+      command: "node --test --test-name-pattern helpers",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command"]
+    }
+  ]);
   assert.equal(result.providerModelEvidenceRequirement, "unknown");
   assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(runner.getPendingStepCount(), 0);
+});
+
+test("program contract executor derives detector-backed command observations from worker-reported commands", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Installed and committed scoped dependencies.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: [
+          "npm install --save-dev vitest",
+          "git commit -m \"checkpoint\""
+        ],
+        evidence: ["Implementer update complete."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification checks passed.",
+        changedFiles: [],
+        commandsRun: ["node --test --test-name-pattern helpers"],
+        evidence: ["Verification command passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.commandObservations, [
+    {
+      command: "npm install --save-dev vitest",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command", "install_dependency"]
+    },
+    {
+      command: "git commit -m \"checkpoint\"",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command", "mutate_git_state"]
+    },
+    {
+      command: "node --test --test-name-pattern helpers",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command"]
+    }
+  ]);
 });
 
 test("program contract executor does not promote exact changed-surface evidence from untrusted typed runtime observation", async () => {
@@ -191,6 +255,18 @@ test("program contract executor promotes exact changed-surface evidence only for
     capture: "complete",
     paths: ["src/helpers.js"]
   });
+  assert.deepEqual(result.commandObservations, [
+    {
+      command: "node --check src/helpers.js",
+      source: "process_backend_launcher",
+      actionClasses: ["execute_local_command"]
+    },
+    {
+      command: "node --test --test-name-pattern helpers",
+      source: "process_backend_launcher",
+      actionClasses: ["execute_local_command"]
+    }
+  ]);
   assert.equal(result.providerModelEvidenceRequirement, "required");
   assert.deepEqual(result.providerModelSelections, [
     {
@@ -256,6 +332,40 @@ test("program contract executor promotes trusted provider/model selections from 
       selectedModel: "gpt-5.3-codex"
     }
   ]);
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor does not synthesize process-backend typed command observations for blocked trusted launcher failures", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "blocked",
+        summary: "process worker blocked: launcher invocation failed (args builder exploded)",
+        changedFiles: [],
+        commandsRun: ["\"\""],
+        evidence: ["launch_error: args builder exploded"],
+        openQuestions: ["Check local permissions, Pi resolution, and worker launcher availability."]
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "blocked");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "commandObservations"), false);
+  assert.equal(
+    result.evidence.includes("run implementer command: \"\""),
+    true
+  );
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });

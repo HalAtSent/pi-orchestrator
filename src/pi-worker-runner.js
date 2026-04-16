@@ -55,6 +55,9 @@ function normalizePacket(packet) {
   normalized.allowedFiles = normalizeFileList(normalized.allowedFiles);
   normalized.forbiddenFiles = normalizeFileList(normalized.forbiddenFiles);
   normalized.contextFiles = normalizeFileList(normalized.contextFiles ?? []);
+  normalized.contextManifest = Array.isArray(normalized.contextManifest)
+    ? clone(normalized.contextManifest)
+    : [];
   normalized.commands = Array.isArray(normalized.commands) ? [...normalized.commands] : [];
   return normalized;
 }
@@ -132,6 +135,7 @@ function buildWorkerRequest({ packet, context, roleProfile, runId }) {
     allowedFiles: [...packet.allowedFiles],
     forbiddenFiles: [...packet.forbiddenFiles],
     contextFiles: [...packet.contextFiles],
+    contextManifest: clone(packet.contextManifest),
     acceptanceChecks: [...packet.acceptanceChecks],
     stopConditions: [...packet.stopConditions],
     commands: [...packet.commands],

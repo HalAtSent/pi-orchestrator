@@ -672,6 +672,59 @@ test("run store load rejects malformed present provider/model evidence requireme
   });
 });
 
+test("run store load rejects malformed present command observations", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            commandObservations: [
+              {
+                command: "npm install --save-dev vitest",
+                source: "bad_source",
+                actionClasses: ["execute_local_command", "install_dependency"]
+              }
+            ],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      },
+      completedContractIds: [program.contracts[0].id],
+      pendingContractIds: program.contracts.slice(1).map((contract) => contract.id),
+      lastStatus: "blocked",
+      stopReason: "waiting for dependency",
+      stopReasonCode: "missing_dependency",
+      validationOutcome: "blocked",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.commandObservations\[0\]\.source must be one of: worker_reported, process_backend_launcher/u
+    );
+  });
+});
+
 test("run store load rejects present envelope type or version drift", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();
@@ -870,6 +923,60 @@ test("run store infers install and git mutation classes from explicit command ev
     const loaded = await runStore.loadRun(program.id);
     assert.deepEqual(loaded.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
     assert.deepEqual(loaded.runJournal.actionClasses, ["write_allowed", "install_dependency", "mutate_git_state"]);
+  });
+});
+
+test("run store persists typed command observations and infers action classes from the typed surface", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const commandObservations = [
+      {
+        command: "npm install --save-dev vitest",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "install_dependency"]
+      },
+      {
+        command: "git commit -m \"checkpoint\"",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "mutate_git_state"]
+      }
+    ];
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [
+              "run implementer: success",
+              "run implementer command: node --test --test-name-pattern helpers"
+            ],
+            commandObservations,
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    assert.deepEqual(saved.runJournal.contractRuns[0].commandObservations, commandObservations);
+    assert.deepEqual(saved.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
+    assert.deepEqual(saved.runJournal.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.deepEqual(loaded.runJournal.contractRuns[0].commandObservations, commandObservations);
+    assert.deepEqual(loaded.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
+    assert.deepEqual(loaded.runJournal.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
   });
 });
 

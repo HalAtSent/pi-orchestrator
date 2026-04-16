@@ -1,7 +1,9 @@
 import {
   normalizeChangedSurfaceObservation,
+  normalizeCommandObservations,
   normalizeProviderModelSelection
 } from "./run-evidence.js";
+import { normalizeContextManifest } from "./context-manifest.js";
 
 export const ROLE_TYPES = Object.freeze([
   "explorer",
@@ -59,6 +61,15 @@ export function validateTaskPacket(packet) {
   assertStringArray("packet.acceptanceChecks", packet.acceptanceChecks);
   assertStringArray("packet.stopConditions", packet.stopConditions);
   assertOptionalStringArray("packet.contextFiles", packet.contextFiles);
+  if (
+    Object.prototype.hasOwnProperty.call(packet, "contextManifest")
+    && packet.contextManifest !== undefined
+  ) {
+    packet.contextManifest = normalizeContextManifest(packet.contextManifest, {
+      fieldName: "packet.contextManifest",
+      allowMissing: false
+    });
+  }
   assertOptionalStringArray("packet.commands", packet.commands);
   if (packet.parentTaskId !== undefined) {
     assertString("packet.parentTaskId", packet.parentTaskId);
@@ -74,6 +85,21 @@ export function validateWorkerResult(result) {
   assertStringArray("result.commandsRun", result.commandsRun);
   assertStringArray("result.evidence", result.evidence);
   assertStringArray("result.openQuestions", result.openQuestions);
+  try {
+    if (Object.prototype.hasOwnProperty.call(result, "commandObservations")) {
+      const normalizedCommandObservations = normalizeCommandObservations(result.commandObservations, {
+        fieldName: "result.commandObservations",
+        allowMissing: false
+      });
+      if (normalizedCommandObservations.length === 0) {
+        delete result.commandObservations;
+      } else {
+        result.commandObservations = normalizedCommandObservations;
+      }
+    }
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
   try {
     // This field is syntax-validated for runner interoperability.
     // Promotion into persisted changed-surface evidence is gated elsewhere by trusted runner provenance.

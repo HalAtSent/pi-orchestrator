@@ -61,6 +61,7 @@ test("blueprint freezes repository layout and execution profile", () => {
   );
   assert.deepEqual(modulePathsById["control-plane"], [
     "src/contracts.js",
+    "src/context-manifest.js",
     "src/doctrine-evaluation.js",
     "src/boolean-flags.js",
     "src/helpers.js",

@@ -18,6 +18,7 @@ The design intent is:
 - use governed skills for reusable procedure
 - improve context construction, tool and result contracts, and evidence quality before adding orchestration complexity
 - isolate worker context aggressively
+- treat context-selection provenance as a typed execution-boundary surface (`contextManifest[]`) instead of ad hoc carry-forward only
 - trade model cost against task complexity
 - stop cleanly when policy, scope, or evidence breaks down
 
@@ -30,6 +31,7 @@ Current policy-surface note:
 - the live enforcement surface is narrower than the full action-class vocabulary used in the contract and evidence docs
 - current runtime gating is primarily high-risk approval, allowlist and forbidden-path checks, protected-path rejection in declared scope, and pre-execution approval-scope checks against the current stored plan
 - persisted `actionClasses` should be read as plan-derived scope or conservative evidence, depending on the field, not as a complete detector-backed policy trace
+- current post-run command/tool evidence is first-class typed `run_journal.contractRuns[].commandObservations[]` for the detector-backed command subset (`execute_local_command`, `install_dependency`, `mutate_git_state`), with legacy command-string fallback only when that typed field is absent
 
 The harness is meant to get safer and more useful through better context assembly, tool and result boundaries, evidence quality, and fail-closed enforcement, not through multiplying lifecycle or routing complexity.
 
@@ -203,12 +205,20 @@ Current state:
 - uses the Pi-backed runner by default when the host exposes worker execution
 - cleanly blocks if the live Pi runtime surface is missing or unsafe
 - surfaces selected provider/model information in the workflow summary when process-backed execution runs
+- persists typed command observations from process-backed launcher commands
+- emits typed worker context-selection manifests (`contextManifest[]`) that explain why context entered worker scope (explicit context files, prior runs, repair review, trusted changed-surface carry-forward)
+
+Current context-selection note:
+
+- `contextManifest[]` is structural provenance instrumentation, not a retrieval engine
+- entries carry stable references and typed reasons; they do not embed full file contents or prior-result payloads
+- stale/conflict scoring, broader retrieval quality heuristics, and repository-wide redaction hardening are tracked separately in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md)
 
 Current action-class honesty:
 
 - high-risk approval is driven by workflow risk and `humanGate`, not by a full live per-class detector matrix
 - current plan-derived approval scope tracks the classes the stored plan can derive today, including command-signal detection for `install_dependency` and `mutate_git_state`
-- current post-run `actionClasses` evidence is conservative and may omit target-policy classes that are listed in the schema vocabulary
+- current post-run `actionClasses` evidence is conservative; it now prefers typed command observations for `execute_local_command`, `install_dependency`, and `mutate_git_state`, and may still omit target-policy classes that are listed in the schema vocabulary but are not detector-backed
 
 ## Current Runtime Status
 

@@ -206,11 +206,21 @@ test("runExecutionProgram persists required provider/model evidence requirement 
     assert.equal(journal.status, "success");
     for (const entry of journal.contractRuns) {
       assert.equal(entry.providerModelEvidenceRequirement, "required");
+      assert.equal(Array.isArray(entry.commandObservations), true);
+      assert.equal(entry.commandObservations.length > 0, true);
+      for (const observation of entry.commandObservations) {
+        assert.equal(observation.source, "process_backend_launcher");
+      }
     }
 
     const persisted = await runStore.loadRun(program.id);
     for (const entry of persisted.runJournal.contractRuns) {
       assert.equal(entry.providerModelEvidenceRequirement, "required");
+      assert.equal(Array.isArray(entry.commandObservations), true);
+      assert.equal(entry.commandObservations.length > 0, true);
+      for (const observation of entry.commandObservations) {
+        assert.equal(observation.source, "process_backend_launcher");
+      }
     }
   });
 });
@@ -465,6 +475,56 @@ test("runExecutionProgram fails closed when contract executor returns malformed 
     const persisted = await runStore.loadRun(program.id);
     assert.equal(persisted.lastStatus, "blocked");
     assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram fails closed when contract executor returns malformed command observations", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed command observations payload.",
+            evidence: [],
+            commandObservations: [
+              {
+                command: "npm install --save-dev vitest",
+                source: "worker_reported",
+                actionClasses: ["access_network"]
+              }
+            ],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(
+      journal.stopReason,
+      /contractExecutionResult\.commandObservations\[0\]\.actionClasses\[0\] must be one of: execute_local_command, install_dependency, mutate_git_state/i
+    );
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
   });
 });
 

@@ -200,6 +200,20 @@ Landing condition:
 
 ### 3. Context Construction And Retrieval Quality
 
+Partial landing already shipped:
+
+- worker-facing context selection now has a first-class typed
+  `contextManifest[]` surface at the workflow packet and run-context boundary
+- manifest entries are currently constrained to structural provenance fields
+  (`kind`, `source`, `reference`, `reason`) with closed enums rather than
+  free-form narration
+- current deterministic builders cover explicit packet `contextFiles`,
+  prior-run carry-forward, repair-loop `reviewResult`, and trusted
+  changed-surface carry-forward when selected
+- this is context-selection instrumentation only; the manifest stores stable
+  locators, not full file content or prior-output payloads, and it is not yet a
+  complete retrieval-quality engine
+
 Current gap:
 
 - the harness already bounds scope, but context assembly, retrieval, pruning,
@@ -225,12 +239,27 @@ Landing condition:
 
 ### 4. Tool And Result Contract Audit And Cleanup
 
+Partial landing already shipped:
+
+- worker results and persisted `run_journal.contractRuns[]` now support a
+  first-class typed `commandObservations[]` surface
+- current typed command-observation support is intentionally narrow and limited
+  to the detector-backed command classes:
+  - `execute_local_command`
+  - `install_dependency`
+  - `mutate_git_state`
+- post-run action-class normalization now treats typed command observations as
+  primary for that supported subset, with legacy command-evidence fallback only
+  when the typed field is absent
+
 Current gap:
 
 - some tool boundaries and worker-result surfaces still mix typed fields with
   narrative convention
 - the persisted action-class vocabulary is broader than the detector-backed live
   contract surface
+- command-observation coverage is still not complete across the broader action
+  vocabulary and should not be read as complete tool-audit closure
 - several trust-boundary crossings are described, but not yet audited as one
   coherent contract set
 

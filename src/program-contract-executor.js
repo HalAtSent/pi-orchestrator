@@ -4,12 +4,15 @@ import { compileExecutionContract } from "./program-compiler.js";
 import {
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
+  deriveCommandObservationsFromCommands,
   normalizeProviderModelSelection
 } from "./run-evidence.js";
 
 const IMPLEMENTER_ROLE = "implementer";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED = "required";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN = "unknown";
+const COMMAND_OBSERVATION_SOURCE_WORKER_REPORTED = "worker_reported";
+const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
 
 function assert(condition, message) {
   if (!condition) {
@@ -102,6 +105,58 @@ function getObservedProviderModelSelection(runResult) {
   }
 }
 
+function deriveCommandObservationSource(run) {
+  if (
+    run?.provenance?.providerModelSelectionTrusted === true
+    || run?.provenance?.changedSurfaceObservationTrusted === true
+  ) {
+    return COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER;
+  }
+  return COMMAND_OBSERVATION_SOURCE_WORKER_REPORTED;
+}
+
+function hasOwnCommandObservations(runResult) {
+  return Boolean(runResult)
+    && typeof runResult === "object"
+    && !Array.isArray(runResult)
+    && Object.prototype.hasOwnProperty.call(runResult, "commandObservations");
+}
+
+function deriveCommandObservations(execution) {
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+  const observations = [];
+
+  for (const run of runs) {
+    const runResult = run?.result;
+    const source = deriveCommandObservationSource(run);
+    const status = typeof runResult?.status === "string" ? runResult.status : "";
+
+    if (hasOwnCommandObservations(runResult)) {
+      const typedObservations = Array.isArray(runResult?.commandObservations)
+        ? runResult.commandObservations
+        : [];
+      observations.push(...typedObservations);
+      continue;
+    }
+
+    if (source === COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER && status === "blocked") {
+      continue;
+    }
+
+    const commandsRun = Array.isArray(runResult?.commandsRun) ? runResult.commandsRun : [];
+    if (commandsRun.length === 0) {
+      continue;
+    }
+
+    observations.push(...deriveCommandObservationsFromCommands(commandsRun, {
+      source,
+      fieldName: "contractExecutionResult.commandObservations"
+    }));
+  }
+
+  return observations;
+}
+
 function deriveChangedSurface(execution) {
   const runs = Array.isArray(execution?.runs) ? execution.runs : [];
   const successfulImplementerRuns = runs.filter((run) => (
@@ -191,6 +246,7 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
   const evidence = createExecutionEvidence(compiledPlan, execution);
   const openQuestions = createExecutionOpenQuestions(execution);
   const changedSurface = deriveChangedSurface(execution);
+  const commandObservations = deriveCommandObservations(execution);
   const providerModelSelections = deriveProviderModelSelections(execution);
   const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(execution);
   const summary = status === "success"
@@ -206,6 +262,9 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     openQuestions
   };
 
+  if (commandObservations.length > 0) {
+    contractResult.commandObservations = commandObservations;
+  }
   if (providerModelSelections.length > 0) {
     contractResult.providerModelSelections = providerModelSelections;
   }

@@ -12,6 +12,14 @@ function createWorkerRequest(role = "implementer", overrides = {}) {
     allowedFiles: ["src/helpers.js"],
     forbiddenFiles: ["src/forbidden.js"],
     contextFiles: ["README.md"],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      }
+    ],
     acceptanceChecks: ["Changes compile and stay in scope."],
     stopConditions: ["Stop when scope drift is required."],
     commands: ["node --check src/helpers.js"],
@@ -66,6 +74,14 @@ test("adapter forwards bounded worker request fields to the runtime host", async
   assert.deepEqual(calls[0].request.allowedFiles, ["src/helpers.js"]);
   assert.deepEqual(calls[0].request.forbiddenFiles, ["src/forbidden.js"]);
   assert.deepEqual(calls[0].request.contextFiles, ["README.md"]);
+  assert.deepEqual(calls[0].request.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    }
+  ]);
   assert.deepEqual(calls[0].request.acceptanceChecks, ["Changes compile and stay in scope."]);
   assert.deepEqual(calls[0].request.stopConditions, ["Stop when scope drift is required."]);
   assert.deepEqual(calls[0].request.commands, ["node --check src/helpers.js"]);

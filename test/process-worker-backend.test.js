@@ -139,6 +139,77 @@ test("process backend blocks cleanly for malformed packets", async () => {
   assert.equal(launchCount, 0);
 });
 
+test("process backend does not emit typed command observations for args-builder launcher failures", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-args-builder-failure-"));
+
+  try {
+    const launcher = createPiCliLauncher({
+      argsBuilder: async () => {
+        throw new Error("args builder exploded before command execution");
+      },
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: [],
+        launcher: "test_launcher",
+        launcherPath: process.execPath,
+        piScriptPath: __filename,
+        piPackageRoot: dirname(__filename),
+        resolutionMessage: "test resolution"
+      })
+    });
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "args-builder-failure"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /launcher invocation failed/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(result, "commandObservations"), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend does not emit typed command observations when runCommandFn throws before execution", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-pre-exec-failure-"));
+
+  try {
+    const launcher = createPiCliLauncher({
+      argsBuilder: async ({ prompt }) => ["-p", "--no-session", "--thinking", "off", prompt],
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: [],
+        launcher: "test_launcher",
+        launcherPath: process.execPath,
+        piScriptPath: __filename,
+        piPackageRoot: dirname(__filename),
+        resolutionMessage: "test resolution"
+      }),
+      runCommandFn: async () => {
+        throw new Error("pre-exec launcher failure");
+      }
+    });
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "pre-exec-launcher-failure"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /launcher invocation failed/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(result, "commandObservations"), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend maps launcher output into a contract-compatible worker result", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-contract-"));
 
@@ -166,6 +237,13 @@ test("process backend maps launcher output into a contract-compatible worker res
     assert.equal(result.status, "success");
     assert.deepEqual(result.changedFiles, ["test/fixtures/process-worker-output.md"]);
     assert.deepEqual(result.commandsRun, ["fake-worker --write-output"]);
+    assert.deepEqual(result.commandObservations, [
+      {
+        command: "fake-worker --write-output",
+        source: "process_backend_launcher",
+        actionClasses: ["execute_local_command"]
+      }
+    ]);
     assert.equal(result.openQuestions.length, 0);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });

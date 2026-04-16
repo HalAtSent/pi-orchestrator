@@ -21,6 +21,16 @@ function validTaskPacket(overrides = {}) {
   };
 }
 
+function validContextManifestEntry(overrides = {}) {
+  return {
+    kind: "context_file",
+    source: "packet_context_files",
+    reference: "README.md",
+    reason: "explicit_request",
+    ...overrides
+  };
+}
+
 function validWorkerResult(overrides = {}) {
   return {
     status: "success",
@@ -58,6 +68,54 @@ test("createTaskPacket rejects whitespace-only entries in forbiddenFiles and com
   );
 });
 
+test("createTaskPacket rejects malformed contextManifest entries", () => {
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextManifest: [
+        validContextManifestEntry({
+          reference: "   "
+        })
+      ]
+    })),
+    /packet\.contextManifest\[0\]\.reference must be a non-empty string/u
+  );
+});
+
+test("createTaskPacket rejects unknown contextManifest enum values", () => {
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextManifest: [
+        validContextManifestEntry({
+          kind: "context_blob"
+        })
+      ]
+    })),
+    /packet\.contextManifest\[0\]\.kind must be one of: context_file, prior_result, review_result, changed_surface/u
+  );
+
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextManifest: [
+        validContextManifestEntry({
+          source: "packet_inputs"
+        })
+      ]
+    })),
+    /packet\.contextManifest\[0\]\.source must be one of: packet_context_files, workflow_prior_runs, repair_review, trusted_changed_surface/u
+  );
+
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextManifest: [
+        validContextManifestEntry({
+          reason: "operator_hint"
+        })
+      ]
+    })),
+    /packet\.contextManifest\[0\]\.reason must be one of: explicit_request, repair_context, execution_history, changed_scope_carry_forward/u
+  );
+});
+
 test("createWorkerResult rejects empty evidence and openQuestions entries", () => {
   assert.throws(
     () => createWorkerResult(validWorkerResult({
@@ -86,6 +144,21 @@ test("createWorkerResult rejects malformed changedSurfaceObservation payloads", 
   );
 });
 
+test("createWorkerResult rejects malformed commandObservations payloads", () => {
+  assert.throws(
+    () => createWorkerResult(validWorkerResult({
+      commandObservations: [
+        {
+          command: "npm install",
+          source: "untrusted_source",
+          actionClasses: ["execute_local_command", "install_dependency"]
+        }
+      ]
+    })),
+    /result\.commandObservations\[0\]\.source must be one of: worker_reported, process_backend_launcher/u
+  );
+});
+
 test("createWorkerResult rejects malformed providerModelSelection payloads", () => {
   assert.throws(
     () => createWorkerResult(validWorkerResult({
@@ -104,10 +177,21 @@ test("existing valid payloads still pass and optional arrays can be omitted", ()
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket()));
   assert.doesNotThrow(() => createTaskPacket(validTaskPacket({
     contextFiles: undefined,
+    contextManifest: undefined,
     commands: undefined
+  })));
+  assert.doesNotThrow(() => createTaskPacket(validTaskPacket({
+    contextManifest: [validContextManifestEntry()]
   })));
   assert.doesNotThrow(() => createWorkerResult(validWorkerResult()));
   assert.doesNotThrow(() => createWorkerResult(validWorkerResult({
+    commandObservations: [
+      {
+        command: "npm install --save-dev vitest",
+        source: "worker_reported",
+        actionClasses: ["execute_local_command", "install_dependency"]
+      }
+    ],
     providerModelSelection: {
       requestedProvider: "openai-codex",
       requestedModel: "gpt-5.3-codex",

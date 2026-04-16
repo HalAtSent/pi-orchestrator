@@ -1,5 +1,6 @@
 import { createWorkerResult } from "./contracts.js";
 import { resolvePiWorkerInvoker } from "./pi-runtime-diagnostics.js";
+import { normalizeContextManifest } from "./context-manifest.js";
 
 const DEFAULT_SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const SUPPORTED_RESULT_STATUSES = new Set(["success", "blocked", "failed", "repair_required"]);
@@ -118,6 +119,10 @@ function normalizeWorkerRequest(requestInput) {
     allowedFiles: normalizeFileList(requestInput.allowedFiles),
     forbiddenFiles: normalizeFileList(requestInput.forbiddenFiles),
     contextFiles: normalizeFileList(requestInput.contextFiles),
+    contextManifest: normalizeContextManifest(requestInput.contextManifest, {
+      fieldName: "request.contextManifest",
+      allowMissing: true
+    }) ?? [],
     acceptanceChecks: normalizeStringArray(requestInput.acceptanceChecks),
     stopConditions: normalizeStringArray(requestInput.stopConditions),
     commands: normalizeStringArray(requestInput.commands),

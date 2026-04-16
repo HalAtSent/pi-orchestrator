@@ -7,6 +7,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { createTaskPacket, createWorkerResult, RESULT_STATUSES } from "./contracts.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import { deriveCommandObservationsFromCommands } from "./run-evidence.js";
 import {
   createCachedProcessModelProbe,
   PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES,
@@ -23,6 +24,7 @@ const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
 const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
 const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
 const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
+const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
 const PROCESS_PROVIDER_OPENAI_CODEX = PROCESS_MODEL_PROBE_DEFAULT_PROVIDER;
 const PROCESS_MODEL_FALLBACK = "gpt-5.4";
 const MODEL_SELECTION_DIRECT = "direct";
@@ -383,16 +385,41 @@ function formatCommand(command, args = []) {
   return [command, ...args].map((part) => quoteCommandPart(part)).join(" ");
 }
 
+function deriveProcessBackendCommandObservations(commandsRun) {
+  return deriveCommandObservationsFromCommands(commandsRun, {
+    source: COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER,
+    fieldName: "result.commandObservations"
+  });
+}
+
+function resolveObservedCommandsForTypedObservations({
+  commandsRun = [],
+  observedCommandsRun
+} = {}) {
+  if (observedCommandsRun === undefined || observedCommandsRun === null) {
+    return normalizeStringArray(commandsRun);
+  }
+  return normalizeStringArray(observedCommandsRun);
+}
+
 function createBlockedResult(summary, {
   commandsRun = [],
+  observedCommandsRun,
   evidence = [],
   openQuestions = []
 } = {}) {
+  const normalizedCommandsRun = normalizeStringArray(commandsRun);
+  const commandObservationCommands = resolveObservedCommandsForTypedObservations({
+    commandsRun: normalizedCommandsRun,
+    observedCommandsRun
+  });
+  const commandObservations = deriveProcessBackendCommandObservations(commandObservationCommands);
   return createWorkerResult({
     status: "blocked",
     summary,
     changedFiles: [],
-    commandsRun: normalizeStringArray(commandsRun),
+    commandsRun: normalizedCommandsRun,
+    ...(commandObservations.length > 0 ? { commandObservations } : {}),
     evidence: normalizeStringArray(evidence),
     openQuestions: normalizeStringArray(openQuestions)
   });
@@ -401,15 +428,23 @@ function createBlockedResult(summary, {
 function createFailedResult(summary, {
   changedFiles = [],
   commandsRun = [],
+  observedCommandsRun,
   evidence = [],
   openQuestions = [],
   providerModelSelection = null
 } = {}) {
+  const normalizedCommandsRun = normalizeStringArray(commandsRun);
+  const commandObservationCommands = resolveObservedCommandsForTypedObservations({
+    commandsRun: normalizedCommandsRun,
+    observedCommandsRun
+  });
+  const commandObservations = deriveProcessBackendCommandObservations(commandObservationCommands);
   return createWorkerResult({
     status: "failed",
     summary,
     changedFiles: normalizeStringArray(changedFiles),
-    commandsRun: normalizeStringArray(commandsRun),
+    commandsRun: normalizedCommandsRun,
+    ...(commandObservations.length > 0 ? { commandObservations } : {}),
     evidence: normalizeStringArray(evidence),
     openQuestions: normalizeStringArray(openQuestions),
     providerModelSelection
@@ -419,15 +454,23 @@ function createFailedResult(summary, {
 function createSuccessResult(summary, {
   changedFiles = [],
   commandsRun = [],
+  observedCommandsRun,
   evidence = [],
   changedSurfaceObservation = null,
   providerModelSelection = null
 } = {}) {
+  const normalizedCommandsRun = normalizeStringArray(commandsRun);
+  const commandObservationCommands = resolveObservedCommandsForTypedObservations({
+    commandsRun: normalizedCommandsRun,
+    observedCommandsRun
+  });
+  const commandObservations = deriveProcessBackendCommandObservations(commandObservationCommands);
   return createWorkerResult({
     status: "success",
     summary,
     changedFiles: normalizeStringArray(changedFiles),
-    commandsRun: normalizeStringArray(commandsRun),
+    commandsRun: normalizedCommandsRun,
+    ...(commandObservations.length > 0 ? { commandObservations } : {}),
     evidence: normalizeStringArray(evidence),
     openQuestions: [],
     changedSurfaceObservation,
@@ -939,6 +982,22 @@ function inferCommandsRun(launchResult) {
   return [];
 }
 
+function inferObservedCommandsRun(launchResult) {
+  if (Array.isArray(launchResult?.observedCommandsRun) && launchResult.observedCommandsRun.length > 0) {
+    return normalizeStringArray(launchResult.observedCommandsRun);
+  }
+
+  if (launchResult?.error) {
+    return [];
+  }
+
+  if (Array.isArray(launchResult?.commandsRun) && launchResult.commandsRun.length > 0) {
+    return normalizeStringArray(launchResult.commandsRun);
+  }
+
+  return [];
+}
+
 function normalizeProcessRoleProfiles(roleProfilesInput) {
   assert(roleProfilesInput && typeof roleProfilesInput === "object", "roleProfiles must be an object");
   const normalized = {};
@@ -1417,6 +1476,7 @@ export function createProcessPiCliLauncher({
         piPackageRoot: null,
         piSpawnResolution: "worker launcher arguments could not be resolved",
         commandsRun: [],
+        observedCommandsRun: [],
         launchProfile: describeLaunchProfile([]),
         launchSelection: null
       };
@@ -1452,6 +1512,7 @@ export function createProcessPiCliLauncher({
         piPackageRoot: null,
         piSpawnResolution: `pi spawn command resolution failed: ${errorMessage(error)}`,
         commandsRun: [],
+        observedCommandsRun: [],
         launchProfile: inputLaunchProfile,
         launchSelection
       };
@@ -1485,6 +1546,7 @@ export function createProcessPiCliLauncher({
         piPackageRoot: spawnCommand?.piPackageRoot ?? null,
         piSpawnResolution: spawnCommand?.resolutionMessage ?? "pi spawn command resolution returned no script path",
         commandsRun: [],
+        observedCommandsRun: [],
         launchProfile,
         launchSelection
       };
@@ -1508,6 +1570,7 @@ export function createProcessPiCliLauncher({
         piPackageRoot: spawnCommand?.piPackageRoot ?? null,
         piSpawnResolution: spawnCommand?.resolutionMessage ?? "pi spawn command resolution returned an empty command",
         commandsRun: [],
+        observedCommandsRun: [],
         launchProfile,
         launchSelection
       };
@@ -1544,6 +1607,7 @@ export function createProcessPiCliLauncher({
       piPackageRoot: spawnCommand?.piPackageRoot ?? null,
       piSpawnResolution: spawnCommand?.resolutionMessage ?? null,
       commandsRun: [formatCommand(command, fullArgs)],
+      observedCommandsRun: launchResult?.error ? [] : [formatCommand(command, fullArgs)],
       launchProfile,
       launchSelection
     };
@@ -1695,6 +1759,7 @@ export function createProcessWorkerBackend({
         changedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
         const isReadOnlyRole = READ_ONLY_ROLES.has(packet.role);
         let commandsRun = inferCommandsRun(launchResult);
+        let observedCommandsRun = inferObservedCommandsRun(launchResult);
         let evidence = buildEvidence({
           launchResult,
           repositoryRoot: normalizedRepositoryRoot,
@@ -1725,6 +1790,7 @@ export function createProcessWorkerBackend({
         if (launchResult?.error) {
           return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
             commandsRun,
+            observedCommandsRun,
             evidence: unique(evidence),
             openQuestions: [
               "Check local permissions, Pi resolution, and worker launcher availability."
@@ -1736,6 +1802,7 @@ export function createProcessWorkerBackend({
           return createFailedResult("process worker failed: launcher timed out", {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique(evidence),
             openQuestions: [
               "Reduce prompt complexity or increase launcher timeout."
@@ -1748,6 +1815,7 @@ export function createProcessWorkerBackend({
           return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique(evidence),
             openQuestions: [
               "Inspect launcher stdout/stderr and verify non-interactive worker command syntax."
@@ -1760,6 +1828,7 @@ export function createProcessWorkerBackend({
           return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique([
               ...evidence,
               `unexpected_read_only_changes: ${changedFiles.join(", ")}`
@@ -1814,6 +1883,7 @@ export function createProcessWorkerBackend({
           const retrySnapshot = await snapshotFiles(workspaceRoot);
           changedFiles = diffSnapshots(beforeSnapshot, retrySnapshot);
           commandsRun = [...commandsRun, ...inferCommandsRun(launchResult)];
+          observedCommandsRun = [...observedCommandsRun, ...inferObservedCommandsRun(launchResult)];
           evidence = unique([
             ...evidence,
             ...prefixEvidenceEntries(buildEvidence({
@@ -1831,6 +1901,7 @@ export function createProcessWorkerBackend({
           if (launchResult?.error) {
             return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
               commandsRun,
+              observedCommandsRun,
               evidence: unique([
                 ...evidence,
                 "read_only_structured_output_valid_retry_attempt: false",
@@ -1846,6 +1917,7 @@ export function createProcessWorkerBackend({
             return createFailedResult("process worker failed: launcher timed out", {
               changedFiles,
               commandsRun,
+              observedCommandsRun,
               evidence: unique([
                 ...evidence,
                 "read_only_structured_output_valid_retry_attempt: false",
@@ -1862,6 +1934,7 @@ export function createProcessWorkerBackend({
             return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
               changedFiles,
               commandsRun,
+              observedCommandsRun,
               evidence: unique([
                 ...evidence,
                 "read_only_structured_output_valid_retry_attempt: false",
@@ -1878,6 +1951,7 @@ export function createProcessWorkerBackend({
             return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
               changedFiles,
               commandsRun,
+              observedCommandsRun,
               evidence: unique([
                 ...evidence,
                 "read_only_structured_output_valid_retry_attempt: false",
@@ -1915,6 +1989,7 @@ export function createProcessWorkerBackend({
           return createFailedResult("process worker failed: worker changed files outside the allowlist", {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique([
               ...evidence,
               `unexpected_files: ${changedOutsideAllowlist.join(", ")}`
@@ -1931,6 +2006,7 @@ export function createProcessWorkerBackend({
           return createFailedResult("process worker failed: worker changed forbidden files", {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique([
               ...evidence,
               `forbidden_files_changed: ${changedForbiddenFiles.join(", ")}`
@@ -1943,11 +2019,13 @@ export function createProcessWorkerBackend({
         }
 
         if (isReadOnlyRole && structuredReadOnlyOutput) {
+          const commandObservations = deriveProcessBackendCommandObservations(observedCommandsRun);
           return createWorkerResult({
             status: structuredReadOnlyOutput.status,
             summary: structuredReadOnlyOutput.summary,
             changedFiles,
             commandsRun,
+            ...(commandObservations.length > 0 ? { commandObservations } : {}),
             evidence: unique([
               ...evidence,
               ...structuredReadOnlyOutput.evidence,
@@ -1966,6 +2044,7 @@ export function createProcessWorkerBackend({
           return createFailedResult(`${packet.role} process worker failed: invalid structured read-only output after retry`, {
             changedFiles,
             commandsRun,
+            observedCommandsRun,
             evidence: unique([
               ...evidence,
               "read_only_structured_output_valid_retry_attempt: false",
@@ -1995,6 +2074,7 @@ export function createProcessWorkerBackend({
         return createSuccessResult(successSummary, {
           changedFiles,
           commandsRun,
+          observedCommandsRun,
           evidence: unique([
             ...evidence,
             packet.role === "implementer"
@@ -2013,6 +2093,7 @@ export function createProcessWorkerBackend({
         });
       } catch (error) {
         const commandsRun = inferCommandsRun(launchResult);
+        const observedCommandsRun = inferObservedCommandsRun(launchResult);
         const evidence = workspaceRoot
           ? buildEvidence({
             launchResult,
@@ -2029,6 +2110,7 @@ export function createProcessWorkerBackend({
         return createFailedResult(`process worker failed: ${errorMessage(error)}`, {
           changedFiles,
           commandsRun,
+          observedCommandsRun,
           evidence,
           openQuestions: ["Inspect process-worker-backend runtime logs and launcher setup."],
           providerModelSelection

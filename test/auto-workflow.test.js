@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import { formatWorkflowExecution, runAutoWorkflow, runPlannedWorkflow } from "../src/auto-workflow.js";
+import { createAutoBackendRunner } from "../src/auto-backend-runner.js";
 import { createInitialWorkflow } from "../src/orchestrator.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
 
@@ -27,7 +28,8 @@ test("auto workflow executes a low-risk plan straight through the runner", async
 test("runPlannedWorkflow tolerates non-cloneable context values", async () => {
   const workflow = createInitialWorkflow({
     goal: "Rename one helper in a local file",
-    allowedFiles: ["src/helpers.js"]
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
   });
   const runner = createScriptedWorkerRunner([
     {
@@ -75,6 +77,20 @@ test("runPlannedWorkflow tolerates non-cloneable context values", async () => {
   assert.equal(calls[0].context.workflowId, workflow.workflowId);
   assert.equal(typeof calls[0].context.callbacks.onComplete, "string");
   assert.match(calls[0].context.callbacks.onComplete, /uncloneable/i);
+  assert.deepEqual(calls[0].context.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    }
+  ]);
+  assert.ok(calls[1].context.contextManifest.some((entry) => {
+    return entry.kind === "prior_result"
+      && entry.source === "workflow_prior_runs"
+      && entry.reason === "execution_history"
+      && entry.reference === calls[0].packet.id;
+  }));
 });
 
 test("auto workflow runs one repair loop after an independent review finding", async () => {
@@ -98,8 +114,129 @@ test("auto workflow runs one repair loop after an independent review finding", a
   assert.equal(calls[3].context.repairCount, 1);
   assert.equal(calls[3].context.priorResults.at(-1).status, "repair_required");
   assert.equal(calls[3].context.priorResults.at(-1).role, "reviewer");
+  assert.ok(calls[3].context.contextManifest.some((entry) => {
+    return entry.kind === "prior_result"
+      && entry.source === "workflow_prior_runs"
+      && entry.reason === "execution_history"
+      && entry.reference === calls[2].packet.id;
+  }));
+  assert.ok(calls[4].context.contextManifest.some((entry) => {
+    return entry.kind === "review_result"
+      && entry.source === "repair_review"
+      && entry.reference === "review_result"
+      && entry.reason === "repair_context";
+  }));
   assert.match(formatWorkflowExecution(execution), /repair_loops: 1\/1/);
   assert.equal(runner.getPendingStepCount(), 0);
+});
+
+test("runPlannedWorkflow keeps legacy packets without contextManifest compatible", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
+  });
+  for (const packet of workflow.packets) {
+    delete packet.contextManifest;
+  }
+
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Implementer step passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow
+  }, { runner });
+  const calls = runner.getCalls();
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(calls[0].context.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    }
+  ]);
+});
+
+test("auto workflow carries trusted changed-surface references into contextManifest", async () => {
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/helpers.js"]
+        },
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Implementer step passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner: createScriptedWorkerRunner([]),
+    processBackend,
+    mode: "low_risk_process_implementer"
+  });
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"]
+  }, { runner });
+  const calls = runner.getCalls();
+
+  assert.equal(execution.status, "success");
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].context.changedSurfaceContext, [
+    {
+      packetId: calls[0].packet.id,
+      role: "implementer",
+      paths: ["src/helpers.js"]
+    }
+  ]);
+  assert.ok(calls[1].context.contextManifest.some((entry) => {
+    return entry.kind === "changed_surface"
+      && entry.source === "trusted_changed_surface"
+      && entry.reason === "changed_scope_carry_forward"
+      && entry.reference === `${calls[0].packet.id}:implementer`;
+  }));
 });
 
 test("formatWorkflowExecution includes run evidence and commands", () => {
@@ -295,6 +432,28 @@ test("auto workflow blocks non-string contextFiles entries during input normaliz
   assert.equal(execution.runs.length, 0);
   assert.equal(runner.getCalls().length, 0);
   assert.match(execution.stopReason, /scope path must be a string/i);
+});
+
+test("runPlannedWorkflow fails closed on malformed packet contextManifest values", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    contextFiles: ["README.md"]
+  });
+  workflow.packets[0].contextManifest = [
+    {
+      kind: "unknown_kind",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    }
+  ];
+
+  const runner = createScriptedWorkerRunner([]);
+  await assert.rejects(
+    () => runPlannedWorkflow({ workflow }, { runner }),
+    /workflow\.packets\[0\] packet\.contextManifest\[0\]\.kind must be one of: context_file, prior_result, review_result, changed_surface/i
+  );
 });
 
 test("auto workflow still accepts valid string scope paths", async () => {

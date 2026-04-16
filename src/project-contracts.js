@@ -5,6 +5,7 @@ import {
 } from "./doctrine-evaluation.js";
 import {
   normalizeChangedSurface,
+  normalizeCommandObservations,
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelections,
   normalizeReviewability,
@@ -239,6 +240,21 @@ export function validateContractExecutionResult(result) {
   assertString("contractExecutionResult.summary", result.summary);
   assertStringArray("contractExecutionResult.evidence", result.evidence);
   assertStringArray("contractExecutionResult.openQuestions", result.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(result, "commandObservations")) {
+    try {
+      const normalizedCommandObservations = normalizeCommandObservations(result.commandObservations, {
+        fieldName: "contractExecutionResult.commandObservations",
+        allowMissing: false
+      });
+      if (normalizedCommandObservations.length === 0) {
+        delete result.commandObservations;
+      } else {
+        result.commandObservations = normalizedCommandObservations;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   try {
     result.changedSurface = normalizeChangedSurface(result.changedSurface, {
       fieldName: "contractExecutionResult.changedSurface"
@@ -288,6 +304,21 @@ export function validateRunJournalEntry(entry) {
   assertString("runJournalEntry.summary", entry.summary);
   assertStringArray("runJournalEntry.evidence", entry.evidence);
   assertStringArray("runJournalEntry.openQuestions", entry.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(entry, "commandObservations")) {
+    try {
+      const normalizedCommandObservations = normalizeCommandObservations(entry.commandObservations, {
+        fieldName: "runJournalEntry.commandObservations",
+        allowMissing: false
+      });
+      if (normalizedCommandObservations.length === 0) {
+        delete entry.commandObservations;
+      } else {
+        entry.commandObservations = normalizedCommandObservations;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   try {
     entry.changedSurface = normalizeChangedSurface(entry.changedSurface, {
       fieldName: "runJournalEntry.changedSurface"

@@ -7,6 +7,7 @@ import {
   isProtectedPath,
   requiresHumanGate
 } from "./policies.js";
+import { buildPacketContextManifest } from "./context-manifest.js";
 
 function slugify(value) {
   return value
@@ -137,6 +138,7 @@ export function buildTaskPacket({
 }) {
   const normalizedAllowedFiles = unique(normalizeFiles(allowedFiles));
   const normalizedForbiddenFiles = unique(normalizeFiles(forbiddenFiles));
+  const normalizedContextFiles = normalizeFiles(contextFiles);
   validateScopeConfig({
     allowedFiles: normalizedAllowedFiles,
     forbiddenFiles: normalizedForbiddenFiles
@@ -154,7 +156,8 @@ export function buildTaskPacket({
     forbiddenFiles: normalizedForbiddenFiles,
     acceptanceChecks: defaultAcceptanceChecks(risk),
     stopConditions: defaultStopConditions(risk),
-    contextFiles: normalizeFiles(contextFiles),
+    contextFiles: normalizedContextFiles,
+    contextManifest: buildPacketContextManifest(normalizedContextFiles),
     commands: roleCommands(role)
   });
 }
