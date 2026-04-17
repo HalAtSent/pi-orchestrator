@@ -197,6 +197,114 @@ test("run store updates a persisted run journal and preserves createdAt", async 
   });
 });
 
+test("run store redacts absolute paths in persisted contract-run narrative fields", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePath = join(rootDir, "src", "seeded-file.js");
+    const externalAbsolutePath = process.platform === "win32"
+      ? "D:\\outside\\evidence.txt"
+      : "/opt/outside/evidence.txt";
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id} with ${repoAbsolutePath}.`,
+            evidence: [
+              `repo_path: ${repoAbsolutePath}`,
+              `external_path: ${externalAbsolutePath}`,
+              "relative_path: docs/guide.md"
+            ],
+            openQuestions: [`Confirm ${externalAbsolutePath} before release.`]
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const entry = saved.runJournal.contractRuns[0];
+    assert.equal(entry.summary.includes(repoAbsolutePath), false);
+    assert.equal(entry.summary.includes("src/seeded-file.js"), true);
+    assert.equal(
+      entry.evidence.includes(`repo_path: ${repoAbsolutePath}`),
+      false
+    );
+    assert.equal(
+      entry.evidence.includes("repo_path: src/seeded-file.js"),
+      true
+    );
+    assert.equal(
+      entry.evidence.includes(`external_path: ${externalAbsolutePath}`),
+      false
+    );
+    assert.equal(
+      entry.evidence.includes("external_path: <absolute_path>"),
+      true
+    );
+    assert.equal(
+      entry.evidence.includes("relative_path: docs/guide.md"),
+      true
+    );
+    assert.equal(
+      entry.openQuestions.includes(`Confirm ${externalAbsolutePath} before release.`),
+      false
+    );
+    assert.equal(
+      entry.openQuestions.includes("Confirm <absolute_path> before release."),
+      true
+    );
+    assert.equal(entry.redaction.applied, true);
+    assert.equal(entry.redaction.repoPathRewrites > 0, true);
+    assert.equal(entry.redaction.externalPathRewrites > 0, true);
+  });
+});
+
+test("run store save rejects fabricated present redaction metadata on relative-only narrative fields", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await assert.rejects(
+      () => runStore.saveRun({
+        programId: program.id,
+        program,
+        runJournal: {
+          programId: program.id,
+          status: "blocked",
+          stopReason: "waiting for dependency",
+          contractRuns: [
+            {
+              contractId: program.contracts[0].id,
+              status: "success",
+              summary: "Executed src/seeded-file.js.",
+              evidence: ["relative_path: src/seeded-file.js"],
+              openQuestions: [],
+              redaction: {
+                applied: true,
+                repoPathRewrites: 2,
+                workspacePathRewrites: 0,
+                externalPathRewrites: 0
+              }
+            }
+          ],
+          completedContractIds: [program.contracts[0].id],
+          pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+        }
+      }),
+      /runJournal\.contractRuns\[0\]\.redaction must exactly match redaction metadata recomputed from covered strings/u
+    );
+  });
+});
+
 test("run store persists success with placeholder-only validation evidence unless captured artifacts are supplied", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();
@@ -668,6 +776,110 @@ test("run store load rejects malformed present provider/model evidence requireme
     await assert.rejects(
       () => runStore.loadRun(program.id),
       /runJournalEntry\.providerModelEvidenceRequirement must be one of: required, unknown/u
+    );
+  });
+});
+
+test("run store load rejects malformed present redaction metadata", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            redaction: {
+              applied: true,
+              repoPathRewrites: 0,
+              workspacePathRewrites: 0,
+              externalPathRewrites: 0
+            },
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      },
+      completedContractIds: [program.contracts[0].id],
+      pendingContractIds: program.contracts.slice(1).map((contract) => contract.id),
+      lastStatus: "blocked",
+      stopReason: "waiting for dependency",
+      stopReasonCode: "missing_dependency",
+      validationOutcome: "blocked",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.redaction\.applied must be false/u
+    );
+  });
+});
+
+test("run store load rejects persisted fabricated redaction metadata on relative-only narrative fields", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+
+    await mkdir(join(rootDir, ".pi", "runs"), { recursive: true });
+    await writeFile(runPath, `${JSON.stringify({
+      artifactType: "persisted_run_record",
+      formatVersion: 1,
+      programId: program.id,
+      program,
+      runJournal: {
+        artifactType: "run_journal",
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: "Executed src/seeded-file.js.",
+            evidence: ["relative_path: src/seeded-file.js"],
+            redaction: {
+              applied: true,
+              repoPathRewrites: 1,
+              workspacePathRewrites: 0,
+              externalPathRewrites: 0
+            },
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      },
+      completedContractIds: [program.contracts[0].id],
+      pendingContractIds: program.contracts.slice(1).map((contract) => contract.id),
+      lastStatus: "blocked",
+      stopReason: "waiting for dependency",
+      stopReasonCode: "missing_dependency",
+      validationOutcome: "blocked",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    }, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournal\.contractRuns\[0\]\.redaction must exactly match redaction metadata recomputed from covered strings/u
     );
   });
 });

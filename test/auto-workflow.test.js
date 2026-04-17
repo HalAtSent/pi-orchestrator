@@ -1,14 +1,110 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
-import { formatWorkflowExecution, runAutoWorkflow, runPlannedWorkflow } from "../src/auto-workflow.js";
+import {
+  formatWorkflowExecution,
+  RUN_CONTEXT_BUDGET_LIMITS,
+  runAutoWorkflow,
+  runPlannedWorkflow
+} from "../src/auto-workflow.js";
 import { createAutoBackendRunner } from "../src/auto-backend-runner.js";
 import { createInitialWorkflow } from "../src/orchestrator.js";
+import { validateRunContext } from "../src/context-manifest.js";
+import {
+  createBoundaryPathRedactor,
+  mergeRedactionMetadata
+} from "../src/redaction.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
+}
+
+function buildRuntimeContextFixture() {
+  const packetContextFiles = ["README.md"];
+  const priorResults = [
+    {
+      packetId: "implementer-task-1",
+      role: "implementer",
+      status: "success",
+      summary: "Applied the scoped change.",
+      changedFiles: ["src/helpers.js"],
+      commandsRun: ["node --check src/helpers.js"],
+      evidence: ["helper update complete"],
+      openQuestions: []
+    }
+  ];
+  const reviewResult = {
+    status: "success",
+    summary: "Review passed.",
+    evidence: ["review complete"],
+    openQuestions: []
+  };
+  const changedSurfaceContext = [
+    {
+      packetId: "implementer-task-1",
+      role: "implementer",
+      paths: ["src/helpers.js"]
+    }
+  ];
+  const contextManifest = [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    },
+    {
+      kind: "prior_result",
+      source: "workflow_prior_runs",
+      reference: "implementer-task-1",
+      reason: "execution_history"
+    },
+    {
+      kind: "review_result",
+      source: "repair_review",
+      reference: "review_result",
+      reason: "repair_context"
+    },
+    {
+      kind: "changed_surface",
+      source: "trusted_changed_surface",
+      reference: "implementer-task-1:implementer",
+      reason: "changed_scope_carry_forward"
+    }
+  ];
+
+  return {
+    packetContextFiles,
+    priorResults,
+    reviewResult,
+    changedSurfaceContext,
+    contextManifest
+  };
+}
+
+function buildContextBudgetFixture(overrides = {}) {
+  const defaultTruncationCount = {
+    priorResults: 0,
+    evidenceEntries: 0,
+    commandEntries: 0,
+    changedFiles: 0
+  };
+
+  return {
+    priorResultsTruncated: false,
+    truncatedPriorResultPacketIds: [],
+    perResultEvidenceTruncated: false,
+    perResultCommandsTruncated: false,
+    perResultChangedFilesTruncated: false,
+    ...overrides,
+    truncationCount: {
+      ...defaultTruncationCount,
+      ...(overrides.truncationCount ?? {})
+    }
+  };
 }
 
 test("auto workflow executes a low-risk plan straight through the runner", async () => {
@@ -93,6 +189,560 @@ test("runPlannedWorkflow tolerates non-cloneable context values", async () => {
   }));
 });
 
+test("runPlannedWorkflow redacts absolute paths in forwarded priorResults context", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Redaction forwarding check",
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
+  });
+  const repositoryRoot = process.cwd();
+  const absoluteRepoPath = join(repositoryRoot, "src", "helpers.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\notes.txt"
+    : "/opt/outside/notes.txt";
+
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: `Updated helper at ${absoluteRepoPath}`,
+        changedFiles: ["src/helpers.js"],
+        commandsRun: [`node --check ${absoluteRepoPath}`],
+        evidence: [
+          `repo_path_seen: ${absoluteRepoPath}`,
+          `external_path_seen: ${externalAbsolutePath}`
+        ],
+        openQuestions: [`Confirm external reference ${externalAbsolutePath} is expected.`]
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow
+  }, { runner });
+  const calls = runner.getCalls();
+  const forwardedPriorResult = calls[1].context.priorResults[0];
+
+  assert.equal(execution.status, "success");
+  assert.equal(forwardedPriorResult.summary.includes(absoluteRepoPath), false);
+  assert.equal(forwardedPriorResult.summary.includes("src/helpers.js"), true);
+  assert.equal(
+    forwardedPriorResult.evidence.includes(`repo_path_seen: ${absoluteRepoPath}`),
+    false
+  );
+  assert.equal(
+    forwardedPriorResult.evidence.includes("repo_path_seen: src/helpers.js"),
+    true
+  );
+  assert.equal(
+    forwardedPriorResult.evidence.includes(`external_path_seen: ${externalAbsolutePath}`),
+    false
+  );
+  assert.equal(
+    forwardedPriorResult.evidence.includes("external_path_seen: <absolute_path>"),
+    true
+  );
+  assert.equal(
+    forwardedPriorResult.openQuestions.includes(`Confirm external reference ${externalAbsolutePath} is expected.`),
+    false
+  );
+  assert.equal(
+    forwardedPriorResult.openQuestions.includes("Confirm external reference <absolute_path> is expected."),
+    true
+  );
+  assert.deepEqual(forwardedPriorResult.changedFiles, ["src/helpers.js"]);
+  assert.deepEqual(forwardedPriorResult.redaction, {
+    applied: true,
+    repoPathRewrites: 3,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 2
+  });
+});
+
+test("runPlannedWorkflow does not trust context.repositoryRoot for repo-relative forwarding rewrites", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Untrusted root forwarding check",
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
+  });
+  const fakeRepositoryRoot = process.platform === "win32"
+    ? "C:\\opt\\outside-root"
+    : "/opt/outside-root";
+  const fakeRepoAbsolutePath = join(fakeRepositoryRoot, "src", "secret.js");
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: `Observed file at ${fakeRepoAbsolutePath}`,
+        changedFiles: ["src/helpers.js"],
+        commandsRun: [`node --check ${fakeRepoAbsolutePath}`],
+        evidence: [`external_path_seen: ${fakeRepoAbsolutePath}`],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow,
+    context: {
+      repositoryRoot: fakeRepositoryRoot
+    }
+  }, { runner });
+  const calls = runner.getCalls();
+  const forwardedPriorResult = calls[1].context.priorResults[0];
+
+  assert.equal(execution.status, "success");
+  assert.equal(forwardedPriorResult.summary.includes(fakeRepoAbsolutePath), false);
+  assert.equal(forwardedPriorResult.summary.includes("src/secret.js"), false);
+  assert.equal(forwardedPriorResult.summary.includes("<absolute_path>"), true);
+  assert.equal(
+    forwardedPriorResult.evidence.includes(`external_path_seen: ${fakeRepoAbsolutePath}`),
+    false
+  );
+  assert.equal(
+    forwardedPriorResult.evidence.includes("external_path_seen: <absolute_path>"),
+    true
+  );
+  assert.equal(forwardedPriorResult.redaction.repoPathRewrites, 0);
+  assert.equal(forwardedPriorResult.redaction.externalPathRewrites, 3);
+});
+
+test("runAutoWorkflow forwards nonzero reviewResult redaction metadata for repair-loop admission rewrites", async () => {
+  const fixture = loadFixture("repair-loop.json");
+  const repositoryRoot = process.cwd();
+  const absoluteRepoPath = join(repositoryRoot, "src", "helpers.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\repair.txt"
+    : "/opt/outside/repair.txt";
+
+  fixture.script[3].result.summary = `Repair applied at ${absoluteRepoPath}`;
+  fixture.script[3].result.evidence = [
+    `repair_repo_path_seen: ${absoluteRepoPath}`,
+    `repair_external_path_seen: ${externalAbsolutePath}`
+  ];
+  fixture.script[3].result.openQuestions = [
+    `Confirm external repair reference ${externalAbsolutePath} is expected.`
+  ];
+
+  const runner = createScriptedWorkerRunner(fixture.script);
+  const execution = await runAutoWorkflow(fixture.input, { runner });
+  const calls = runner.getCalls();
+  const forwardedReviewResult = calls[4].context.reviewResult;
+
+  assert.equal(execution.status, "success");
+  assert.equal(forwardedReviewResult.summary.includes(absoluteRepoPath), false);
+  assert.equal(forwardedReviewResult.summary.includes("src/helpers.js"), true);
+  assert.equal(
+    forwardedReviewResult.evidence.includes(`repair_repo_path_seen: ${absoluteRepoPath}`),
+    false
+  );
+  assert.equal(
+    forwardedReviewResult.evidence.includes("repair_repo_path_seen: src/helpers.js"),
+    true
+  );
+  assert.equal(
+    forwardedReviewResult.evidence.includes(`repair_external_path_seen: ${externalAbsolutePath}`),
+    false
+  );
+  assert.equal(
+    forwardedReviewResult.evidence.includes("repair_external_path_seen: <absolute_path>"),
+    true
+  );
+  assert.equal(
+    forwardedReviewResult.openQuestions.includes(`Confirm external repair reference ${externalAbsolutePath} is expected.`),
+    false
+  );
+  assert.equal(
+    forwardedReviewResult.openQuestions.includes("Confirm external repair reference <absolute_path> is expected."),
+    true
+  );
+  assert.deepEqual(forwardedReviewResult.redaction, {
+    applied: true,
+    repoPathRewrites: 2,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 2
+  });
+});
+
+test("validateRunContext accepts matching runtime payloads and context_file packet entries", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    });
+  });
+});
+
+test("validateRunContext rejects contradictory contextBudget truncation flags and counts", () => {
+  const fixture = buildRuntimeContextFixture();
+  const testCases = [
+    {
+      name: "priorResultsTruncated false with non-empty truncated prior packet ids",
+      contextBudget: buildContextBudgetFixture({
+        truncatedPriorResultPacketIds: ["omitted-prior-result"]
+      }),
+      errorPattern: /context\.contextBudget\.priorResultsTruncated/i
+    },
+    {
+      name: "priorResultsTruncated false with positive truncationCount.priorResults",
+      contextBudget: buildContextBudgetFixture({
+        truncationCount: {
+          priorResults: 1
+        }
+      }),
+      errorPattern: /context\.contextBudget\.priorResultsTruncated/i
+    },
+    {
+      name: "priorResultsTruncated true with no truncated packet ids and zero priorResults count",
+      contextBudget: buildContextBudgetFixture({
+        priorResultsTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.priorResultsTruncated/i
+    },
+    {
+      name: "perResultEvidenceTruncated true with zero evidence truncation count",
+      contextBudget: buildContextBudgetFixture({
+        perResultEvidenceTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.perResultEvidenceTruncated/i
+    },
+    {
+      name: "perResultCommandsTruncated true with zero command truncation count",
+      contextBudget: buildContextBudgetFixture({
+        perResultCommandsTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.perResultCommandsTruncated/i
+    },
+    {
+      name: "perResultChangedFilesTruncated true with zero changedFiles truncation count",
+      contextBudget: buildContextBudgetFixture({
+        perResultChangedFilesTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.perResultChangedFilesTruncated/i
+    }
+  ];
+
+  for (const testCase of testCases) {
+    assert.throws(
+      () => validateRunContext({
+        packetContextFiles: fixture.packetContextFiles,
+        contextManifest: fixture.contextManifest,
+        priorResults: fixture.priorResults,
+        reviewResult: fixture.reviewResult,
+        changedSurfaceContext: fixture.changedSurfaceContext,
+        contextBudget: testCase.contextBudget
+      }),
+      testCase.errorPattern,
+      testCase.name
+    );
+  }
+});
+
+test("validateRunContext rejects overlap between truncated and forwarded prior-result packet ids", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture({
+        priorResultsTruncated: true,
+        truncatedPriorResultPacketIds: [fixture.priorResults[0].packetId],
+        truncationCount: {
+          priorResults: 1
+        }
+      })
+    }),
+    /must not overlap with forwarded priorResults\[\]\.packetId/i
+  );
+});
+
+test("validateRunContext rejects malformed present redaction metadata", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.priorResults[0].redaction = {
+    applied: true,
+    repoPathRewrites: 0,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  };
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /context\.priorResults\[0\]\.redaction\.applied must be false/u
+  );
+});
+
+test("validateRunContext rejects fabricated priorResults redaction metadata on relative-only strings", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.priorResults[0].redaction = {
+    applied: true,
+    repoPathRewrites: 2,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  };
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /context\.priorResults\[0\]\.redaction must exactly match redaction metadata recomputed from covered strings/u
+  );
+});
+
+test("validateRunContext rejects fabricated reviewResult redaction metadata on relative-only strings", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.reviewResult.redaction = {
+    applied: true,
+    repoPathRewrites: 1,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  };
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /context\.reviewResult\.redaction must exactly match redaction metadata recomputed from covered strings/u
+  );
+});
+
+test("validateRunContext accepts generated redaction metadata from actual rewrites", () => {
+  const fixture = buildRuntimeContextFixture();
+  const repositoryRoot = process.cwd();
+  const repoAbsolutePath = join(repositoryRoot, "src", "helpers.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\review.txt"
+    : "/opt/outside/review.txt";
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot
+  });
+
+  fixture.priorResults[0].summary = `Applied update in ${repoAbsolutePath}`;
+  fixture.priorResults[0].evidence = [`external_evidence: ${externalAbsolutePath}`];
+  fixture.reviewResult.summary = `Reviewed ${repoAbsolutePath}`;
+  fixture.reviewResult.evidence = [`review_external: ${externalAbsolutePath}`];
+
+  const priorSummary = redactor.redactString(fixture.priorResults[0].summary, {
+    fieldName: "priorResults[0].summary"
+  });
+  const priorChangedFiles = redactor.redactStringArray(fixture.priorResults[0].changedFiles, {
+    fieldName: "priorResults[0].changedFiles"
+  });
+  const priorCommands = redactor.redactStringArray(fixture.priorResults[0].commandsRun, {
+    fieldName: "priorResults[0].commandsRun"
+  });
+  const priorEvidence = redactor.redactStringArray(fixture.priorResults[0].evidence, {
+    fieldName: "priorResults[0].evidence"
+  });
+  const priorOpenQuestions = redactor.redactStringArray(fixture.priorResults[0].openQuestions, {
+    fieldName: "priorResults[0].openQuestions"
+  });
+  fixture.priorResults[0] = {
+    ...fixture.priorResults[0],
+    summary: priorSummary.value,
+    changedFiles: priorChangedFiles.values,
+    commandsRun: priorCommands.values,
+    evidence: priorEvidence.values,
+    openQuestions: priorOpenQuestions.values,
+    redaction: mergeRedactionMetadata(
+      priorSummary.redaction,
+      priorChangedFiles.redaction,
+      priorCommands.redaction,
+      priorEvidence.redaction,
+      priorOpenQuestions.redaction
+    )
+  };
+
+  const reviewSummary = redactor.redactString(fixture.reviewResult.summary, {
+    fieldName: "reviewResult.summary"
+  });
+  const reviewEvidence = redactor.redactStringArray(fixture.reviewResult.evidence, {
+    fieldName: "reviewResult.evidence"
+  });
+  const reviewOpenQuestions = redactor.redactStringArray(fixture.reviewResult.openQuestions, {
+    fieldName: "reviewResult.openQuestions"
+  });
+  fixture.reviewResult = {
+    ...fixture.reviewResult,
+    summary: reviewSummary.value,
+    evidence: reviewEvidence.values,
+    openQuestions: reviewOpenQuestions.values,
+    redaction: mergeRedactionMetadata(
+      reviewSummary.redaction,
+      reviewEvidence.redaction,
+      reviewOpenQuestions.redaction
+    )
+  };
+
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      forwardedRedactionMetadata: {
+        priorResults: [fixture.priorResults[0].redaction],
+        reviewResult: fixture.reviewResult.redaction
+      },
+      repositoryRoot
+    });
+  });
+});
+
+test("validateRunContext rejects duplicate truncatedPriorResultPacketIds entries", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture({
+        priorResultsTruncated: true,
+        truncatedPriorResultPacketIds: ["omitted-packet", "omitted-packet"],
+        truncationCount: {
+          priorResults: 2
+        }
+      })
+    }),
+    /duplicates packetId/i
+  );
+});
+
+test("validateRunContext fails closed when a forwarded prior result is missing from contextManifest", () => {
+  const fixture = buildRuntimeContextFixture();
+  const manifestWithoutPriorResult = fixture.contextManifest.filter((entry) => entry.kind !== "prior_result");
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: manifestWithoutPriorResult,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /runtime context assembly invalid or drifted from contextManifest\[\]/i
+  );
+});
+
+test("validateRunContext fails closed when contextManifest references a missing prior result", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: [],
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /runtime context assembly invalid or drifted from contextManifest\[\]/i
+  );
+});
+
+test("validateRunContext fails closed when reviewResult is forwarded without a matching manifest entry", () => {
+  const fixture = buildRuntimeContextFixture();
+  const manifestWithoutReviewResult = fixture.contextManifest.filter((entry) => entry.kind !== "review_result");
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: manifestWithoutReviewResult,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /runtime context assembly invalid or drifted from contextManifest\[\]/i
+  );
+});
+
+test("validateRunContext fails closed when contextManifest includes review_result but no review payload", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: null,
+      changedSurfaceContext: fixture.changedSurfaceContext
+    }),
+    /runtime context assembly invalid or drifted from contextManifest\[\]/i
+  );
+});
+
+test("validateRunContext fails closed on changed-surface context drift", () => {
+  const fixture = buildRuntimeContextFixture();
+  const driftedChangedSurface = [
+    {
+      packetId: "implementer-task-1",
+      role: "reviewer",
+      paths: ["src/helpers.js"]
+    }
+  ];
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: driftedChangedSurface
+    }),
+    /runtime context assembly invalid or drifted from contextManifest\[\]/i
+  );
+});
+
 test("auto workflow runs one repair loop after an independent review finding", async () => {
   const fixture = loadFixture("repair-loop.json");
   const runner = createScriptedWorkerRunner(fixture.script);
@@ -126,6 +776,27 @@ test("auto workflow runs one repair loop after an independent review finding", a
       && entry.reference === "review_result"
       && entry.reason === "repair_context";
   }));
+
+  const finalVerifierContext = calls.at(-1).context;
+  const expectedMaxPriorResults = RUN_CONTEXT_BUDGET_LIMITS.maxPriorResults;
+  assert.equal(
+    finalVerifierContext.priorResults.length,
+    Math.min(expectedMaxPriorResults, calls.length - 1)
+  );
+  assert.equal(finalVerifierContext.contextBudget.priorResultsTruncated, true);
+  assert.equal(finalVerifierContext.contextBudget.truncatedPriorResultPacketIds.length, 1);
+  assert.equal(
+    finalVerifierContext.contextBudget.truncatedPriorResultPacketIds[0],
+    calls[0].packet.id
+  );
+  assert.equal(finalVerifierContext.contextBudget.truncationCount.priorResults, 1);
+  assert.equal(
+    finalVerifierContext.contextManifest.some((entry) => {
+      return entry.kind === "prior_result" && entry.reference === calls[0].packet.id;
+    }),
+    false
+  );
+
   assert.match(formatWorkflowExecution(execution), /repair_loops: 1\/1/);
   assert.equal(runner.getPendingStepCount(), 0);
 });
@@ -179,6 +850,91 @@ test("runPlannedWorkflow keeps legacy packets without contextManifest compatible
       reason: "explicit_request"
     }
   ]);
+});
+
+test("runPlannedWorkflow reports per-result context truncation in contextBudget", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
+  });
+
+  const oversizedChangedFiles = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles + 3)
+    .fill("src/helpers.js");
+  const oversizedCommands = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands + 4)
+    .fill("node --check src/helpers.js");
+  const oversizedEvidence = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence + 5)
+    .fill("helper check evidence");
+
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Applied a scoped helper change.",
+        changedFiles: oversizedChangedFiles,
+        commandsRun: oversizedCommands,
+        evidence: oversizedEvidence,
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow
+  }, { runner });
+  const calls = runner.getCalls();
+
+  assert.equal(execution.status, "success");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].context.contextBudget.perResultChangedFilesTruncated, true);
+  assert.equal(calls[1].context.contextBudget.perResultCommandsTruncated, true);
+  assert.equal(calls[1].context.contextBudget.perResultEvidenceTruncated, true);
+  assert.equal(
+    calls[1].context.priorResults[0].changedFiles.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
+  );
+  assert.equal(
+    calls[1].context.priorResults[0].commandsRun.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands
+  );
+  assert.equal(
+    calls[1].context.priorResults[0].evidence.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+  );
+  assert.equal(
+    calls[1].context.contextBudget.truncationCount.changedFiles,
+    oversizedChangedFiles.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
+  );
+  assert.equal(
+    calls[1].context.contextBudget.truncationCount.commandEntries,
+    oversizedCommands.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands
+  );
+  assert.equal(
+    calls[1].context.contextBudget.truncationCount.evidenceEntries,
+    oversizedEvidence.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+  );
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: calls[1].packet.contextFiles,
+      contextManifest: calls[1].context.contextManifest,
+      priorResults: calls[1].context.priorResults,
+      reviewResult: calls[1].context.reviewResult,
+      changedSurfaceContext: calls[1].context.changedSurfaceContext,
+      contextBudget: calls[1].context.contextBudget
+    });
+  });
 });
 
 test("auto workflow carries trusted changed-surface references into contextManifest", async () => {
@@ -453,6 +1209,50 @@ test("runPlannedWorkflow fails closed on malformed packet contextManifest values
   await assert.rejects(
     () => runPlannedWorkflow({ workflow }, { runner }),
     /workflow\.packets\[0\] packet\.contextManifest\[0\]\.kind must be one of: context_file, prior_result, review_result, changed_surface/i
+  );
+});
+
+test("runPlannedWorkflow fails closed on packet contextManifest drift from contextFiles", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    contextFiles: ["README.md"]
+  });
+  workflow.packets[0].contextManifest = [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "docs/OPERATING-GUIDE.md",
+      reason: "explicit_request"
+    }
+  ];
+
+  const runner = createScriptedWorkerRunner([]);
+  await assert.rejects(
+    () => runPlannedWorkflow({ workflow }, { runner }),
+    /workflow\.packets\[0\] packet\.contextManifest must exactly match canonical packet context_file entries derived from packet\.contextFiles/i
+  );
+});
+
+test("runPlannedWorkflow fails closed on runtime-only packet contextManifest kinds", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"],
+    contextFiles: ["README.md"]
+  });
+  workflow.packets[0].contextManifest = [
+    {
+      kind: "prior_result",
+      source: "workflow_prior_runs",
+      reference: "implementer-task-1",
+      reason: "execution_history"
+    }
+  ];
+
+  const runner = createScriptedWorkerRunner([]);
+  await assert.rejects(
+    () => runPlannedWorkflow({ workflow }, { runner }),
+    /workflow\.packets\[0\] packet\.contextManifest\[0\]\.kind must be context_file for packet-level context manifests/i
   );
 });
 

@@ -360,6 +360,7 @@ Optional fields:
 - `commandObservations`
 - `providerModelEvidenceRequirement`
 - `providerModelSelections`
+- `redaction`
 
 Required invariants:
 
@@ -390,6 +391,21 @@ Required invariants:
   - `requestedModel`
   - `selectedProvider`
   - `selectedModel`
+- `redaction`, when present, must be a typed metadata object with exactly:
+  - `applied` (boolean)
+  - `repoPathRewrites` (non-negative integer)
+  - `workspacePathRewrites` (non-negative integer)
+  - `externalPathRewrites` (non-negative integer)
+- `redaction.applied` must match whether at least one rewrite counter is greater than zero.
+- where code owns deterministic boundary rewriting for a surface, present `redaction`
+  metadata must exactly match code-verified rewrite truth for that same surface;
+  mismatches fail closed.
+- for persisted narrative surfaces (`run_journal.contractRuns[]`), that truth is
+  deterministic rewrite counts recomputed from covered strings.
+- for forwarded runtime-context `priorResults[].redaction` and
+  `reviewResult.redaction`, that truth is the deterministic rewrite counts
+  recorded during the admission redaction pass (first-pass rewrite event), not a
+  second redaction pass over already-redacted strings.
 
 Command observation omission note:
 
@@ -402,6 +418,11 @@ Provider/model field omission note:
 - `contractRuns[]` may omit `providerModelEvidenceRequirement` for legacy compatibility.
 - `contractRuns[]` may omit `providerModelSelections`; omission means no trusted typed provider/model packet entries were promoted for that run entry.
 - reviewability logic falls back to legacy `evidence[]` provider/model parsing only for those omitted-entry cases.
+
+Redaction metadata omission note:
+
+- `contractRuns[]` may omit `redaction` for legacy compatibility.
+- when present, malformed or non-truthful values fail closed.
 
 Reviewer guidance for narrative fields:
 
@@ -792,15 +813,30 @@ At minimum:
 
 Current v1 behavior:
 
-- no repository-wide redaction pass runs over `stopReason`, `contractRuns[].summary`, `contractRuns[].evidence[]`, `contractRuns[].openQuestions[]`, or `validationArtifacts[]` before persistence
-- `src/process-worker-backend.js` currently copies truncated launcher `stdout` and `stderr`, plus launcher metadata and workspace paths, into worker `evidence[]`
-- `src/program-runner.js` currently persists worker `summary`, `evidence`, `openQuestions`, typed `commandObservations[]` when present, normalized `changedSurface`, promoted `providerModelSelections`, and `providerModelEvidenceRequirement` into `run_journal.contractRuns[]` without an additional redaction pass
-- `src/auto-workflow.js` currently forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects
+- deterministic redaction now runs at concrete boundaries for absolute paths:
+  - `src/auto-workflow.js` redacts forwarded `priorResults` and `reviewResult` string fields before runtime context admission
+  - `src/process-worker-backend.js` redacts launcher-derived worker-result strings before backend egress
+  - `src/program-runner.js` and `src/run-store.js` redact persisted `run_journal.contractRuns[].summary`, `.evidence[]`, and `.openQuestions[]`
+- the current deterministic rewrite scope is intentionally narrow:
+  - repo-absolute paths become repo-relative
+  - recognized process-workspace absolute paths become `<process_workspace>` placeholders
+  - other absolute paths become `<absolute_path>`
+- repo-relative rewrites use the repository root known at the concrete boundary
+  (for example, run-store-backed persistence uses the run-store root when
+  available), not only `process.cwd()`.
+- runtime-context forwarding in `src/auto-workflow.js` uses code-owned
+  repository-root truth (`process.cwd()` at that boundary), not caller-supplied
+  runtime context overrides.
+- redaction metadata is now first-class where this slice applies it:
+  - `run_journal.contractRuns[].redaction`
+  - forwarded runtime-context `priorResults[].redaction` and `reviewResult.redaction`
+- present malformed redaction metadata fails validation; omission remains legacy-compatible
 - current process-backed prompts do not interpolate that forwarded context into prompt text, but the forwarding boundary exists at the runner and adapter surface
+- there is still no repository-wide secret-scanning or full text-classification pipeline across all persisted and forwarded payloads
 
 Current review guidance:
 
-- reviewers should treat persisted evidence as potentially containing raw tool or worker text unless a caller already redacted it
+- reviewers should treat persisted evidence as path-redacted on the covered boundaries above, but not as globally scrubbed for all secret classes
 - secret-bearing material should be redacted or omitted before persistence when known
 - evidence should prefer references, hashes, or summaries over raw secret-bearing payloads
 - prompt content may be stored as hashes or references when raw content is sensitive

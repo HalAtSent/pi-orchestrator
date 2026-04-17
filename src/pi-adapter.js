@@ -1,6 +1,10 @@
 import { createWorkerResult } from "./contracts.js";
 import { resolvePiWorkerInvoker } from "./pi-runtime-diagnostics.js";
-import { normalizeContextManifest } from "./context-manifest.js";
+import {
+  getTrustedForwardedRedactionMetadata,
+  normalizeContextManifest,
+  validateRunContext
+} from "./context-manifest.js";
 
 const DEFAULT_SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const SUPPORTED_RESULT_STATUSES = new Set(["success", "blocked", "failed", "repair_required"]);
@@ -132,15 +136,50 @@ function normalizeWorkerRequest(requestInput) {
   };
 }
 
-function createRuntimeContext(contextInput) {
+function hasStructuredRuntimeContextFields(context = {}) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return false;
+  }
+
+  return Object.prototype.hasOwnProperty.call(context, "contextManifest")
+    || Object.prototype.hasOwnProperty.call(context, "priorResults")
+    || Object.prototype.hasOwnProperty.call(context, "reviewResult")
+    || Object.prototype.hasOwnProperty.call(context, "changedSurfaceContext")
+    || Object.prototype.hasOwnProperty.call(context, "contextBudget");
+}
+
+function createRuntimeContext(contextInput, request) {
   const context = contextInput && typeof contextInput === "object" && !Array.isArray(contextInput)
     ? contextInput
     : {};
+  const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(context.context);
+  const workflowContext = clone(context.context) ?? null;
+
+  if (workflowContext && hasStructuredRuntimeContextFields(workflowContext)) {
+    const normalizedRunContext = validateRunContext({
+      packetContextFiles: request.contextFiles,
+      contextManifest: workflowContext.contextManifest,
+      priorResults: workflowContext.priorResults ?? [],
+      reviewResult: workflowContext.reviewResult ?? null,
+      changedSurfaceContext: workflowContext.changedSurfaceContext ?? [],
+      contextBudget: workflowContext.contextBudget,
+      forwardedRedactionMetadata: trustedForwardedRedactionMetadata,
+      fieldName: "context.workflowContext"
+    });
+
+    workflowContext.contextManifest = normalizedRunContext.contextManifest;
+    if (
+      normalizedRunContext.contextBudget !== undefined
+      || Object.prototype.hasOwnProperty.call(workflowContext, "contextBudget")
+    ) {
+      workflowContext.contextBudget = normalizedRunContext.contextBudget ?? workflowContext.contextBudget;
+    }
+  }
 
   return {
     packet: clone(context.packet) ?? null,
     roleProfile: clone(context.roleProfile) ?? null,
-    workflowContext: clone(context.context) ?? null
+    workflowContext
   };
 }
 
@@ -261,7 +300,15 @@ export function createPiAdapter({
         return createBlockedResult({ role: "worker" }, `invalid worker request: ${error.message}`);
       }
 
-      const runtimeContext = createRuntimeContext(contextInput);
+      let runtimeContext;
+      try {
+        runtimeContext = createRuntimeContext(contextInput, request);
+      } catch (error) {
+        return createBlockedResult(request, error.message, {
+          openQuestions: ["Ensure runtime context payloads match contextManifest[] before invocation."]
+        });
+      }
+
       calls.push({
         request: clone(request),
         context: clone(runtimeContext)

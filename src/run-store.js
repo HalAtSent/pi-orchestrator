@@ -11,6 +11,11 @@ import {
   normalizeValidationArtifacts,
   toArtifactReference
 } from "./run-evidence.js";
+import {
+  assertRedactionMetadataMatchesCoveredStrings,
+  createBoundaryPathRedactor,
+  mergeRedactionMetadata,
+} from "./redaction.js";
 
 export const RUN_STORE_FORMAT_VERSION = 1;
 const DEFAULT_RUN_DIRECTORY = ".pi/runs";
@@ -80,6 +85,62 @@ function stringArraysEqual(left, right) {
   return true;
 }
 
+function redactRunJournalContractRuns(runJournal, { repositoryRoot }) {
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot
+  });
+
+  return {
+    ...runJournal,
+    contractRuns: runJournal.contractRuns.map((entry, index) => {
+      const summary = redactor.redactString(entry.summary, {
+        fieldName: `runJournal.contractRuns[${index}].summary`
+      });
+      const evidence = redactor.redactStringArray(entry.evidence, {
+        fieldName: `runJournal.contractRuns[${index}].evidence`
+      });
+      const openQuestions = redactor.redactStringArray(entry.openQuestions, {
+        fieldName: `runJournal.contractRuns[${index}].openQuestions`
+      });
+      const boundaryRedaction = mergeRedactionMetadata(
+        summary.redaction,
+        evidence.redaction,
+        openQuestions.redaction
+      );
+      if (Object.prototype.hasOwnProperty.call(entry, "redaction")) {
+        assertRedactionMetadataMatchesCoveredStrings(entry.redaction, {
+          redactor,
+          fieldName: `runJournal.contractRuns[${index}].redaction`,
+          stringFields: [
+            {
+              fieldName: `runJournal.contractRuns[${index}].summary`,
+              value: entry.summary
+            }
+          ],
+          stringArrayFields: [
+            {
+              fieldName: `runJournal.contractRuns[${index}].evidence`,
+              value: entry.evidence
+            },
+            {
+              fieldName: `runJournal.contractRuns[${index}].openQuestions`,
+              value: entry.openQuestions
+            }
+          ]
+        });
+      }
+
+      return {
+        ...entry,
+        summary: summary.value,
+        evidence: evidence.values,
+        openQuestions: openQuestions.values,
+        redaction: boundaryRedaction
+      };
+    })
+  };
+}
+
 function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositoryRoot } = {}) {
   assertPlainObject("persistedRun", recordInput);
   assertPlainObject("persistedRun.program", recordInput.program);
@@ -91,7 +152,10 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
 
   const nowIso = new Date().toISOString();
   const program = createExecutionProgram(clone(recordInput.program));
-  const runJournal = createRunJournal(clone(recordInput.runJournal));
+  const runJournal = createRunJournal(redactRunJournalContractRuns(
+    createRunJournal(clone(recordInput.runJournal)),
+    { repositoryRoot }
+  ));
   const programId = normalizeProgramId(recordInput.programId ?? program.id);
 
   assert(program.id === programId, "persistedRun.program.id must match persistedRun.programId");
@@ -458,6 +522,10 @@ export function createRunStore({
 
   return {
     rootDir: normalizedRootDir,
+    repositoryRoot: normalizedRootDir,
+    getRepositoryRoot() {
+      return normalizedRootDir;
+    },
     runsDirectory: resolvedRunsDirectory,
     async saveRun(recordInput) {
       assertPlainObject("persistedRun", recordInput);

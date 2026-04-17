@@ -116,6 +116,88 @@ test("createTaskPacket rejects unknown contextManifest enum values", () => {
   );
 });
 
+test("createTaskPacket materializes canonical contextManifest from contextFiles when omitted", () => {
+  const packet = createTaskPacket(validTaskPacket({
+    contextFiles: ["README.md", "docs/OPERATING-GUIDE.md"],
+    contextManifest: undefined
+  }));
+
+  assert.deepEqual(packet.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    },
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "docs/OPERATING-GUIDE.md",
+      reason: "explicit_request"
+    }
+  ]);
+});
+
+test("createTaskPacket accepts explicit packet contextManifest when it matches contextFiles", () => {
+  const packet = createTaskPacket(validTaskPacket({
+    contextFiles: ["README.md", "docs/OPERATING-GUIDE.md"],
+    contextManifest: [
+      validContextManifestEntry({
+        reference: "README.md"
+      }),
+      validContextManifestEntry({
+        reference: "docs/OPERATING-GUIDE.md"
+      })
+    ]
+  }));
+
+  assert.deepEqual(packet.contextManifest, [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    },
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "docs/OPERATING-GUIDE.md",
+      reason: "explicit_request"
+    }
+  ]);
+});
+
+test("createTaskPacket rejects packet contextManifest drift from contextFiles", () => {
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextFiles: ["README.md"],
+      contextManifest: [
+        validContextManifestEntry({
+          reference: "docs/OPERATING-GUIDE.md"
+        })
+      ]
+    })),
+    /packet\.contextManifest must exactly match canonical packet context_file entries derived from packet\.contextFiles/u
+  );
+});
+
+test("createTaskPacket rejects runtime-only contextManifest kinds on packet input", () => {
+  assert.throws(
+    () => createTaskPacket(validTaskPacket({
+      contextFiles: ["README.md"],
+      contextManifest: [
+        validContextManifestEntry({
+          kind: "prior_result",
+          source: "workflow_prior_runs",
+          reference: "implementer-task-1",
+          reason: "execution_history"
+        })
+      ]
+    })),
+    /packet\.contextManifest\[0\]\.kind must be context_file for packet-level context manifests/u
+  );
+});
+
 test("createWorkerResult rejects empty evidence and openQuestions entries", () => {
   assert.throws(
     () => createWorkerResult(validWorkerResult({

@@ -12,6 +12,7 @@ import {
   normalizeStopReasonCode,
   normalizeValidationOutcome
 } from "./run-evidence.js";
+import { normalizeRedactionMetadata } from "./redaction.js";
 
 export const AUDIT_STATUSES = Object.freeze(["pass", "attention_required"]);
 export const FINDING_SEVERITIES = Object.freeze(["low", "medium", "high"]);
@@ -291,6 +292,12 @@ export function validateContractExecutionResult(result) {
       throw new Error(`${error.message}`);
     }
   }
+  if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
+    result.redaction = normalizeRedactionMetadata(result.redaction, {
+      fieldName: "contractExecutionResult.redaction",
+      allowMissing: false
+    });
+  }
   return result;
 }
 
@@ -352,6 +359,12 @@ export function validateRunJournalEntry(entry) {
     } catch (error) {
       throw new Error(`${error.message}`);
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "redaction")) {
+    entry.redaction = normalizeRedactionMetadata(entry.redaction, {
+      fieldName: "runJournalEntry.redaction",
+      allowMissing: false
+    });
   }
   try {
     entry.validationOutcome = normalizeValidationOutcome(entry.validationOutcome, {

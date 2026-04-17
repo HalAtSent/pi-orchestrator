@@ -3,7 +3,8 @@ import {
   normalizeCommandObservations,
   normalizeProviderModelSelection
 } from "./run-evidence.js";
-import { normalizeContextManifest } from "./context-manifest.js";
+import { resolvePacketContextManifest } from "./context-manifest.js";
+import { normalizeRedactionMetadata } from "./redaction.js";
 
 export const ROLE_TYPES = Object.freeze([
   "explorer",
@@ -61,15 +62,12 @@ export function validateTaskPacket(packet) {
   assertStringArray("packet.acceptanceChecks", packet.acceptanceChecks);
   assertStringArray("packet.stopConditions", packet.stopConditions);
   assertOptionalStringArray("packet.contextFiles", packet.contextFiles);
-  if (
-    Object.prototype.hasOwnProperty.call(packet, "contextManifest")
-    && packet.contextManifest !== undefined
-  ) {
-    packet.contextManifest = normalizeContextManifest(packet.contextManifest, {
-      fieldName: "packet.contextManifest",
-      allowMissing: false
-    });
-  }
+  packet.contextManifest = resolvePacketContextManifest({
+    contextFiles: packet.contextFiles ?? [],
+    contextManifest: packet.contextManifest,
+    contextFilesFieldName: "packet.contextFiles",
+    contextManifestFieldName: "packet.contextManifest"
+  });
   assertOptionalStringArray("packet.commands", packet.commands);
   if (packet.parentTaskId !== undefined) {
     assertString("packet.parentTaskId", packet.parentTaskId);
@@ -117,6 +115,12 @@ export function validateWorkerResult(result) {
     });
   } catch (error) {
     throw new Error(`${error.message}`);
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
+    result.redaction = normalizeRedactionMetadata(result.redaction, {
+      fieldName: "result.redaction",
+      allowMissing: false
+    });
   }
   return result;
 }

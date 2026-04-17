@@ -5,18 +5,28 @@ import { safeClone } from "./safe-clone.js";
 import { validateTaskPacket } from "./contracts.js";
 import {
   buildChangedSurfaceContextManifest,
-  buildPacketContextManifest,
   buildPriorResultContextManifest,
   buildReviewResultContextManifest,
+  setTrustedForwardedRedactionMetadata,
   mergeContextManifestEntries,
-  normalizeContextManifest
+  resolvePacketContextManifest as resolveCanonicalPacketContextManifest,
+  validateRunContext
 } from "./context-manifest.js";
 import {
   isTrustedChangedSurfaceObservationResult,
   isTrustedProviderModelSelectionResult
 } from "./auto-backend-runner.js";
+import { createBoundaryPathRedactor, mergeRedactionMetadata } from "./redaction.js";
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
+const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
+
+export const RUN_CONTEXT_BUDGET_LIMITS = Object.freeze({
+  maxPriorResults: 4,
+  maxPriorResultEvidence: 8,
+  maxPriorResultCommands: 8,
+  maxPriorResultChangedFiles: 8
+});
 
 function assert(condition, message) {
   if (!condition) {
@@ -124,44 +134,180 @@ function assertRepairBudget(maxRepairLoops) {
   assert(Number.isInteger(maxRepairLoops) && maxRepairLoops >= 0, "maxRepairLoops must be a non-negative integer");
 }
 
-function sanitizePriorResults(runs) {
-  return runs.map(({ packet, result }) => ({
-    packetId: packet.id,
-    role: packet.role,
-    status: result.status,
-    summary: result.summary,
-    changedFiles: clone(result.changedFiles),
-    commandsRun: clone(result.commandsRun),
-    evidence: clone(result.evidence),
-    openQuestions: clone(result.openQuestions)
-  }));
+function sanitizePriorResults(runs, { redactor }) {
+  return runs.map(({ packet, result }) => {
+    const fieldPrefix = `priorResults[${packet.id}]`;
+    const summary = redactor.redactString(result.summary, {
+      fieldName: `${fieldPrefix}.summary`
+    });
+    const changedFiles = redactor.redactStringArray(clone(result.changedFiles), {
+      fieldName: `${fieldPrefix}.changedFiles`
+    });
+    const commandsRun = redactor.redactStringArray(clone(result.commandsRun), {
+      fieldName: `${fieldPrefix}.commandsRun`
+    });
+    const evidence = redactor.redactStringArray(clone(result.evidence), {
+      fieldName: `${fieldPrefix}.evidence`
+    });
+    const openQuestions = redactor.redactStringArray(clone(result.openQuestions), {
+      fieldName: `${fieldPrefix}.openQuestions`
+    });
+    const redaction = mergeRedactionMetadata(
+      summary.redaction,
+      changedFiles.redaction,
+      commandsRun.redaction,
+      evidence.redaction,
+      openQuestions.redaction
+    );
+
+    return {
+      packetId: packet.id,
+      role: packet.role,
+      status: result.status,
+      summary: summary.value,
+      changedFiles: changedFiles.values,
+      commandsRun: commandsRun.values,
+      evidence: evidence.values,
+      openQuestions: openQuestions.values,
+      redaction
+    };
+  });
 }
 
-function sanitizeReviewResult(reviewResult) {
+function createContextBudget() {
+  return {
+    priorResultsTruncated: false,
+    truncatedPriorResultPacketIds: [],
+    perResultEvidenceTruncated: false,
+    perResultCommandsTruncated: false,
+    perResultChangedFilesTruncated: false,
+    truncationCount: {
+      priorResults: 0,
+      evidenceEntries: 0,
+      commandEntries: 0,
+      changedFiles: 0
+    }
+  };
+}
+
+function truncateStringArray(values, maxEntries) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  if (values.length <= maxEntries) {
+    return clone(values);
+  }
+
+  return clone(values.slice(0, maxEntries));
+}
+
+function applyPriorResultContextBudget(priorResults) {
+  const budget = createContextBudget();
+  let boundedPriorResults = Array.isArray(priorResults) ? clone(priorResults) : [];
+
+  if (boundedPriorResults.length > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResults) {
+    const droppedResults = boundedPriorResults.slice(
+      0,
+      boundedPriorResults.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResults
+    );
+    budget.priorResultsTruncated = true;
+    budget.truncatedPriorResultPacketIds = droppedResults
+      .map((entry) => entry?.packetId)
+      .filter((packetId) => typeof packetId === "string" && packetId.trim().length > 0);
+    budget.truncationCount.priorResults = droppedResults.length;
+    boundedPriorResults = boundedPriorResults.slice(-RUN_CONTEXT_BUDGET_LIMITS.maxPriorResults);
+  }
+
+  boundedPriorResults = boundedPriorResults.map((priorResult) => {
+    const bounded = {
+      ...clone(priorResult),
+      changedFiles: truncateStringArray(
+        priorResult?.changedFiles,
+        RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
+      ),
+      commandsRun: truncateStringArray(
+        priorResult?.commandsRun,
+        RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands
+      ),
+      evidence: truncateStringArray(
+        priorResult?.evidence,
+        RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+      ),
+      openQuestions: clone(priorResult?.openQuestions)
+    };
+
+    const changedFilesLength = Array.isArray(priorResult?.changedFiles) ? priorResult.changedFiles.length : 0;
+    const commandLength = Array.isArray(priorResult?.commandsRun) ? priorResult.commandsRun.length : 0;
+    const evidenceLength = Array.isArray(priorResult?.evidence) ? priorResult.evidence.length : 0;
+
+    if (changedFilesLength > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles) {
+      budget.perResultChangedFilesTruncated = true;
+      budget.truncationCount.changedFiles += (
+        changedFilesLength - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
+      );
+    }
+
+    if (commandLength > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands) {
+      budget.perResultCommandsTruncated = true;
+      budget.truncationCount.commandEntries += (
+        commandLength - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultCommands
+      );
+    }
+
+    if (evidenceLength > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence) {
+      budget.perResultEvidenceTruncated = true;
+      budget.truncationCount.evidenceEntries += (
+        evidenceLength - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+      );
+    }
+
+    return bounded;
+  });
+
+  return {
+    priorResults: boundedPriorResults,
+    contextBudget: budget
+  };
+}
+
+function sanitizeReviewResult(reviewResult, { redactor }) {
   if (!reviewResult) {
     return null;
   }
 
+  const fieldPrefix = "reviewResult";
+  const summary = redactor.redactString(reviewResult.summary, {
+    fieldName: `${fieldPrefix}.summary`
+  });
+  const evidence = redactor.redactStringArray(clone(reviewResult.evidence), {
+    fieldName: `${fieldPrefix}.evidence`
+  });
+  const openQuestions = redactor.redactStringArray(clone(reviewResult.openQuestions), {
+    fieldName: `${fieldPrefix}.openQuestions`
+  });
+  const redaction = mergeRedactionMetadata(
+    summary.redaction,
+    evidence.redaction,
+    openQuestions.redaction
+  );
+
   return {
     status: reviewResult.status,
-    summary: reviewResult.summary,
-    evidence: clone(reviewResult.evidence),
-    openQuestions: clone(reviewResult.openQuestions)
+    summary: summary.value,
+    evidence: evidence.values,
+    openQuestions: openQuestions.values,
+    redaction
   };
 }
 
 function resolvePacketContextManifest(packet) {
-  if (
-    Object.prototype.hasOwnProperty.call(packet, "contextManifest")
-    && packet.contextManifest !== undefined
-  ) {
-    return normalizeContextManifest(packet.contextManifest, {
-      fieldName: "packet.contextManifest",
-      allowMissing: false
-    });
-  }
-
-  return buildPacketContextManifest(packet.contextFiles ?? []);
+  return resolveCanonicalPacketContextManifest({
+    contextFiles: packet.contextFiles ?? [],
+    contextManifest: packet.contextManifest,
+    contextFilesFieldName: "packet.contextFiles",
+    contextManifestFieldName: "packet.contextManifest"
+  });
 }
 
 function sanitizeChangedSurfaceContext(runs) {
@@ -212,6 +358,20 @@ function toErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function resolveContextRepositoryRoot() {
+  return process.cwd();
+}
+
+function toContextAdmissionFailureReason(error) {
+  const message = toErrorMessage(error);
+
+  if (message.includes(RUN_CONTEXT_ADMISSION_ERROR_PREFIX)) {
+    return message;
+  }
+
+  return `${RUN_CONTEXT_ADMISSION_ERROR_PREFIX}: ${message}`;
+}
+
 function createExecutionFailureResult({
   packet,
   failureKind,
@@ -239,8 +399,20 @@ function createExecutionFailureResult({
 }
 
 function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, baseContext = {} }) {
-  const priorResults = sanitizePriorResults(runs);
-  const normalizedReviewResult = sanitizeReviewResult(reviewResult);
+  const repositoryRoot = resolveContextRepositoryRoot();
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot
+  });
+  const sanitizedPriorResults = sanitizePriorResults(runs, {
+    redactor
+  });
+  const {
+    priorResults,
+    contextBudget
+  } = applyPriorResultContextBudget(sanitizedPriorResults);
+  const normalizedReviewResult = sanitizeReviewResult(reviewResult, {
+    redactor
+  });
   const changedSurfaceContext = sanitizeChangedSurfaceContext(runs);
   const contextManifest = mergeContextManifestEntries(
     resolvePacketContextManifest(packet),
@@ -251,7 +423,7 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
     )
   );
 
-  return {
+  const runContext = {
     ...clone(baseContext),
     workflowId: workflow.workflowId,
     goal: workflow.goal,
@@ -261,8 +433,33 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
     contextManifest,
     priorResults,
     reviewResult: normalizedReviewResult,
-    changedSurfaceContext
+    changedSurfaceContext,
+    contextBudget
   };
+  const forwardedRedactionMetadata = {
+    priorResults: priorResults.map((priorResult) => priorResult?.redaction),
+    reviewResult: normalizedReviewResult?.redaction
+  };
+
+  const normalizedRunContext = validateRunContext({
+    packetContextFiles: packet.contextFiles ?? [],
+    contextManifest: runContext.contextManifest,
+    priorResults: runContext.priorResults,
+    reviewResult: runContext.reviewResult,
+    changedSurfaceContext: runContext.changedSurfaceContext,
+    contextBudget: runContext.contextBudget,
+    forwardedRedactionMetadata,
+    repositoryRoot,
+    fieldName: "context"
+  });
+
+  const normalizedContext = {
+    ...runContext,
+    contextManifest: normalizedRunContext.contextManifest,
+    contextBudget: normalizedRunContext.contextBudget ?? runContext.contextBudget
+  };
+  setTrustedForwardedRedactionMetadata(normalizedContext, forwardedRedactionMetadata);
+  return normalizedContext;
 }
 
 function validateChangedFiles(packet, result) {
@@ -296,14 +493,37 @@ async function executePacket({
   iteration = 0,
   baseContext = {}
 }) {
-  const context = buildRunContext({
-    workflow,
-    packet,
-    runs,
-    repairCount,
-    reviewResult,
-    baseContext
-  });
+  let context;
+
+  try {
+    context = buildRunContext({
+      workflow,
+      packet,
+      runs,
+      repairCount,
+      reviewResult,
+      baseContext
+    });
+  } catch (error) {
+    const result = createExecutionFailureResult({
+      packet,
+      failureKind: "context_admission",
+      reason: toContextAdmissionFailureReason(error)
+    });
+    const run = {
+      packet: clone(packet),
+      result: clone(result),
+      provenance: {
+        changedSurfaceObservationTrusted: false,
+        providerModelSelectionTrusted: false
+      },
+      iteration
+    };
+
+    runs.push(run);
+    return run;
+  }
+
   let result;
   let changedSurfaceObservationTrusted = false;
   let providerModelSelectionTrusted = false;

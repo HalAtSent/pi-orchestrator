@@ -207,12 +207,36 @@ Current state:
 - surfaces selected provider/model information in the workflow summary when process-backed execution runs
 - persists typed command observations from process-backed launcher commands
 - emits typed worker context-selection manifests (`contextManifest[]`) that explain why context entered worker scope (explicit context files, prior runs, repair review, trusted changed-surface carry-forward)
+- fails closed before worker execution when runtime context payloads drift from
+  the assembled `contextManifest[]`
+- applies explicit structural context budgets for forwarded prior results and
+  exposes typed `contextBudget` truncation metadata when limits are hit
+- applies deterministic boundary path redaction on covered surfaces:
+  - forwarded `priorResults` / `reviewResult` context strings
+  - process-backend worker-result egress strings
+  - persisted contract-run `summary`, `evidence[]`, and `openQuestions[]`
 
 Current context-selection note:
 
 - `contextManifest[]` is structural provenance instrumentation, not a retrieval engine
 - entries carry stable references and typed reasons; they do not embed full file contents or prior-result payloads
-- stale/conflict scoring, broader retrieval quality heuristics, and repository-wide redaction hardening are tracked separately in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md)
+- packet-level `contextManifest[]` is canonical for explicit packet `contextFiles` only (`context_file` entries), and packet-authored manifests are accepted only when they exactly match that canonical subset
+- runtime-derived provenance (`prior_result`, `review_result`, trusted `changed_surface`) is added by code during run-context assembly, not accepted as packet-authored manifest input
+- runtime admission checks enforce bidirectional manifest/payload alignment for
+  those provenance kinds; mismatches fail closed as context-assembly drift
+- truncation is explicit and typed through `contextBudget`; this is structural
+  budgeting only and does not claim semantic retrieval scoring
+- `contextBudget` is runtime-truth validated against forwarded payload shape;
+  contradictory truncation metadata fails closed at context admission
+- current redaction is intentionally narrow and deterministic (absolute path
+  rewriting only), is not a general secret-scanning layer, and uses
+  code-derived or code-verified rewrite metadata at covered boundaries
+- forwarded runtime-context repo-relative rewrites are bound to code-owned root
+  truth at the admission boundary (`process.cwd()` in `src/auto-workflow.js`);
+  caller-provided runtime context does not override repository-root truth
+- stale/conflict scoring, broader retrieval quality heuristics, and
+  repository-wide redaction hardening are tracked separately in
+  [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md)
 
 Current action-class honesty:
 

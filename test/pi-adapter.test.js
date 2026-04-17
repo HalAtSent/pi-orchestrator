@@ -154,6 +154,194 @@ test("adapter blocks runtime responses that signal recursive delegation", async 
   assert.match(result.summary, /recursive delegation/i);
 });
 
+test("adapter fails closed when workflowContext payloads drift from contextManifest", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const request = createWorkerRequest("implementer");
+  const result = await adapter.runWorker(request, {
+    context: {
+      priorResults: [
+        {
+          packetId: "explorer-packet-1",
+          role: "explorer",
+          status: "success",
+          summary: "Mapped scope.",
+          changedFiles: [],
+          commandsRun: ["rg --files"],
+          evidence: ["Scope mapped."],
+          openQuestions: []
+        }
+      ],
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: "README.md",
+          reason: "explicit_request"
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /runtime context assembly invalid or drifted from contextManifest\[\]/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
+test("adapter fails closed on contradictory workflowContext.contextBudget metadata", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const request = createWorkerRequest("implementer");
+  const result = await adapter.runWorker(request, {
+    context: {
+      priorResults: [
+        {
+          packetId: "explorer-packet-1",
+          role: "explorer",
+          status: "success",
+          summary: "Mapped scope.",
+          changedFiles: [],
+          commandsRun: ["rg --files"],
+          evidence: ["Scope mapped."],
+          openQuestions: []
+        }
+      ],
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: "README.md",
+          reason: "explicit_request"
+        },
+        {
+          kind: "prior_result",
+          source: "workflow_prior_runs",
+          reference: "explorer-packet-1",
+          reason: "execution_history"
+        }
+      ],
+      contextBudget: {
+        priorResultsTruncated: false,
+        truncatedPriorResultPacketIds: ["omitted-prior-result"],
+        perResultEvidenceTruncated: false,
+        perResultCommandsTruncated: false,
+        perResultChangedFilesTruncated: false,
+        truncationCount: {
+          priorResults: 0,
+          evidenceEntries: 0,
+          commandEntries: 0,
+          changedFiles: 0
+        }
+      }
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /context\.workflowContext\.contextBudget\.priorResultsTruncated/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
+test("adapter direct entrypoint ignores caller-authored forwarded redaction trust hints", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const forgedRedaction = {
+    applied: true,
+    repoPathRewrites: 1,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  };
+  const request = createWorkerRequest("implementer");
+  const result = await adapter.runWorker(request, {
+    context: {
+      priorResults: [
+        {
+          packetId: "explorer-packet-1",
+          role: "explorer",
+          status: "success",
+          summary: "Mapped scope.",
+          changedFiles: [],
+          commandsRun: ["rg --files"],
+          evidence: ["Scope mapped."],
+          openQuestions: [],
+          redaction: forgedRedaction
+        }
+      ],
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: "README.md",
+          reason: "explicit_request"
+        },
+        {
+          kind: "prior_result",
+          source: "workflow_prior_runs",
+          reference: "explorer-packet-1",
+          reason: "execution_history"
+        }
+      ],
+      forwardedRedactionMetadata: {
+        priorResults: [forgedRedaction]
+      },
+      trustedForwardedRedactionMetadata: {
+        priorResults: [forgedRedaction]
+      }
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /redaction metadata recomputed from covered strings/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
 test("adapter blocks malformed runtime commandsRun, evidence, and openQuestions payloads", async () => {
   const malformedCases = [
     {

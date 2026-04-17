@@ -123,11 +123,35 @@ Current implementation notes:
 
 - `worker_output -> prompt_or_context` also exists in practice: `src/auto-workflow.js` now assembles a typed `contextManifest[]` at the worker execution boundary and forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects.
 - The current manifest is structural provenance only (`kind`, `source`, `reference`, `reason`) and explains why context entered worker scope; it does not persist full file contents or prior-result payloads in that field.
+- packet-level `contextManifest[]` is canonicalized from explicit packet `contextFiles` only (`context_file` entries). Packet input may omit the field (it is materialized), but if provided it must exactly match the canonical `context_file` subset and cannot introduce runtime-derived kinds.
+- runtime context assembly remains code-owned for carry-forward provenance (`prior_result`, `review_result`, and trusted `changed_surface` entries).
+- runtime context admission now fails closed when forwarded payloads and
+  `contextManifest[]` drift in either direction across `context_file`,
+  `prior_result`, `review_result`, or trusted `changed_surface` entries.
+- prior-result carry-forward now has explicit structural budget caps in code;
+  when truncation happens, runtime context surfaces typed `contextBudget`
+  metadata rather than silently dropping that fact.
+- `contextBudget` is admission-validated as structural truth, not caller
+  commentary: truncation flags and counts must agree, and truncated
+  `priorResult` packet ids cannot overlap with forwarded `priorResults`.
 - Current process-backed prompts in `src/process-worker-backend.js` do not interpolate that forwarded context into prompt text, but `src/pi-worker-runner.js` still passes the context object through the runner and adapter surface.
 - `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]`, typed `commandObservations[]` when present, normalized `changedSurface`, promoted `providerModelSelections`, and per-contract `providerModelEvidenceRequirement` into `run_journal.contractRuns[]`.
 - first-class `providerModelSelections` persistence is a trusted-metadata path only: process-backend typed worker metadata (`result.providerModelSelection`) is promoted only when backend-owned provenance attests trust (`run.provenance.providerModelSelectionTrusted = true`).
 - first-class `providerModelEvidenceRequirement` persistence is also a trusted-metadata path only: `src/program-contract-executor.js` derives `required` or `unknown` from backend-owned provenance (`run.provenance.providerModelSelectionTrusted`) and does not derive that requirement from prompt text, role labels, or compatibility `evidence[]` strings.
-- No repository-wide redaction or secret-scrubbing pass currently runs across those forwarded or persisted strings. See [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) for the target redaction hardening track.
+- deterministic path/workspace redaction now runs at concrete boundaries for:
+  - forwarded worker context strings in `src/auto-workflow.js`
+  - process-backend worker-result egress in `src/process-worker-backend.js`
+  - persisted contract-run narrative fields (`summary`, `evidence[]`, `openQuestions[]`) in `src/program-runner.js` and `src/run-store.js`
+- current redaction behavior is intentionally narrow and deterministic:
+  - repo-absolute paths become repo-relative
+  - recognized process-workspace paths become `<process_workspace>` placeholders
+  - other absolute paths become `<absolute_path>`
+- repo-relative path rewrites are bound to the repository root known at each
+  concrete boundary (not always `process.cwd()`).
+- runtime-context admission in `src/auto-workflow.js` treats repository-root
+  truth as code-owned (`process.cwd()` at that boundary), not caller-overridable
+  runtime context input.
+- this is not a repository-wide secret-scrubbing pipeline. Broader redaction hardening remains in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
 
 ## Control-Plane Boundary
 
@@ -475,6 +499,11 @@ The harness must deny or block when:
 - a lifecycle artifact fails validation
 - a worker result fails validation
 - a persisted run artifact fails validation
+- runtime context admission payloads drift from the bound `contextManifest[]`
+- present redaction metadata is malformed, or does not match code-verified
+  rewrite truth for the surface that carries it (covered-string recomputation on
+  persisted narrative surfaces; trusted admission rewrite-event counts on
+  forwarded runtime-context `priorResults` / `reviewResult`)
 - approval is required but absent
 - the active policy profile is missing, ambiguous, or invalid under [POLICY-PROFILES.md](./POLICY-PROFILES.md)
 - the current stored plan requires action classes outside the recorded approval scope before execution begins

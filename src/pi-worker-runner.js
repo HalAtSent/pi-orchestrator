@@ -1,6 +1,12 @@
 import { createWorkerResult, validateTaskPacket } from "./contracts.js";
 import { isPathWithinScope, normalizeScopedPath, scopesOverlap } from "./path-scopes.js";
 import { safeClone } from "./safe-clone.js";
+import {
+  getTrustedForwardedRedactionMetadata,
+  resolvePacketContextManifest,
+  setTrustedForwardedRedactionMetadata,
+  validateRunContext
+} from "./context-manifest.js";
 
 const READ_ONLY_ACCESS = "read_only";
 const WRITE_ACCESS = "write";
@@ -55,11 +61,64 @@ function normalizePacket(packet) {
   normalized.allowedFiles = normalizeFileList(normalized.allowedFiles);
   normalized.forbiddenFiles = normalizeFileList(normalized.forbiddenFiles);
   normalized.contextFiles = normalizeFileList(normalized.contextFiles ?? []);
-  normalized.contextManifest = Array.isArray(normalized.contextManifest)
-    ? clone(normalized.contextManifest)
-    : [];
+  normalized.contextManifest = resolvePacketContextManifest({
+    contextFiles: normalized.contextFiles,
+    contextManifest: normalized.contextManifest,
+    contextFilesFieldName: "packet.contextFiles",
+    contextManifestFieldName: "packet.contextManifest"
+  });
   normalized.commands = Array.isArray(normalized.commands) ? [...normalized.commands] : [];
   return normalized;
+}
+
+function hasStructuredRuntimeContextFields(context = {}) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return false;
+  }
+
+  return Object.prototype.hasOwnProperty.call(context, "contextManifest")
+    || Object.prototype.hasOwnProperty.call(context, "priorResults")
+    || Object.prototype.hasOwnProperty.call(context, "reviewResult")
+    || Object.prototype.hasOwnProperty.call(context, "changedSurfaceContext")
+    || Object.prototype.hasOwnProperty.call(context, "contextBudget");
+}
+
+function normalizeRuntimeContext(packet, context = {}) {
+  const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(context);
+  const normalizedContext = context && typeof context === "object" && !Array.isArray(context)
+    ? clone(context)
+    : {};
+
+  if (!hasStructuredRuntimeContextFields(normalizedContext)) {
+    if (trustedForwardedRedactionMetadata !== undefined) {
+      setTrustedForwardedRedactionMetadata(normalizedContext, trustedForwardedRedactionMetadata);
+    }
+    return normalizedContext;
+  }
+
+  const normalizedRunContext = validateRunContext({
+    packetContextFiles: packet.contextFiles,
+    contextManifest: normalizedContext.contextManifest,
+    priorResults: normalizedContext.priorResults ?? [],
+    reviewResult: normalizedContext.reviewResult ?? null,
+    changedSurfaceContext: normalizedContext.changedSurfaceContext ?? [],
+    contextBudget: normalizedContext.contextBudget,
+    forwardedRedactionMetadata: trustedForwardedRedactionMetadata,
+    fieldName: "context"
+  });
+
+  normalizedContext.contextManifest = normalizedRunContext.contextManifest;
+  if (
+    normalizedRunContext.contextBudget !== undefined
+    || Object.prototype.hasOwnProperty.call(normalizedContext, "contextBudget")
+  ) {
+    normalizedContext.contextBudget = normalizedRunContext.contextBudget ?? normalizedContext.contextBudget;
+  }
+  if (trustedForwardedRedactionMetadata !== undefined) {
+    setTrustedForwardedRedactionMetadata(normalizedContext, trustedForwardedRedactionMetadata);
+  }
+
+  return normalizedContext;
 }
 
 function createBlockedResult({ role, summary, evidence = [], openQuestions = [] }) {
@@ -280,6 +339,19 @@ export function createPiWorkerRunner({
         });
       }
 
+      let runtimeContext;
+      try {
+        runtimeContext = normalizeRuntimeContext(packet, context);
+      } catch (error) {
+        return createFailedResult({
+          role: packet.role,
+          summary: error.message,
+          openQuestions: [
+            "Ensure runtime context payloads match contextManifest[] before worker execution."
+          ]
+        });
+      }
+
       const runId = `${packet.id}:${packet.role}:${runCounter + 1}`;
       runCounter += 1;
 
@@ -306,23 +378,32 @@ export function createPiWorkerRunner({
 
       const request = buildWorkerRequest({
         packet,
-        context,
+        context: runtimeContext,
         roleProfile,
         runId
       });
 
       calls.push({
         packet: clone(packet),
-        context: clone(context),
+        context: clone(runtimeContext),
         request: clone(request)
       });
 
       try {
-        const adapterResponse = await adapter.runWorker(clone(request), {
+        const adapterContext = {
           packet: clone(packet),
-          context: clone(context),
+          context: clone(runtimeContext),
           roleProfile: clone(roleProfile)
-        });
+        };
+        const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(runtimeContext);
+        if (trustedForwardedRedactionMetadata !== undefined) {
+          setTrustedForwardedRedactionMetadata(
+            adapterContext.context,
+            trustedForwardedRedactionMetadata
+          );
+        }
+
+        const adapterResponse = await adapter.runWorker(clone(request), adapterContext);
         assertNoRecursiveDelegation(adapterResponse);
         const rawWorkerResult = extractWorkerResult(adapterResponse);
         const workerResult = createWorkerResult(rawWorkerResult);

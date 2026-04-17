@@ -4,6 +4,11 @@ import {
   validateExecutionProgram
 } from "./project-contracts.js";
 import { normalizeReviewability, normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
+import {
+  assertRedactionMetadataMatchesCoveredStrings,
+  createBoundaryPathRedactor,
+  mergeRedactionMetadata,
+} from "./redaction.js";
 
 const TERMINAL_STOP_STATUSES = new Set(["blocked", "failed", "repair_required"]);
 // Only journals that still represent in-progress work are resumable.
@@ -48,6 +53,53 @@ function createInvalidExecutorResult(message) {
   };
 }
 
+function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
+  const summary = redactor.redactString(contractRunEntry.summary, {
+    fieldName: "contractRunEntry.summary"
+  });
+  const evidence = redactor.redactStringArray(contractRunEntry.evidence, {
+    fieldName: "contractRunEntry.evidence"
+  });
+  const openQuestions = redactor.redactStringArray(contractRunEntry.openQuestions, {
+    fieldName: "contractRunEntry.openQuestions"
+  });
+  const boundaryRedaction = mergeRedactionMetadata(
+    summary.redaction,
+    evidence.redaction,
+    openQuestions.redaction
+  );
+  if (Object.prototype.hasOwnProperty.call(contractRunEntry, "redaction")) {
+    assertRedactionMetadataMatchesCoveredStrings(contractRunEntry.redaction, {
+      redactor,
+      fieldName: "contractRunEntry.redaction",
+      stringFields: [
+        {
+          fieldName: "contractRunEntry.summary",
+          value: contractRunEntry.summary
+        }
+      ],
+      stringArrayFields: [
+        {
+          fieldName: "contractRunEntry.evidence",
+          value: contractRunEntry.evidence
+        },
+        {
+          fieldName: "contractRunEntry.openQuestions",
+          value: contractRunEntry.openQuestions
+        }
+      ]
+    });
+  }
+
+  return {
+    ...contractRunEntry,
+    summary: summary.value,
+    evidence: evidence.values,
+    openQuestions: openQuestions.values,
+    redaction: boundaryRedaction
+  };
+}
+
 function normalizeProgramId(programId) {
   assert(typeof programId === "string" && programId.trim().length > 0, "programId must be a non-empty string");
   return programId.trim();
@@ -80,6 +132,54 @@ function resolveRunStore(runStore, { requireLoad = false } = {}) {
   }
 
   return runStore;
+}
+
+function isAbsolutePathValue(value) {
+  return /^[A-Za-z]:[\\/]/u.test(value)
+    || value.startsWith("\\\\")
+    || value.startsWith("/");
+}
+
+function normalizeKnownRepositoryRoot(candidate) {
+  if (typeof candidate !== "string") {
+    return null;
+  }
+
+  const normalized = candidate.trim();
+  if (normalized.length === 0 || !isAbsolutePathValue(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function resolvePersistenceRepositoryRoot(runStore) {
+  if (!runStore) {
+    return process.cwd();
+  }
+
+  if (typeof runStore.getRepositoryRoot === "function") {
+    try {
+      const accessorRoot = normalizeKnownRepositoryRoot(runStore.getRepositoryRoot());
+      if (accessorRoot) {
+        return accessorRoot;
+      }
+    } catch {
+      // Fall through to other known runStore root fields.
+    }
+  }
+
+  const directRoot = normalizeKnownRepositoryRoot(runStore.repositoryRoot);
+  if (directRoot) {
+    return directRoot;
+  }
+
+  const rootDir = normalizeKnownRepositoryRoot(runStore.rootDir);
+  if (rootDir) {
+    return rootDir;
+  }
+
+  return process.cwd();
 }
 
 function createContractIndex(program) {
@@ -426,15 +526,33 @@ function createPersistenceFailureJournal({
   });
 }
 
+function stripPersistedRunJournalRedaction(runJournal) {
+  return {
+    ...runJournal,
+    contractRuns: runJournal.contractRuns.map((entry) => {
+      if (!Object.prototype.hasOwnProperty.call(entry, "redaction")) {
+        return entry;
+      }
+
+      const {
+        redaction: _ignoredRedaction,
+        ...withoutRedaction
+      } = entry;
+      return withoutRedaction;
+    })
+  };
+}
+
 async function persistJournal(runStore, program, runJournal) {
   if (!runStore) {
     return;
   }
 
+  const persistedRunJournal = stripPersistedRunJournalRedaction(runJournal);
   await runStore.updateRun(program.id, () => ({
     programId: program.id,
     program,
-    runJournal
+    runJournal: persistedRunJournal
   }));
 }
 
@@ -466,6 +584,10 @@ async function runProgramFromState(program, {
   const completedContractIdSet = new Set(initialSnapshot.completedContractIds);
   const pendingContractIdSet = new Set(initialSnapshot.pendingContractIds);
   const contractRuns = clone(initialSnapshot.contractRuns);
+  const persistenceRepositoryRoot = resolvePersistenceRepositoryRoot(runStore);
+  const persistenceBoundaryRedactor = createBoundaryPathRedactor({
+    repositoryRoot: persistenceRepositoryRoot
+  });
 
   if (pendingContractIdSet.size === 0) {
     const finishedJournal = stopProgram({
@@ -559,7 +681,7 @@ async function runProgramFromState(program, {
     }
 
     pendingContractIdSet.delete(contract.id);
-    const contractRunEntry = {
+    const contractRunEntry = redactContractRunEntryForPersistence({
       contractId: contract.id,
       status: result.status,
       summary: result.summary,
@@ -573,7 +695,9 @@ async function runProgramFromState(program, {
       validationOutcome: normalizeValidationOutcome(null, {
         status: result.status
       })
-    };
+    }, {
+      redactor: persistenceBoundaryRedactor
+    });
     if (Array.isArray(result.providerModelSelections) && result.providerModelSelections.length > 0) {
       contractRunEntry.providerModelSelections = result.providerModelSelections;
     }

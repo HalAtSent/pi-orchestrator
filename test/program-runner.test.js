@@ -126,6 +126,130 @@ test("runExecutionProgram omits empty providerModelSelections from contract runs
   });
 });
 
+test("runExecutionProgram redacts absolute paths in persisted contract-run narrative fields", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePath = join(process.cwd(), "src", "helpers.js");
+    const workspaceAbsolutePath = process.platform === "win32"
+      ? "C:\\tmp\\pi-orchestrator-process-worker-abc\\scratch.txt"
+      : "/tmp/pi-orchestrator-process-worker-abc/scratch.txt";
+    const externalAbsolutePath = process.platform === "win32"
+      ? "D:\\outside\\audit.txt"
+      : "/opt/outside/audit.txt";
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id} using ${repoAbsolutePath} and ${workspaceAbsolutePath}.`,
+        evidence: [
+          `repo_path: ${repoAbsolutePath}`,
+          `workspace_path: ${workspaceAbsolutePath}`,
+          `external_path: ${externalAbsolutePath}`
+        ],
+        openQuestions: [`Confirm external location ${externalAbsolutePath} before release.`]
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    const firstJournalEntry = journal.contractRuns[0];
+    assert.equal(firstJournalEntry.summary.includes(repoAbsolutePath), false);
+    assert.equal(firstJournalEntry.summary.includes("src/helpers.js"), false);
+    assert.equal(firstJournalEntry.summary.includes(workspaceAbsolutePath), false);
+    assert.equal(firstJournalEntry.summary.includes("<absolute_path>"), true);
+    assert.equal(
+      firstJournalEntry.evidence.includes(`repo_path: ${repoAbsolutePath}`),
+      false
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes("repo_path: <absolute_path>"),
+      true
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes(`workspace_path: ${workspaceAbsolutePath}`),
+      false
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes("workspace_path: <absolute_path>"),
+      true
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes(`external_path: ${externalAbsolutePath}`),
+      false
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes("external_path: <absolute_path>"),
+      true
+    );
+    assert.equal(
+      firstJournalEntry.openQuestions.includes(`Confirm external location ${externalAbsolutePath} before release.`),
+      false
+    );
+    assert.equal(
+      firstJournalEntry.openQuestions.includes("Confirm external location <absolute_path> before release."),
+      true
+    );
+    assert.equal(firstJournalEntry.redaction.applied, true);
+    assert.equal(firstJournalEntry.redaction.repoPathRewrites, 0);
+    assert.equal(firstJournalEntry.redaction.externalPathRewrites > 0, true);
+
+    const persisted = await runStore.loadRun(program.id);
+    const firstPersistedEntry = persisted.runJournal.contractRuns[0];
+    assert.equal(firstPersistedEntry.summary.includes(repoAbsolutePath), false);
+    assert.equal(firstPersistedEntry.summary.includes(workspaceAbsolutePath), false);
+    assert.equal(firstPersistedEntry.evidence.some((entry) => entry.includes(externalAbsolutePath)), false);
+  });
+});
+
+test("runExecutionProgram uses runStore repository root for persistence-boundary repo rewrites", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePathInsideRunStoreRoot = join(rootDir, "src", "inside.js");
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id} using ${repoAbsolutePathInsideRunStoreRoot}.`,
+        evidence: [`repo_path: ${repoAbsolutePathInsideRunStoreRoot}`],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    const firstJournalEntry = journal.contractRuns[0];
+    assert.equal(firstJournalEntry.summary.includes(repoAbsolutePathInsideRunStoreRoot), false);
+    assert.equal(firstJournalEntry.summary.includes("src/inside.js"), true);
+    assert.equal(firstJournalEntry.summary.includes("<absolute_path>"), false);
+    assert.equal(
+      firstJournalEntry.evidence.includes(`repo_path: ${repoAbsolutePathInsideRunStoreRoot}`),
+      false
+    );
+    assert.equal(
+      firstJournalEntry.evidence.includes("repo_path: src/inside.js"),
+      true
+    );
+    assert.equal(firstJournalEntry.redaction.repoPathRewrites > 0, true);
+    assert.equal(firstJournalEntry.redaction.externalPathRewrites, 0);
+
+    const persisted = await runStore.loadRun(program.id);
+    const firstPersistedEntry = persisted.runJournal.contractRuns[0];
+    assert.equal(firstPersistedEntry.summary.includes(repoAbsolutePathInsideRunStoreRoot), false);
+    assert.equal(firstPersistedEntry.summary.includes("src/inside.js"), true);
+    assert.equal(firstPersistedEntry.summary.includes("<absolute_path>"), false);
+    assert.equal(
+      firstPersistedEntry.evidence.includes(`repo_path: ${repoAbsolutePathInsideRunStoreRoot}`),
+      false
+    );
+    assert.equal(
+      firstPersistedEntry.evidence.includes("repo_path: src/inside.js"),
+      true
+    );
+  });
+});
+
 test("runExecutionProgram persists required provider/model evidence requirement from trusted process-backed execution", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const program = buildProgram();
@@ -525,6 +649,52 @@ test("runExecutionProgram fails closed when contract executor returns malformed 
     assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
     assert.deepEqual(journal.completedContractIds, [firstContractId]);
     assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+  });
+});
+
+test("runExecutionProgram fails closed when contract executor returns malformed redaction metadata", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async () => {
+    const program = buildProgram();
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed redaction metadata payload.",
+            evidence: [],
+            openQuestions: [],
+            redaction: {
+              applied: true,
+              repoPathRewrites: 0,
+              workspacePathRewrites: 0,
+              externalPathRewrites: 0
+            }
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(
+      journal.stopReason,
+      /contractExecutionResult\.redaction\.applied must be false/u
+    );
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
   });
 });
 

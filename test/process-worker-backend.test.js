@@ -250,6 +250,59 @@ test("process backend maps launcher output into a contract-compatible worker res
   }
 });
 
+test("process backend redacts launcher-derived workspace and external absolute paths", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-redaction-"));
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\launcher-output.txt"
+    : "/opt/outside/launcher-output.txt";
+  let observedTargetAbsolutePath = null;
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath }) => {
+        observedTargetAbsolutePath = targetAbsolutePath;
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "updated from process backend", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: `workspace_output: ${targetAbsolutePath} external_output: ${externalAbsolutePath}`,
+          stderr: "",
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-redaction-workflow"
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(
+      result.evidence.some((entry) => observedTargetAbsolutePath && entry.includes(observedTargetAbsolutePath)),
+      false
+    );
+    assert.equal(
+      result.evidence.some((entry) => entry.includes(externalAbsolutePath)),
+      false
+    );
+    assert.equal(
+      result.evidence.some((entry) => entry.includes("<process_workspace>")),
+      true
+    );
+    assert.equal(
+      result.evidence.some((entry) => entry.includes("<absolute_path>")),
+      true
+    );
+    assert.equal(result.redaction.applied, true);
+    assert.equal(result.redaction.workspacePathRewrites > 0, true);
+    assert.equal(result.redaction.externalPathRewrites > 0, true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend preserves trusted provider/model selection on launcher timeout failures", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-timeout-selection-"));
 

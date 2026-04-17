@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 
 import { createTaskPacket, validateWorkerResult } from "../src/contracts.js";
-import { runAutoWorkflow } from "../src/auto-workflow.js";
+import { runAutoWorkflow, runPlannedWorkflow } from "../src/auto-workflow.js";
+import { getTrustedForwardedRedactionMetadata } from "../src/context-manifest.js";
+import { createInitialWorkflow } from "../src/orchestrator.js";
+import { createPiAdapter } from "../src/pi-adapter.js";
 import { createFileClaimRegistry, createPiWorkerRunner } from "../src/pi-worker-runner.js";
 
 function createPacket(role, overrides = {}) {
@@ -150,21 +154,58 @@ test("runner builds the expected worker request payload", async () => {
     allowedFiles: ["src/helpers.js", "src/utils.js"],
     forbiddenFiles: ["src/forbidden.js", "src/generated.js"],
     contextFiles: ["README.md", "docs/OPERATING-GUIDE.md"],
-    contextManifest: [
-      {
-        kind: "context_file",
-        source: "packet_context_files",
-        reference: "README.md",
-        reason: "explicit_request"
-      }
-    ],
+    contextManifest: undefined,
     acceptanceChecks: ["helper rename compiles", "tests pass"],
     stopConditions: ["stop on scope drift"],
     commands: ["node --check src/helpers.js", "node --test --test-isolation=none"]
   });
   const context = {
     workflowId: "workflow-check",
-    priorResults: [{ role: "explorer", status: "success" }]
+    priorResults: [
+      {
+        packetId: "explorer-packet-1",
+        role: "explorer",
+        status: "success",
+        summary: "Mapped scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope mapped."],
+        openQuestions: []
+      }
+    ],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "docs/OPERATING-GUIDE.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "prior_result",
+        source: "workflow_prior_runs",
+        reference: "explorer-packet-1",
+        reason: "execution_history"
+      }
+    ],
+    contextBudget: {
+      priorResultsTruncated: false,
+      truncatedPriorResultPacketIds: [],
+      perResultEvidenceTruncated: false,
+      perResultCommandsTruncated: false,
+      perResultChangedFilesTruncated: false,
+      truncationCount: {
+        priorResults: 0,
+        evidenceEntries: 0,
+        commandEntries: 0,
+        changedFiles: 0
+      }
+    }
   };
 
   const result = await runner.run(packet, context);
@@ -181,6 +222,12 @@ test("runner builds the expected worker request payload", async () => {
       source: "packet_context_files",
       reference: "README.md",
       reason: "explicit_request"
+    },
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "docs/OPERATING-GUIDE.md",
+      reason: "explicit_request"
     }
   ]);
   assert.deepEqual(capturedRequest.acceptanceChecks, ["helper rename compiles", "tests pass"]);
@@ -190,6 +237,117 @@ test("runner builds the expected worker request payload", async () => {
   assert.equal(capturedRequest.controls.writePolicy, "allowlist_only");
   assert.equal(capturedRequest.modelProfile.model, "gpt-5.3-codex-spark");
   assert.deepEqual(capturedRequest.context, context);
+});
+
+test("runner fails closed before adapter invocation when runtime context drifts from contextManifest", async () => {
+  let adapterCallCount = 0;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker() {
+        adapterCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer"), {
+    priorResults: [
+      {
+        packetId: "explorer-packet-1",
+        role: "explorer",
+        status: "success",
+        summary: "Mapped scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope mapped."],
+        openQuestions: []
+      }
+    ],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      }
+    ]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /runtime context assembly invalid or drifted from contextManifest\[\]/i);
+  assert.equal(adapterCallCount, 0);
+});
+
+test("runner fails closed before adapter invocation on contradictory contextBudget metadata", async () => {
+  let adapterCallCount = 0;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker() {
+        adapterCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer"), {
+    priorResults: [
+      {
+        packetId: "explorer-packet-1",
+        role: "explorer",
+        status: "success",
+        summary: "Mapped scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope mapped."],
+        openQuestions: []
+      }
+    ],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "prior_result",
+        source: "workflow_prior_runs",
+        reference: "explorer-packet-1",
+        reason: "execution_history"
+      }
+    ],
+    contextBudget: {
+      priorResultsTruncated: false,
+      truncatedPriorResultPacketIds: ["omitted-prior-result"],
+      perResultEvidenceTruncated: false,
+      perResultCommandsTruncated: false,
+      perResultChangedFilesTruncated: false,
+      truncationCount: {
+        priorResults: 0,
+        evidenceEntries: 0,
+        commandEntries: 0,
+        changedFiles: 0
+      }
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /context\.contextBudget\.priorResultsTruncated/i);
+  assert.equal(adapterCallCount, 0);
 });
 
 test("adapter response maps back into a valid worker result", async () => {
@@ -359,4 +517,124 @@ test("runAutoWorkflow executes through the Pi-backed runner with a fake adapter"
   assert.equal(execution.status, "success");
   assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
   assert.equal(execution.runs.length, 2);
+});
+
+test("runPlannedWorkflow preserves truthful forwarded redaction metadata across Pi second-hop validation", async () => {
+  const repositoryRoot = process.cwd();
+  const absoluteRepoPath = join(repositoryRoot, "src", "helpers.js");
+  const hostCalls = [];
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer", "verifier"],
+    host: {
+      async runWorker(request, context) {
+        hostCalls.push({
+          request,
+          context
+        });
+
+        if (request.role === "implementer") {
+          return {
+            status: "success",
+            summary: `Updated helper at ${absoluteRepoPath}`,
+            changedFiles: ["src/helpers.js"],
+            commandsRun: [`node --check ${absoluteRepoPath}`],
+            evidence: [`repo_path_seen: ${absoluteRepoPath}`],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: "Verifier confirmed scoped behavior.",
+          changedFiles: [],
+          commandsRun: ["node --check src/helpers.js"],
+          evidence: ["verifier_check: pass"],
+          openQuestions: []
+        };
+      }
+    }
+  });
+  const runner = createPiWorkerRunner({ adapter });
+  const workflow = createInitialWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"],
+    contextFiles: ["README.md"]
+  });
+
+  const execution = await runPlannedWorkflow({
+    workflow
+  }, { runner });
+
+  assert.equal(execution.status, "success");
+  assert.equal(hostCalls.length, 2);
+
+  const verifierCall = hostCalls[1];
+  const forwardedPriorResult = verifierCall.context.workflowContext.priorResults[0];
+  assert.equal(forwardedPriorResult.summary.includes(absoluteRepoPath), false);
+  assert.equal(forwardedPriorResult.summary.includes("src/helpers.js"), true);
+  assert.deepEqual(forwardedPriorResult.redaction, {
+    applied: true,
+    repoPathRewrites: 3,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  });
+  assert.equal(getTrustedForwardedRedactionMetadata(verifierCall.request.context), undefined);
+});
+
+test("runner direct entrypoint ignores caller-authored forwarded redaction trust hints", async () => {
+  let adapterCallCount = 0;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker(request) {
+        adapterCallCount += 1;
+        return successResultForRequest(request);
+      }
+    }
+  });
+
+  const forgedRedaction = {
+    applied: true,
+    repoPathRewrites: 1,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0
+  };
+  const result = await runner.run(createPacket("implementer"), {
+    priorResults: [
+      {
+        packetId: "explorer-packet-1",
+        role: "explorer",
+        status: "success",
+        summary: "Mapped scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope mapped."],
+        openQuestions: [],
+        redaction: forgedRedaction
+      }
+    ],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "prior_result",
+        source: "workflow_prior_runs",
+        reference: "explorer-packet-1",
+        reason: "execution_history"
+      }
+    ],
+    forwardedRedactionMetadata: {
+      priorResults: [forgedRedaction]
+    },
+    trustedForwardedRedactionMetadata: {
+      priorResults: [forgedRedaction]
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /redaction metadata recomputed from covered strings/i);
+  assert.equal(adapterCallCount, 0);
 });

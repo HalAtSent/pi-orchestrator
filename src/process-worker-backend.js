@@ -14,6 +14,11 @@ import {
   PROCESS_MODEL_PROBE_DEFAULT_PROVIDER
 } from "./process-model-probe.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
+import {
+  createBoundaryPathRedactor,
+  mergeRedactionMetadata,
+  normalizeRedactionMetadata
+} from "./redaction.js";
 import { safeClone } from "./safe-clone.js";
 
 const SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
@@ -476,6 +481,77 @@ function createSuccessResult(summary, {
     changedSurfaceObservation,
     providerModelSelection
   });
+}
+
+function redactWorkerResultForBoundary(result, {
+  repositoryRoot,
+  processWorkspaceRoots = []
+}) {
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot,
+    processWorkspaceRoots
+  });
+
+  const summary = redactor.redactString(result.summary, {
+    fieldName: "result.summary"
+  });
+  const changedFiles = redactor.redactStringArray(result.changedFiles, {
+    fieldName: "result.changedFiles"
+  });
+  const commandsRun = redactor.redactStringArray(result.commandsRun, {
+    fieldName: "result.commandsRun"
+  });
+  const evidence = redactor.redactStringArray(result.evidence, {
+    fieldName: "result.evidence"
+  });
+  const openQuestions = redactor.redactStringArray(result.openQuestions, {
+    fieldName: "result.openQuestions"
+  });
+
+  const commandObservationRedactions = [];
+  const commandObservations = Array.isArray(result.commandObservations)
+    ? result.commandObservations.map((observation, index) => {
+      const command = redactor.redactString(observation.command, {
+        fieldName: `result.commandObservations[${index}].command`
+      });
+      commandObservationRedactions.push(command.redaction);
+      return {
+        ...observation,
+        command: command.value
+      };
+    })
+    : undefined;
+
+  const existingRedaction = Object.prototype.hasOwnProperty.call(result, "redaction")
+    ? normalizeRedactionMetadata(result.redaction, {
+      fieldName: "result.redaction",
+      allowMissing: false
+    })
+    : undefined;
+
+  const redacted = {
+    ...result,
+    summary: summary.value,
+    changedFiles: changedFiles.values,
+    commandsRun: commandsRun.values,
+    evidence: evidence.values,
+    openQuestions: openQuestions.values,
+    redaction: mergeRedactionMetadata(
+      existingRedaction,
+      summary.redaction,
+      changedFiles.redaction,
+      commandsRun.redaction,
+      evidence.redaction,
+      openQuestions.redaction,
+      ...commandObservationRedactions
+    )
+  };
+
+  if (commandObservations !== undefined) {
+    redacted.commandObservations = commandObservations;
+  }
+
+  return createWorkerResult(redacted);
 }
 
 function getProviderModelSelectionFromLaunchSelection(launchSelection) {
@@ -1645,18 +1721,27 @@ export function createProcessWorkerBackend({
         context: clone(contextInput)
       });
 
+      let workspaceRoot = null;
+      const finalizeWorkerResult = (result) => redactWorkerResultForBoundary(result, {
+        repositoryRoot: normalizedRepositoryRoot,
+        processWorkspaceRoots: workspaceRoot ? [workspaceRoot] : []
+      });
+      const blockedResult = (summary, options = {}) => finalizeWorkerResult(createBlockedResult(summary, options));
+      const failedResult = (summary, options = {}) => finalizeWorkerResult(createFailedResult(summary, options));
+      const successResult = (summary, options = {}) => finalizeWorkerResult(createSuccessResult(summary, options));
+
       let packet;
       try {
         packet = createTaskPacket(clone(packetInput));
       } catch (error) {
-        return createBlockedResult(`process worker blocked: invalid packet (${errorMessage(error)})`, {
+        return blockedResult(`process worker blocked: invalid packet (${errorMessage(error)})`, {
           evidence: ["packet validation failed before worker launch"],
           openQuestions: ["Provide a valid task packet that matches src/contracts.js."]
         });
       }
 
       if (!SUPPORTED_ROLES.includes(packet.role)) {
-        return createBlockedResult(`process worker blocked: unsupported role ${packet.role}`, {
+        return blockedResult(`process worker blocked: unsupported role ${packet.role}`, {
           evidence: [`supported roles: ${SUPPORTED_ROLES.join(", ")}`],
           openQuestions: [`Send a packet with one of: ${SUPPORTED_ROLES.join(", ")}.`]
         });
@@ -1670,14 +1755,14 @@ export function createProcessWorkerBackend({
         forbiddenFiles = unique(packet.forbiddenFiles.map((pathValue) => normalizeRelativeFilePath(pathValue, "packet.forbiddenFiles")));
         contextFiles = unique((packet.contextFiles ?? []).map((pathValue) => normalizeRelativeFilePath(pathValue, "packet.contextFiles")));
       } catch (error) {
-        return createBlockedResult(`process worker blocked: ${errorMessage(error)}`, {
+        return blockedResult(`process worker blocked: ${errorMessage(error)}`, {
           evidence: ["packet file paths failed normalization"],
           openQuestions: ["Use only relative file paths inside packet allowlists and context files."]
         });
       }
 
       if (allowedFiles.length === 0) {
-        return createBlockedResult("process worker blocked: packet.allowedFiles must contain at least one file", {
+        return blockedResult("process worker blocked: packet.allowedFiles must contain at least one file", {
           openQuestions: ["Provide at least one allowed file path for implementer writes."]
         });
       }
@@ -1689,7 +1774,6 @@ export function createProcessWorkerBackend({
         contextFiles
       };
 
-      let workspaceRoot = null;
       let changedFiles = [];
       let launchResult = null;
       let providerModelSelection = null;
@@ -1788,7 +1872,7 @@ export function createProcessWorkerBackend({
         }
 
         if (launchResult?.error) {
-          return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
+          return blockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
             commandsRun,
             observedCommandsRun,
             evidence: unique(evidence),
@@ -1799,7 +1883,7 @@ export function createProcessWorkerBackend({
         }
 
         if (launchResult?.timedOut) {
-          return createFailedResult("process worker failed: launcher timed out", {
+          return failedResult("process worker failed: launcher timed out", {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -1812,7 +1896,7 @@ export function createProcessWorkerBackend({
         }
 
         if (launchResult?.exitCode !== 0) {
-          return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
+          return failedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -1825,7 +1909,7 @@ export function createProcessWorkerBackend({
         }
 
         if (isReadOnlyRole && changedFiles.length > 0) {
-          return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
+          return failedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -1899,7 +1983,7 @@ export function createProcessWorkerBackend({
           ]);
 
           if (launchResult?.error) {
-            return createBlockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
+            return blockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
               commandsRun,
               observedCommandsRun,
               evidence: unique([
@@ -1914,7 +1998,7 @@ export function createProcessWorkerBackend({
           }
 
           if (launchResult?.timedOut) {
-            return createFailedResult("process worker failed: launcher timed out", {
+            return failedResult("process worker failed: launcher timed out", {
               changedFiles,
               commandsRun,
               observedCommandsRun,
@@ -1931,7 +2015,7 @@ export function createProcessWorkerBackend({
           }
 
           if (launchResult?.exitCode !== 0) {
-            return createFailedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
+            return failedResult(`process worker failed: launcher exited with code ${launchResult?.exitCode ?? "unknown"}`, {
               changedFiles,
               commandsRun,
               observedCommandsRun,
@@ -1948,7 +2032,7 @@ export function createProcessWorkerBackend({
           }
 
           if (changedFiles.length > 0) {
-            return createFailedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
+            return failedResult(`${packet.role} process worker failed: ${packet.role} modified files`, {
               changedFiles,
               commandsRun,
               observedCommandsRun,
@@ -1986,7 +2070,7 @@ export function createProcessWorkerBackend({
 
         const changedOutsideAllowlist = changedFiles.filter((file) => !allowedFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
         if (changedOutsideAllowlist.length > 0) {
-          return createFailedResult("process worker failed: worker changed files outside the allowlist", {
+          return failedResult("process worker failed: worker changed files outside the allowlist", {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -2003,7 +2087,7 @@ export function createProcessWorkerBackend({
 
         const changedForbiddenFiles = changedFiles.filter((file) => forbiddenFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
         if (changedForbiddenFiles.length > 0) {
-          return createFailedResult("process worker failed: worker changed forbidden files", {
+          return failedResult("process worker failed: worker changed forbidden files", {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -2020,7 +2104,7 @@ export function createProcessWorkerBackend({
 
         if (isReadOnlyRole && structuredReadOnlyOutput) {
           const commandObservations = deriveProcessBackendCommandObservations(observedCommandsRun);
-          return createWorkerResult({
+          return finalizeWorkerResult(createWorkerResult({
             status: structuredReadOnlyOutput.status,
             summary: structuredReadOnlyOutput.summary,
             changedFiles,
@@ -2037,11 +2121,11 @@ export function createProcessWorkerBackend({
             ]),
             openQuestions: structuredReadOnlyOutput.openQuestions,
             providerModelSelection
-          });
+          }));
         }
 
         if (isReadOnlyRole && !structuredReadOnlyOutput) {
-          return createFailedResult(`${packet.role} process worker failed: invalid structured read-only output after retry`, {
+          return failedResult(`${packet.role} process worker failed: invalid structured read-only output after retry`, {
             changedFiles,
             commandsRun,
             observedCommandsRun,
@@ -2071,7 +2155,7 @@ export function createProcessWorkerBackend({
           });
         }
 
-        return createSuccessResult(successSummary, {
+        return successResult(successSummary, {
           changedFiles,
           commandsRun,
           observedCommandsRun,
@@ -2107,7 +2191,7 @@ export function createProcessWorkerBackend({
           })
           : ["workspace was not created"];
 
-        return createFailedResult(`process worker failed: ${errorMessage(error)}`, {
+        return failedResult(`process worker failed: ${errorMessage(error)}`, {
           changedFiles,
           commandsRun,
           observedCommandsRun,

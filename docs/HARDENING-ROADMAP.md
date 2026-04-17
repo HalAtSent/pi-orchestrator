@@ -55,12 +55,13 @@ Important future gaps still remain:
   now exists for trusted process-backend metadata, and per-contract requirement
   state now exists as a narrow provenance-derived `required` | `unknown`
   surface rather than a backend-complete applicability model
-- context construction and retrieval quality are not yet a first-class
-  hardening surface
+- runtime context admission is now typed and fail-closed against
+  `contextManifest[]`, but retrieval-quality hardening remains partial
 - tool and worker-result contracts are not yet audited as one coherent boundary
 - skill governance is now doctrine-backed, but not yet regression-backed
-- persisted evidence and forwarded worker context still lack a repository-wide
-  redaction pass
+- a narrow deterministic path/workspace redaction landing now exists at selected
+  context and persistence boundaries, but repository-wide redaction hardening is
+  still incomplete
 - runtime profiles and operator-safe mode are still effectively narrow
 - additional orchestration work remains selectively useful, but it is no longer
   the default growth path
@@ -210,17 +211,29 @@ Partial landing already shipped:
 - current deterministic builders cover explicit packet `contextFiles`,
   prior-run carry-forward, repair-loop `reviewResult`, and trusted
   changed-surface carry-forward when selected
+- packet-level `contextManifest[]` input now fails closed unless it matches the
+  canonical `context_file` entries derived from packet `contextFiles`; runtime
+  provenance kinds remain code-owned during run-context assembly
+- runtime context admission now fails closed when forwarded payloads drift from
+  `contextManifest[]` across `context_file`, `prior_result`, `review_result`,
+  and trusted `changed_surface` provenance kinds
+- prior-result carry-forward now has explicit structural budgets with typed
+  `contextBudget` truncation metadata (`priorResultsTruncated`,
+  `truncatedPriorResultPacketIds[]`, and per-result truncation booleans/counts)
+- runtime context admission now truth-validates `contextBudget` against the
+  forwarded payload shape (flag/count parity and no overlap between forwarded
+  prior-result packet ids and truncated packet ids); contradictory metadata
+  fails closed
 - this is context-selection instrumentation only; the manifest stores stable
   locators, not full file content or prior-output payloads, and it is not yet a
   complete retrieval-quality engine
 
 Current gap:
 
-- the harness already bounds scope, but context assembly, retrieval, pruning,
-  and carry-forward are not yet treated as first-class hardening surfaces
-- prior-run summaries, evidence, and changed-surface context can be forwarded,
-  but provenance, freshness, and selection quality are not yet explicit enough
-  for stronger review claims
+- retrieval quality is still structural and provenance-first: no semantic
+  ranking, stale/conflict detection, or scoring model is currently enforced
+- context budgets are currently narrow and deterministic for prior-result
+  forwarding only; additional context classes are not yet budgeted or scored
 
 Hardening target:
 
@@ -228,14 +241,16 @@ Hardening target:
   prior-run reuse, changed-surface carry-forward, and review-context assembly
 - record why a given file, doc, skill, or prior artifact entered context when
   that choice affects worker behavior or later review
-- add checks for stale, conflicting, oversized, or weakly grounded context
+- expand context-admission checks and budget controls only where code-owned
+  provenance can stay truthful and reviewable
 - prefer smaller, provenance-backed context packets over broader prompt
   accumulation
 
 Landing condition:
 
-- workers receive more relevant context with less drift, and reviewers can
-  inspect where that context came from and why it was included
+- workers receive deterministic, provenance-bound context with explicit
+  admission/budget behavior, and reviewers can inspect inclusion and truncation
+  without relying on semantic scoring claims
 
 ### 4. Tool And Result Contract Audit And Cleanup
 
@@ -309,12 +324,36 @@ Landing condition:
 
 ### 6. Redaction And Trust-Boundary Hardening
 
+Partial landing already shipped:
+
+- deterministic path redaction now runs at concrete code-owned boundaries for:
+  - forwarded `priorResults` and `reviewResult` context strings in
+    `src/auto-workflow.js`
+  - process-backend worker-result egress in `src/process-worker-backend.js`
+  - persisted contract-run narrative fields in `src/program-runner.js` and
+    `src/run-store.js`
+- current deterministic coverage is intentionally narrow:
+  - absolute paths inside the repository root are rewritten to repo-relative
+    paths
+  - recognized process workspace paths are rewritten to
+    `<process_workspace>` placeholders
+  - remaining absolute paths are rewritten to `<absolute_path>`
+- this landing now carries typed optional redaction metadata on redacted
+  surfaces, fails closed on malformed present metadata, and fails closed when
+  present metadata does not match code-verified rewrite truth for the carrying
+  surface (covered-string recomputation on persisted narrative surfaces;
+  admission rewrite-event counts on forwarded runtime-context `priorResults` /
+  `reviewResult`)
+- repo-relative rewrites use the repository root known at each concrete
+  boundary (for example, run-store-backed persistence roots), not only
+  `process.cwd()`
+
 Current gap:
 
-- persisted evidence and forwarded worker context still do not pass through a
-  repository-wide redaction or secret-scrubbing pipeline
-- raw tool output, launcher text, workspace paths, and worker summaries can
-  cross persistence or later-context boundaries unredacted
+- there is still no repository-wide redaction or secret-scanning pipeline across
+  all persisted and forwarded text surfaces
+- current coverage is path-focused and boundary-focused only; broader secret or
+  payload-class handling remains future work
 
 Hardening target:
 
