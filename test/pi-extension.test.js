@@ -1330,6 +1330,17 @@ test("pi extension inline-approved build writes the approval binding before exec
     assert.equal(persisted.planFingerprint, expectedPlanFingerprint);
     assert.equal(persisted.approval.planFingerprint, expectedPlanFingerprint);
     assert.deepEqual(persisted.approval.actionClasses, expectedApprovalActionClasses);
+    assert.deepEqual(inlineApproved.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: inlineApproved.buildId
+    });
+    const persistedRun = await runStore.loadRun(inlineApproved.lifecycle.executionProgram.id);
+    assert.deepEqual(persistedRun.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: inlineApproved.buildId
+    });
     assert.deepEqual(approvalDuringExecution, {
       approved: true,
       approvedAt: persisted.approval.approvedAt,
@@ -1425,6 +1436,17 @@ test("pi extension build-approve executes a pending build session by build id", 
       ]
     });
     assert.equal(persisted.execution.programId, approved.lifecycle.executionProgram.id);
+    assert.deepEqual(approved.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: planned.buildId
+    });
+    const persistedRun = await runStore.loadRun(approved.lifecycle.executionProgram.id);
+    assert.deepEqual(persistedRun.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: planned.buildId
+    });
     assert.deepEqual(approvalDuringExecution, {
       approved: true,
       approvedAt: persisted.approval.approvedAt,

@@ -22,6 +22,8 @@ Use this skill after implementation or review to collect targeted evidence.
 
 ## Output Contract
 
+Expected Output Shape: verification_report
+
 Return:
 
 - status

@@ -35,7 +35,7 @@ function createFixtureInventory(overrides = {}) {
       },
       {
         path: "docs/agents/EXPLORER.md",
-        headings: ["Output Shape"]
+        headings: ["Capability Envelope", "Output Shape"]
       }
     ],
     ...overrides
@@ -46,7 +46,10 @@ async function createFixtureRepository({
   includeEntry = true,
   includeExplorerCommand = true,
   includeCommonHeading = true,
-  includeRoleHeading = true
+  includeRoleEnvelopeHeading = true,
+  includeRoleHeading = true,
+  includeOutputContractHeading = true,
+  outputContractShapeMarker = "structured_worker_result"
 } = {}) {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-skill-governance-"));
   await mkdir(join(repositoryRoot, "docs", "agents"), { recursive: true });
@@ -55,6 +58,9 @@ async function createFixtureRepository({
   const commonHeading = includeCommonHeading
     ? "## Role Envelope Model\n\nShared role envelope.\n\n## Output Discipline"
     : "## Drifted Common Heading";
+  const roleEnvelopeHeading = includeRoleEnvelopeHeading
+    ? "## Capability Envelope\n\nRole-specific envelope guidance."
+    : "## Capability Envelope Drifted";
   const roleHeading = includeRoleHeading
     ? "## Output Shape"
     : "## Output Shape Drifted";
@@ -66,7 +72,7 @@ async function createFixtureRepository({
   );
   await writeFile(
     join(repositoryRoot, "docs", "agents", "EXPLORER.md"),
-    `# Explorer\n\n${roleHeading}\n\nStructured worker result guidance.\n`,
+    `# Explorer\n\n${roleEnvelopeHeading}\n\n${roleHeading}\n\nStructured worker result guidance.\n`,
     "utf8"
   );
 
@@ -74,9 +80,26 @@ async function createFixtureRepository({
     const commandSnippet = includeExplorerCommand
       ? "- Prefer `rg` for fast local search.\n"
       : "- Prefer fast local search tools.\n";
+    const outputContractSection = includeOutputContractHeading
+      ? [
+        "## Output Contract",
+        "",
+        ...(outputContractShapeMarker !== null
+          ? [`Expected Output Shape: ${outputContractShapeMarker}`]
+          : []),
+        "",
+        "Return a structured worker result.",
+        ""
+      ].join("\n")
+      : [
+        "## Delivery Contract",
+        "",
+        "Return a structured worker result.",
+        ""
+      ].join("\n");
     await writeFile(
       join(repositoryRoot, "skills", "explorer", "SKILL.md"),
-      `# Explorer Skill\n\n${commandSnippet}\n## Output Contract\n\nReturn a structured worker result.\n`,
+      `# Explorer Skill\n\n${commandSnippet}\n${outputContractSection}\n`,
       "utf8"
     );
   }
@@ -91,6 +114,60 @@ test("governed skill inventory validates for the current repository", () => {
   assert.equal(report.errors.length, 0);
   assert.equal(report.checkedSkills, GOVERNED_SKILLS.length);
   assert.equal(auditGovernedSkills().ok, true);
+});
+
+test("missing Output Contract heading fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    includeOutputContractHeading: false
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_output_contract_heading"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("mismatched output-shape marker fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    outputContractShapeMarker: "verification_report"
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "mismatched_output_contract_shape_marker"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("missing output-shape marker fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    outputContractShapeMarker: null
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_output_contract_shape_marker"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
 });
 
 test("missing governed skill entry file fails", async () => {
@@ -150,6 +227,32 @@ test("missing required heading in a referenced doc fails", async () => {
         entry.code === "missing_required_heading" &&
         entry.path === "docs/agents/EXPLORER.md" &&
         entry.heading === "Output Shape"
+      )),
+      true
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("missing required role-envelope heading in a referenced doc fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    includeRoleEnvelopeHeading: false
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_required_heading"), true);
+    assert.equal(
+      report.errors.some((entry) => (
+        entry.code === "missing_required_heading" &&
+        entry.path === "docs/agents/EXPLORER.md" &&
+        entry.heading === "Capability Envelope"
       )),
       true
     );
@@ -270,6 +373,77 @@ test("required doc-heading dependencies must be declared in referencedFiles", as
       report.errors.some((entry) => (
         entry.code === "undeclared_required_doc_dependency" &&
         entry.path === "docs/agents/COMMON.md"
+      )),
+      true
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("role-doc dependencies require declared envelope headings", async () => {
+  const repositoryRoot = await createFixtureRepository();
+
+  try {
+    const report = validateGovernedSkillDefinitions({
+      inventory: [createFixtureInventory({
+        requiredDocHeadings: [
+          {
+            path: "docs/agents/EXPLORER.md",
+            headings: ["Output Shape"]
+          }
+        ]
+      })],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_required_role_doc_heading_dependency_path"), true);
+    assert.equal(hasErrorCode(report, "missing_required_role_doc_heading_dependency"), true);
+    assert.equal(
+      report.errors.some((entry) => (
+        entry.code === "missing_required_role_doc_heading_dependency_path" &&
+        entry.path === "docs/agents/COMMON.md"
+      )),
+      true
+    );
+    assert.equal(
+      report.errors.some((entry) => (
+        entry.code === "missing_required_role_doc_heading_dependency" &&
+        entry.path === "docs/agents/EXPLORER.md" &&
+        entry.heading === "Capability Envelope"
+      )),
+      true
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("role-doc dependencies fail closed when requiredDocHeadings is omitted", async () => {
+  const repositoryRoot = await createFixtureRepository();
+
+  try {
+    const report = validateGovernedSkillDefinitions({
+      inventory: [createFixtureInventory({
+        requiredDocHeadings: undefined
+      })],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_required_role_doc_heading_dependency_path"), true);
+    assert.equal(
+      report.errors.some((entry) => (
+        entry.code === "missing_required_role_doc_heading_dependency_path"
+        && entry.path === "docs/agents/COMMON.md"
+      )),
+      true
+    );
+    assert.equal(
+      report.errors.some((entry) => (
+        entry.code === "missing_required_role_doc_heading_dependency_path"
+        && entry.path === "docs/agents/EXPLORER.md"
       )),
       true
     );

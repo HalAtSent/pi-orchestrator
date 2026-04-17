@@ -235,7 +235,10 @@ function normalizeRuntimeWorkerResult(response, request, invocationLabel) {
       changedFiles: normalizeFileList(candidate.changedFiles ?? []),
       commandsRun: normalizedStringArrayFields.commandsRun,
       evidence: normalizedStringArrayFields.evidence,
-      openQuestions: normalizedStringArrayFields.openQuestions
+      openQuestions: normalizedStringArrayFields.openQuestions,
+      ...(Object.prototype.hasOwnProperty.call(candidate, "reviewFindings")
+        ? { reviewFindings: candidate.reviewFindings }
+        : {})
     });
   } catch (error) {
     return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned invalid worker result payload.`, {

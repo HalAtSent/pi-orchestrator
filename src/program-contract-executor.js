@@ -2,17 +2,26 @@ import { runPlannedWorkflow } from "./auto-workflow.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { compileExecutionContract } from "./program-compiler.js";
 import {
+  derivePlannedActionClassesFromWorkflow,
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
   deriveCommandObservationsFromCommands,
-  normalizeProviderModelSelection
+  normalizeProviderModelSelection,
+  normalizeReviewFindings
 } from "./run-evidence.js";
+import {
+  evaluatePolicyDecision,
+  inferWorkflowRequiresProcessBackend,
+  normalizePolicyProfileId,
+  POLICY_ENFORCED_ACTION_CLASSES
+} from "./policy-profiles.js";
 
 const IMPLEMENTER_ROLE = "implementer";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED = "required";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN = "unknown";
 const COMMAND_OBSERVATION_SOURCE_WORKER_REPORTED = "worker_reported";
 const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
+const REVIEW_ORIENTED_ROLES = new Set(["reviewer", "verifier"]);
 
 function assert(condition, message) {
   if (!condition) {
@@ -24,8 +33,12 @@ function unique(values) {
   return [...new Set(values)];
 }
 
-function toBlockedContractResult(contractId, reason, { evidence = [], openQuestions = [] } = {}) {
-  return {
+function toBlockedContractResult(contractId, reason, {
+  evidence = [],
+  openQuestions = [],
+  policyDecision = null
+} = {}) {
+  const result = {
     status: "blocked",
     summary: `Execution blocked for ${contractId}: ${reason}`,
     evidence: [...evidence],
@@ -35,6 +48,12 @@ function toBlockedContractResult(contractId, reason, { evidence = [], openQuesti
       ...openQuestions
     ]
   };
+
+  if (policyDecision) {
+    result.policyDecision = policyDecision;
+  }
+
+  return result;
 }
 
 function normalizeContractStatus(status) {
@@ -120,6 +139,13 @@ function hasOwnCommandObservations(runResult) {
     && typeof runResult === "object"
     && !Array.isArray(runResult)
     && Object.prototype.hasOwnProperty.call(runResult, "commandObservations");
+}
+
+function hasOwnReviewFindings(runResult) {
+  return Boolean(runResult)
+    && typeof runResult === "object"
+    && !Array.isArray(runResult)
+    && Object.prototype.hasOwnProperty.call(runResult, "reviewFindings");
 }
 
 function deriveCommandObservations(execution) {
@@ -241,7 +267,40 @@ function deriveProviderModelEvidenceRequirement(execution) {
     : PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN;
 }
 
-function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution) {
+function deriveReviewFindings(execution) {
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+  const reviewFindings = [];
+
+  for (const run of runs) {
+    const role = typeof run?.packet?.role === "string"
+      ? run.packet.role.trim()
+      : "";
+    if (!REVIEW_ORIENTED_ROLES.has(role)) {
+      continue;
+    }
+
+    const runResult = run?.result;
+    if (!hasOwnReviewFindings(runResult)) {
+      continue;
+    }
+
+    const typedReviewFindings = normalizeReviewFindings(runResult.reviewFindings, {
+      fieldName: "workerResult.reviewFindings",
+      allowMissing: false
+    });
+    if (typedReviewFindings.length === 0) {
+      continue;
+    }
+
+    reviewFindings.push(...typedReviewFindings);
+  }
+
+  return reviewFindings;
+}
+
+function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {
+  policyDecision = null
+} = {}) {
   const status = normalizeContractStatus(execution.status);
   const evidence = createExecutionEvidence(compiledPlan, execution);
   const openQuestions = createExecutionOpenQuestions(execution);
@@ -249,6 +308,7 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
   const commandObservations = deriveCommandObservations(execution);
   const providerModelSelections = deriveProviderModelSelections(execution);
   const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(execution);
+  const reviewFindings = deriveReviewFindings(execution);
   const summary = status === "success"
     ? `Executed ${contractId} through ${execution.runs.length} bounded packet run(s).`
     : `Contract ${contractId} ${status}: ${execution.stopReason ?? "execution stopped without an explicit reason"}`;
@@ -265,11 +325,83 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
   if (commandObservations.length > 0) {
     contractResult.commandObservations = commandObservations;
   }
+  if (reviewFindings.length > 0) {
+    contractResult.reviewFindings = reviewFindings;
+  }
   if (providerModelSelections.length > 0) {
     contractResult.providerModelSelections = providerModelSelections;
   }
+  if (policyDecision) {
+    contractResult.policyDecision = policyDecision;
+  }
 
   return contractResult;
+}
+
+function createPolicyGateReason(policyDecision) {
+  const profileId = policyDecision.profileId;
+
+  if (policyDecision.reason === "unknown_profile") {
+    return `policy denied because profile "${profileId}" is unknown or invalid`;
+  }
+  if (policyDecision.reason === "profile_disallows_process_backend") {
+    return `policy denied because profile "${profileId}" disallows process-backend execution`;
+  }
+  if (policyDecision.reason === "profile_disallows_action_class") {
+    return `policy denied because profile "${profileId}" disallows one or more detector-backed action classes`;
+  }
+  if (policyDecision.reason === "profile_requires_human_gate") {
+    return `approval required because profile "${profileId}" requires explicit human approval before execution`;
+  }
+
+  return `policy denied because profile "${profileId}" rejected execution`;
+}
+
+function createPolicyGateOpenQuestions(policyDecision) {
+  if (policyDecision.reason === "profile_requires_human_gate") {
+    return [
+      "Provide explicit human approval and re-run this contract."
+    ];
+  }
+
+  if (policyDecision.reason === "unknown_profile") {
+    return [
+      "Use a supported policy profile id before re-running this contract."
+    ];
+  }
+
+  return [
+    "Adjust the active policy profile or narrow the planned contract actions before re-running."
+  ];
+}
+
+function createPolicyGateEvidence({
+  policyDecision,
+  detectedActionClasses,
+  requiresProcessBackend
+}) {
+  const evidence = [
+    `policy_profile: ${policyDecision.profileId}`,
+    `policy_decision_status: ${policyDecision.status}`,
+    `policy_decision_reason: ${policyDecision.reason}`
+  ];
+
+  const detectorBackedClasses = Array.isArray(detectedActionClasses)
+    ? detectedActionClasses
+    : [];
+  evidence.push(
+    `policy_detected_action_classes: ${
+      detectorBackedClasses.length > 0 ? detectorBackedClasses.join(", ") : "none"
+    }`
+  );
+
+  if (typeof requiresProcessBackend === "boolean") {
+    evidence.push(`policy_requires_process_backend: ${requiresProcessBackend}`);
+  } else {
+    evidence.push("policy_requires_process_backend: unknown");
+  }
+
+  return evidence;
 }
 
 export function createProgramContractExecutor({
@@ -277,6 +409,7 @@ export function createProgramContractExecutor({
   compiler = compileExecutionContract,
   executePlannedWorkflow = runPlannedWorkflow,
   approvedHighRisk = false,
+  policyProfile = null,
   maxRepairLoops = 1
 } = {}) {
   assert(runner && typeof runner.run === "function", "runner.run(packet, context) is required");
@@ -285,6 +418,10 @@ export function createProgramContractExecutor({
   const defaultApprovedHighRisk = parseBooleanFlag(approvedHighRisk, {
     flagName: "approvedHighRisk",
     defaultValue: false
+  });
+  const defaultPolicyProfile = normalizePolicyProfileId(policyProfile, {
+    fieldName: "policyProfile",
+    allowMissing: true
   });
 
   return async function executeContract(contract, context = {}) {
@@ -306,11 +443,50 @@ export function createProgramContractExecutor({
       });
     }
 
+    let policyDecision = null;
+
     try {
       const invocationApprovedHighRisk = parseBooleanFlag(context?.approvedHighRisk, {
         flagName: "approvedHighRisk",
         defaultValue: defaultApprovedHighRisk
       });
+      const requestedPolicyProfile = (
+        context
+        && typeof context === "object"
+        && !Array.isArray(context)
+        && Object.prototype.hasOwnProperty.call(context, "policyProfile")
+      )
+        ? context.policyProfile
+        : defaultPolicyProfile;
+      const detectedActionClasses = derivePlannedActionClassesFromWorkflow(compiledPlan.workflow)
+        .filter((actionClass) => POLICY_ENFORCED_ACTION_CLASSES.includes(actionClass));
+      const requiresProcessBackend = inferWorkflowRequiresProcessBackend({
+        runner,
+        workflow: compiledPlan.workflow
+      });
+      policyDecision = evaluatePolicyDecision({
+        profileId: requestedPolicyProfile,
+        detectedActionClasses,
+        requiresProcessBackend,
+        humanGateApproved: invocationApprovedHighRisk
+      });
+
+      if (policyDecision.status !== "allowed") {
+        return toBlockedContractResult(
+          contractId,
+          createPolicyGateReason(policyDecision),
+          {
+            evidence: createPolicyGateEvidence({
+              policyDecision,
+              detectedActionClasses,
+              requiresProcessBackend
+            }),
+            openQuestions: createPolicyGateOpenQuestions(policyDecision),
+            policyDecision
+          }
+        );
+      }
+
       const execution = await executePlannedWorkflow({
         workflow: compiledPlan.workflow,
         approvedHighRisk: invocationApprovedHighRisk,
@@ -320,7 +496,9 @@ export function createProgramContractExecutor({
         runner
       });
 
-      return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution);
+      return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {
+        policyDecision
+      });
     } catch (error) {
       return toBlockedContractResult(contractId, `bounded execution failed safely: ${error.message}`, {
         evidence: [
@@ -328,7 +506,8 @@ export function createProgramContractExecutor({
         ],
         openQuestions: [
           "Inspect runner behavior and packet validation for this contract."
-        ]
+        ],
+        policyDecision
       });
     }
   };

@@ -23,7 +23,8 @@ import { createPiWorkerRunner } from "./pi-worker-runner.js";
 import {
   formatProgramRunJournal,
   resumeExecutionProgram,
-  runExecutionProgram
+  runExecutionProgram,
+  runExecutionProgramFromApprovedBuildSession
 } from "./program-runner.js";
 import {
   normalizeActionClasses,
@@ -665,22 +666,25 @@ export function createPiExtension({
     const configuredContractExecutor = contractExecutor
       ? resolveContractExecutorInvoker(contractExecutor)
       : null;
-    const createExecutionProgramExecutor = ({ approvedHighRisk = false } = {}) => {
+    const createExecutionProgramExecutor = ({ approvedHighRisk = false, policyProfile = null } = {}) => {
       const resolvedApproval = parseBooleanFlag(approvedHighRisk, {
         flagName: "approvedHighRisk",
         defaultValue: false
       });
+      const resolvedPolicyProfile = normalizePolicyProfile(policyProfile);
 
       if (configuredContractExecutor) {
         return async (contract, context = {}) => configuredContractExecutor(contract, {
           ...(context && typeof context === "object" && !Array.isArray(context) ? context : {}),
-          approvedHighRisk: resolvedApproval
+          approvedHighRisk: resolvedApproval,
+          policyProfile: resolvedPolicyProfile
         });
       }
 
       return createProgramContractExecutor({
         runner: resolvedAutoRunner,
-        approvedHighRisk: resolvedApproval
+        approvedHighRisk: resolvedApproval,
+        policyProfile: resolvedPolicyProfile
       });
     };
 
@@ -874,9 +878,12 @@ export function createPiExtension({
             };
           });
 
-          const runJournal = await runExecutionProgram(lifecycle.executionProgram, {
-            contractExecutor: createExecutionProgramExecutor(),
-            runStore
+          const runJournal = await runExecutionProgramFromApprovedBuildSession(lifecycle.executionProgram, {
+            contractExecutor: createExecutionProgramExecutor({
+              policyProfile: buildSession.execution.policyProfile
+            }),
+            runStore,
+            buildId: buildSession.buildId
           });
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
             if (!existingSession) {
@@ -1117,9 +1124,12 @@ export function createPiExtension({
             };
           });
 
-          const runJournal = await runExecutionProgram(buildSession.lifecycle.executionProgram, {
-            contractExecutor: createExecutionProgramExecutor(),
-            runStore
+          const runJournal = await runExecutionProgramFromApprovedBuildSession(buildSession.lifecycle.executionProgram, {
+            contractExecutor: createExecutionProgramExecutor({
+              policyProfile: buildSession.execution.policyProfile
+            }),
+            runStore,
+            buildId
           });
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
             if (!existingSession) {

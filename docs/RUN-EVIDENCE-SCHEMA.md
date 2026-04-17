@@ -39,6 +39,7 @@ Current v1 now persists narrow first-class per-contract fields on `run_journal.c
 
 - `providerModelEvidenceRequirement` (partial Track 2 landing, derived from code-owned backend provenance)
 - `commandObservations[]` (typed command/tool observation surface for currently detector-backed command classes)
+- `policyDecision` (typed pre-execution policy gate decision for the current narrow profile-enforcement slice; live supported profile ids are currently `default` only)
 
 ## Normative Terms
 
@@ -335,6 +336,7 @@ Current `actionClasses` semantics:
 - current stop-reason-code inference can additionally surface `write_forbidden` and `write_protected`
 - this is intentionally conservative and may omit target-policy classes that exist in the enum but do not yet have first-class runtime detectors
 - therefore `run_journal.actionClasses` should be read as current evidence about observed or normalized behavior, not as a complete policy audit trail
+- first-class `contractRuns[].policyDecision` is narrower than `run_journal.actionClasses`: it records only the pre-execution profile gate outcome for the current detector-backed command subset plus process-backend/human-gate checks; with the current live `default`-only registry, supported-id runs currently persist `allowed` and unsupported ids fail closed with `unknown_profile`
 
 Null policy:
 
@@ -360,6 +362,7 @@ Optional fields:
 - `commandObservations`
 - `providerModelEvidenceRequirement`
 - `providerModelSelections`
+- `policyDecision`
 - `redaction`
 
 Required invariants:
@@ -391,6 +394,25 @@ Required invariants:
   - `requestedModel`
   - `selectedProvider`
   - `selectedModel`
+- `policyDecision`, when present, must be a typed object with exactly:
+  - `profileId` (resolved profile id, or unsupported requested id when `reason = unknown_profile`)
+  - `status`
+  - `reason`
+- `policyDecision.status` must be one of:
+  - `allowed`
+  - `blocked`
+  - `approval_required`
+- `policyDecision.reason` must be one of:
+  - `profile_allows_execution`
+  - `profile_disallows_process_backend`
+  - `profile_disallows_action_class`
+  - `profile_requires_human_gate`
+  - `unknown_profile`
+- `policyDecision.status` and `policyDecision.reason` must match:
+  - `allowed` -> `profile_allows_execution`
+  - `approval_required` -> `profile_requires_human_gate`
+  - `blocked` -> `profile_disallows_process_backend` | `profile_disallows_action_class` | `unknown_profile`
+- current live reachability note: with the current supported profile-id set (`default`), `allowed/profile_allows_execution` is the supported-id runtime path and `blocked/unknown_profile` is the fail-closed invalid-id path; other status/reason pairs remain schema-valid for compiled-profile helper logic and future live profiles
 - `redaction`, when present, must be a typed metadata object with exactly:
   - `applied` (boolean)
   - `repoPathRewrites` (non-negative integer)
@@ -418,6 +440,12 @@ Provider/model field omission note:
 - `contractRuns[]` may omit `providerModelEvidenceRequirement` for legacy compatibility.
 - `contractRuns[]` may omit `providerModelSelections`; omission means no trusted typed provider/model packet entries were promoted for that run entry.
 - reviewability logic falls back to legacy `evidence[]` provider/model parsing only for those omitted-entry cases.
+
+Policy decision omission note:
+
+- `contractRuns[]` may omit `policyDecision` for legacy compatibility.
+- malformed present `policyDecision` values fail closed.
+- current code does not synthesize fake `policyDecision` values for legacy records that omitted the field.
 
 Redaction metadata omission note:
 
@@ -658,6 +686,7 @@ The following evidence claims must bind to the named fields below.
 | observed changed-path evidence | `run_journal.contractRuns[].changedSurface` where `capture = complete` or `partial`; when capture is unavailable, operator rendering may fall back to planned scope with explicit caveats |
 | terminal repair-required state | `run_journal.status = repair_required`, supporting `validationArtifacts[]` or repair-related `contractRuns[]`, and terminal `stopReason` text |
 | machine reviewability summary | `run_journal.reviewability`, mirrored by `persisted_run_record.reviewability` and `build_session.execution.reviewability` |
+| pre-execution policy gate outcome for a contract run | first-class `run_journal.contractRuns[].policyDecision` (`profileId`, `status`, `reason`) |
 | detector-backed command/tool evidence for runtime action-class normalization | first-class `run_journal.contractRuns[].commandObservations[]`; when that field is absent on a run entry, compatibility fallback is explicit command markers in `contractRuns[].evidence[]` |
 | provider/model evidence on success | first-class `run_journal.contractRuns[].providerModelEvidenceRequirement` decides requirement semantics when present (`required` or `unknown`), and first-class `run_journal.contractRuns[].providerModelSelections[]` carries typed packet entries when promoted; legacy fallback is process-backend `contractRuns[].evidence[]` convention only for runs where the requirement field is absent |
 | approved plan identity | `build_session.planFingerprint` and `build_session.approval.planFingerprint` |

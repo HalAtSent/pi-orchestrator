@@ -8,6 +8,10 @@ import test from "node:test";
 
 import { createTaskPacket, validateWorkerResult } from "../src/contracts.js";
 import {
+  BOUNDARY_TRUNCATION_MARKER_PREFIX,
+  BOUNDARY_TRUNCATION_MARKER_SUFFIX
+} from "../src/redaction.js";
+import {
   createPiCliLauncher,
   createProcessRoleArgsBuilder,
   createProcessWorkerBackend,
@@ -250,11 +254,13 @@ test("process backend maps launcher output into a contract-compatible worker res
   }
 });
 
-test("process backend redacts launcher-derived workspace and external absolute paths", async () => {
+test("process backend redacts launcher-derived repo/workspace/external absolute paths in stdout and stderr", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-redaction-"));
+  const repoAbsolutePath = join(repositoryRoot, "src", "launcher-output.js");
   const externalAbsolutePath = process.platform === "win32"
     ? "D:\\outside\\launcher-output.txt"
     : "/opt/outside/launcher-output.txt";
+  const relativePath = "src/relative-output.js";
   let observedTargetAbsolutePath = null;
 
   try {
@@ -267,8 +273,18 @@ test("process backend redacts launcher-derived workspace and external absolute p
         return {
           launcher: "fake_launcher",
           exitCode: 0,
-          stdout: `workspace_output: ${targetAbsolutePath} external_output: ${externalAbsolutePath}`,
-          stderr: "",
+          stdout: [
+            `repo_output: ${repoAbsolutePath}`,
+            `workspace_output: ${targetAbsolutePath}`,
+            `external_output: ${externalAbsolutePath}`,
+            `relative_output: ${relativePath}`
+          ].join(" "),
+          stderr: [
+            `repo_stderr: ${repoAbsolutePath}`,
+            `workspace_stderr: ${targetAbsolutePath}`,
+            `external_stderr: ${externalAbsolutePath}`,
+            `relative_stderr: ${relativePath}`
+          ].join(" "),
           commandsRun: ["fake-worker --write-output"]
         };
       }
@@ -280,6 +296,10 @@ test("process backend redacts launcher-derived workspace and external absolute p
 
     assert.equal(result.status, "success");
     assert.equal(
+      result.evidence.some((entry) => entry.includes(repoAbsolutePath)),
+      false
+    );
+    assert.equal(
       result.evidence.some((entry) => observedTargetAbsolutePath && entry.includes(observedTargetAbsolutePath)),
       false
     );
@@ -287,6 +307,20 @@ test("process backend redacts launcher-derived workspace and external absolute p
       result.evidence.some((entry) => entry.includes(externalAbsolutePath)),
       false
     );
+    const stdoutEvidenceEntry = result.evidence.find((entry) => entry.startsWith("stdout: "));
+    assert.equal(Boolean(stdoutEvidenceEntry), true);
+    assert.equal(stdoutEvidenceEntry?.includes("repo_output: src/launcher-output.js"), true);
+    assert.equal(stdoutEvidenceEntry?.includes("workspace_output: <process_workspace>/test/fixtures/process-worker-output.md"), true);
+    assert.equal(stdoutEvidenceEntry?.includes("external_output: <absolute_path>"), true);
+    assert.equal(stdoutEvidenceEntry?.includes(`relative_output: ${relativePath}`), true);
+
+    const stderrEvidenceEntry = result.evidence.find((entry) => entry.startsWith("stderr: "));
+    assert.equal(Boolean(stderrEvidenceEntry), true);
+    assert.equal(stderrEvidenceEntry?.includes("repo_stderr: src/launcher-output.js"), true);
+    assert.equal(stderrEvidenceEntry?.includes("workspace_stderr: <process_workspace>/test/fixtures/process-worker-output.md"), true);
+    assert.equal(stderrEvidenceEntry?.includes("external_stderr: <absolute_path>"), true);
+    assert.equal(stderrEvidenceEntry?.includes(`relative_stderr: ${relativePath}`), true);
+
     assert.equal(
       result.evidence.some((entry) => entry.includes("<process_workspace>")),
       true
@@ -296,8 +330,311 @@ test("process backend redacts launcher-derived workspace and external absolute p
       true
     );
     assert.equal(result.redaction.applied, true);
+    assert.equal(result.redaction.repoPathRewrites > 0, true);
     assert.equal(result.redaction.workspacePathRewrites > 0, true);
     assert.equal(result.redaction.externalPathRewrites > 0, true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend deterministically truncates oversized stdout with an explicit marker before boundary redaction", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-stdout-cap-"));
+  const repoAbsolutePath = join(repositoryRoot, "src", "long-stdout-path.js");
+  const relativePath = "src/relative-stdout-path.js";
+  const truncatedTailSentinel = "stdout-tail-should-not-survive-cap";
+  const oversizedStdout = [
+    `repo_stdout: ${repoAbsolutePath}`,
+    `relative_stdout: ${relativePath}`,
+    "payload:",
+    "x".repeat(3000),
+    truncatedTailSentinel
+  ].join(" ");
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath }) => {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "updated from process backend", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: oversizedStdout,
+          stderr: "",
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-stdout-cap-workflow"
+    });
+
+    assert.equal(result.status, "success");
+    const stdoutEvidenceEntry = result.evidence.find((entry) => entry.startsWith("stdout: "));
+    assert.equal(Boolean(stdoutEvidenceEntry), true);
+    assert.equal(stdoutEvidenceEntry?.includes(BOUNDARY_TRUNCATION_MARKER_PREFIX), true);
+    assert.equal(stdoutEvidenceEntry?.includes(BOUNDARY_TRUNCATION_MARKER_SUFFIX), true);
+    assert.equal(stdoutEvidenceEntry?.includes(truncatedTailSentinel), false);
+    assert.equal(stdoutEvidenceEntry?.includes(repoAbsolutePath), false);
+    assert.equal(stdoutEvidenceEntry?.includes("repo_stdout: src/long-stdout-path.js"), true);
+    assert.equal(stdoutEvidenceEntry?.includes(`relative_stdout: ${relativePath}`), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend deterministically truncates oversized stderr with an explicit marker before boundary redaction", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-stderr-cap-"));
+  const repoAbsolutePath = join(repositoryRoot, "src", "long-stderr-path.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\long-stderr-path.txt"
+    : "/opt/outside/long-stderr-path.txt";
+  const relativePath = "src/relative-stderr-path.js";
+  const truncatedTailSentinel = "stderr-tail-should-not-survive-cap";
+  const oversizedStderr = [
+    `repo_stderr: ${repoAbsolutePath}`,
+    `external_stderr: ${externalAbsolutePath}`,
+    `relative_stderr: ${relativePath}`,
+    "payload:",
+    "y".repeat(3000),
+    truncatedTailSentinel
+  ].join(" ");
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath }) => {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "updated from process backend", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "ok",
+          stderr: oversizedStderr,
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-stderr-cap-workflow"
+    });
+
+    assert.equal(result.status, "success");
+    const stderrEvidenceEntry = result.evidence.find((entry) => entry.startsWith("stderr: "));
+    assert.equal(Boolean(stderrEvidenceEntry), true);
+    assert.equal(stderrEvidenceEntry?.includes(BOUNDARY_TRUNCATION_MARKER_PREFIX), true);
+    assert.equal(stderrEvidenceEntry?.includes(BOUNDARY_TRUNCATION_MARKER_SUFFIX), true);
+    assert.equal(stderrEvidenceEntry?.includes(truncatedTailSentinel), false);
+    assert.equal(stderrEvidenceEntry?.includes(repoAbsolutePath), false);
+    assert.equal(stderrEvidenceEntry?.includes(externalAbsolutePath), false);
+    assert.equal(stderrEvidenceEntry?.includes("repo_stderr: src/long-stderr-path.js"), true);
+    assert.equal(stderrEvidenceEntry?.includes("external_stderr: <absolute_path>"), true);
+    assert.equal(stderrEvidenceEntry?.includes(`relative_stderr: ${relativePath}`), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend redacts read-only structured stdout path fields and preserves relative paths", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-readonly-redaction-"));
+  const repoSummaryPath = join(repositoryRoot, "notes", "summary.md");
+  const repoEvidencePath = join(repositoryRoot, "notes", "evidence.md");
+  const repoQuestionPath = join(repositoryRoot, "notes", "question.md");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\readonly-launcher-output.txt"
+    : "/opt/outside/readonly-launcher-output.txt";
+  const relativePath = "notes/relative-path.md";
+  let observedWorkspacePath = null;
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        observedWorkspacePath = join(workspaceRoot, "notes", "workspace.md");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: JSON.stringify({
+            status: "blocked",
+            summary: [
+              `repo_summary: ${repoSummaryPath}`,
+              `workspace_summary: ${observedWorkspacePath}`,
+              `external_summary: ${externalAbsolutePath}`,
+              `relative_summary: ${relativePath}`
+            ].join(" "),
+            evidence: [
+              `repo_evidence: ${repoEvidencePath}`,
+              `workspace_evidence: ${observedWorkspacePath}`,
+              `external_evidence: ${externalAbsolutePath}`,
+              `relative_evidence: ${relativePath}`
+            ],
+            openQuestions: [
+              `repo_question: ${repoQuestionPath}`,
+              `workspace_question: ${observedWorkspacePath}`,
+              `external_question: ${externalAbsolutePath}`,
+              `relative_question: ${relativePath}`
+            ]
+          }),
+          stderr: [
+            `workspace_stderr: ${observedWorkspacePath}`,
+            `external_stderr: ${externalAbsolutePath}`,
+            `relative_stderr: ${relativePath}`
+          ].join(" "),
+          commandsRun: ["fake-worker --reviewer"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("reviewer"), {
+      workflowId: "process-readonly-redaction-workflow"
+    });
+
+    validateWorkerResult(result);
+    assert.equal(result.status, "blocked");
+    assert.equal(result.summary.includes(repoSummaryPath), false);
+    assert.equal(result.summary.includes(observedWorkspacePath ?? ""), false);
+    assert.equal(result.summary.includes(externalAbsolutePath), false);
+    assert.equal(result.summary.includes("repo_summary: notes/summary.md"), true);
+    assert.equal(result.summary.includes("workspace_summary: <process_workspace>/notes/workspace.md"), true);
+    assert.equal(result.summary.includes("external_summary: <absolute_path>"), true);
+    assert.equal(result.summary.includes(`relative_summary: ${relativePath}`), true);
+
+    assert.equal(result.evidence.some((entry) => entry.includes(repoEvidencePath)), false);
+    assert.equal(result.evidence.some((entry) => observedWorkspacePath && entry.includes(observedWorkspacePath)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(externalAbsolutePath)), false);
+    assert.equal(result.evidence.includes("repo_evidence: notes/evidence.md"), true);
+    assert.equal(result.evidence.includes("workspace_evidence: <process_workspace>/notes/workspace.md"), true);
+    assert.equal(result.evidence.includes("external_evidence: <absolute_path>"), true);
+    assert.equal(result.evidence.includes(`relative_evidence: ${relativePath}`), true);
+
+    assert.equal(result.openQuestions.some((entry) => entry.includes(repoQuestionPath)), false);
+    assert.equal(result.openQuestions.some((entry) => observedWorkspacePath && entry.includes(observedWorkspacePath)), false);
+    assert.equal(result.openQuestions.some((entry) => entry.includes(externalAbsolutePath)), false);
+    assert.equal(result.openQuestions.includes("repo_question: notes/question.md"), true);
+    assert.equal(result.openQuestions.includes("workspace_question: <process_workspace>/notes/workspace.md"), true);
+    assert.equal(result.openQuestions.includes("external_question: <absolute_path>"), true);
+    assert.equal(result.openQuestions.includes(`relative_question: ${relativePath}`), true);
+
+    const stderrEvidenceEntry = result.evidence.find((entry) => entry.startsWith("stderr: "));
+    assert.equal(Boolean(stderrEvidenceEntry), true);
+    assert.equal(stderrEvidenceEntry?.includes("workspace_stderr: <process_workspace>/notes/workspace.md"), true);
+    assert.equal(stderrEvidenceEntry?.includes("external_stderr: <absolute_path>"), true);
+    assert.equal(stderrEvidenceEntry?.includes(`relative_stderr: ${relativePath}`), true);
+
+    assert.equal(result.redaction.applied, true);
+    assert.equal(result.redaction.repoPathRewrites > 0, true);
+    assert.equal(result.redaction.workspacePathRewrites > 0, true);
+    assert.equal(result.redaction.externalPathRewrites > 0, true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend redacts review finding messages and reports truthful boundary redaction metadata", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-review-findings-redaction-"));
+  const repoAbsolutePath = join(repositoryRoot, "src", "review-finding-message.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\review-finding-message.txt"
+    : "/opt/outside/review-finding-message.txt";
+  const relativePath = "src/relative-review-finding-message.js";
+  const findingPath = "src\\existing-finding-path.js";
+  let observedWorkspacePath = null;
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        observedWorkspacePath = join(workspaceRoot, "notes", "workspace-review-finding.md");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: JSON.stringify({
+            status: "repair_required",
+            summary: "Review identified one blocking issue.",
+            evidence: ["Scoped review completed."],
+            openQuestions: [],
+            reviewFindings: [
+              {
+                kind: "issue",
+                severity: "high",
+                message: `repo_message: ${repoAbsolutePath}`,
+                path: findingPath
+              },
+              {
+                kind: "risk",
+                severity: "medium",
+                message: `workspace_message: ${observedWorkspacePath}`
+              },
+              {
+                kind: "gap",
+                severity: "low",
+                message: `external_message: ${externalAbsolutePath}`
+              },
+              {
+                kind: "gap",
+                severity: "low",
+                message: `relative_message: ${relativePath}`
+              }
+            ]
+          }),
+          stderr: "",
+          commandsRun: ["fake-worker --review"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("reviewer"), {
+      workflowId: "process-review-findings-redaction-workflow"
+    });
+
+    validateWorkerResult(result);
+    assert.equal(result.status, "repair_required");
+    assert.deepEqual(result.reviewFindings, [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "repo_message: src/review-finding-message.js",
+        path: "src/existing-finding-path.js"
+      },
+      {
+        kind: "risk",
+        severity: "medium",
+        message: "workspace_message: <process_workspace>/notes/workspace-review-finding.md"
+      },
+      {
+        kind: "gap",
+        severity: "low",
+        message: "external_message: <absolute_path>"
+      },
+      {
+        kind: "gap",
+        severity: "low",
+        message: `relative_message: ${relativePath}`
+      }
+    ]);
+
+    assert.equal(
+      result.reviewFindings.some((entry) => entry.message.includes(repoAbsolutePath)),
+      false
+    );
+    assert.equal(
+      result.reviewFindings.some((entry) => observedWorkspacePath && entry.message.includes(observedWorkspacePath)),
+      false
+    );
+    assert.equal(
+      result.reviewFindings.some((entry) => entry.message.includes(externalAbsolutePath)),
+      false
+    );
+
+    assert.deepEqual(result.redaction, {
+      applied: true,
+      repoPathRewrites: 3,
+      workspacePathRewrites: 3,
+      externalPathRewrites: 2
+    });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -737,6 +1074,63 @@ test("process backend maps reviewer JSON output to repair_required without file 
       result.evidence.includes("No regression test command was present."),
       true
     );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend preserves typed review findings from structured read-only reviewer JSON", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-reviewer-findings-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: 0,
+        stdout: JSON.stringify({
+          status: "repair_required",
+          summary: "Review identified one blocking issue.",
+          evidence: ["Scoped review completed."],
+          openQuestions: [],
+          reviewFindings: [
+            {
+              kind: "issue",
+              severity: "high",
+              message: "Missing guard around optional helper output.",
+              path: "src\\helpers.js"
+            },
+            {
+              kind: "gap",
+              severity: "medium",
+              message: "No regression test artifact was captured."
+            }
+          ]
+        }),
+        stderr: "",
+        commandsRun: ["fake-worker --review"]
+      })
+    });
+
+    const result = await backend.run(createPacket("reviewer"), {
+      workflowId: "reviewer-findings-test-workflow"
+    });
+
+    validateWorkerResult(result);
+    assert.equal(result.status, "repair_required");
+    assert.deepEqual(result.reviewFindings, [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Missing guard around optional helper output.",
+        path: "src/helpers.js"
+      },
+      {
+        kind: "gap",
+        severity: "medium",
+        message: "No regression test artifact was captured."
+      }
+    ]);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }

@@ -24,6 +24,8 @@ contract.
 
 ## Output Contract
 
+Expected Output Shape: review_findings
+
 Return:
 
 - status

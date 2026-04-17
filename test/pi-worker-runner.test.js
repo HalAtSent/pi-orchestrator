@@ -199,11 +199,16 @@ test("runner builds the expected worker request payload", async () => {
       perResultEvidenceTruncated: false,
       perResultCommandsTruncated: false,
       perResultChangedFilesTruncated: false,
+      reviewResultTruncated: false,
+      changedSurfaceTruncated: false,
       truncationCount: {
         priorResults: 0,
         evidenceEntries: 0,
         commandEntries: 0,
-        changedFiles: 0
+        changedFiles: 0,
+        reviewResultEvidenceEntries: 0,
+        reviewResultOpenQuestionEntries: 0,
+        changedSurfacePaths: 0
       }
     }
   };
@@ -285,6 +290,63 @@ test("runner fails closed before adapter invocation when runtime context drifts 
   assert.equal(adapterCallCount, 0);
 });
 
+test("runner fails closed before adapter invocation on duplicate prior-result packet ids", async () => {
+  let adapterCallCount = 0;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker() {
+        adapterCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const duplicatePriorResult = {
+    packetId: "explorer-packet-1",
+    role: "explorer",
+    status: "success",
+    summary: "Mapped scope.",
+    changedFiles: [],
+    commandsRun: ["rg --files"],
+    evidence: ["Scope mapped."],
+    openQuestions: []
+  };
+  const result = await runner.run(createPacket("implementer"), {
+    priorResults: [
+      duplicatePriorResult,
+      {
+        ...duplicatePriorResult,
+        summary: "Second payload entry with the same packet id."
+      }
+    ],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "prior_result",
+        source: "workflow_prior_runs",
+        reference: "explorer-packet-1",
+        reason: "execution_history"
+      }
+    ]
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /duplicates packetId/i);
+  assert.equal(adapterCallCount, 0);
+});
+
 test("runner fails closed before adapter invocation on contradictory contextBudget metadata", async () => {
   let adapterCallCount = 0;
   const runner = createPiWorkerRunner({
@@ -347,6 +409,70 @@ test("runner fails closed before adapter invocation on contradictory contextBudg
 
   assert.equal(result.status, "failed");
   assert.match(result.summary, /context\.contextBudget\.priorResultsTruncated/i);
+  assert.equal(adapterCallCount, 0);
+});
+
+test("runner fails closed before adapter invocation on contradictory review-result contextBudget metadata", async () => {
+  let adapterCallCount = 0;
+  const runner = createPiWorkerRunner({
+    adapter: {
+      async runWorker() {
+        adapterCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await runner.run(createPacket("implementer"), {
+    reviewResult: {
+      status: "success",
+      summary: "Review passed.",
+      evidence: ["review complete"],
+      openQuestions: []
+    },
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: "README.md",
+        reason: "explicit_request"
+      },
+      {
+        kind: "review_result",
+        source: "repair_review",
+        reference: "review_result",
+        reason: "repair_context"
+      }
+    ],
+    contextBudget: {
+      priorResultsTruncated: false,
+      truncatedPriorResultPacketIds: [],
+      perResultEvidenceTruncated: false,
+      perResultCommandsTruncated: false,
+      perResultChangedFilesTruncated: false,
+      reviewResultTruncated: true,
+      changedSurfaceTruncated: false,
+      truncationCount: {
+        priorResults: 0,
+        evidenceEntries: 0,
+        commandEntries: 0,
+        changedFiles: 0,
+        reviewResultEvidenceEntries: 0,
+        reviewResultOpenQuestionEntries: 0,
+        changedSurfacePaths: 0
+      }
+    }
+  });
+
+  assert.equal(result.status, "failed");
+  assert.match(result.summary, /context\.contextBudget\.reviewResultTruncated/i);
   assert.equal(adapterCallCount, 0);
 });
 

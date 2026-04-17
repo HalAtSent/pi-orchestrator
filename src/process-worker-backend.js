@@ -7,7 +7,10 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { createTaskPacket, createWorkerResult, RESULT_STATUSES } from "./contracts.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
-import { deriveCommandObservationsFromCommands } from "./run-evidence.js";
+import {
+  deriveCommandObservationsFromCommands,
+  normalizeReviewFindings
+} from "./run-evidence.js";
 import {
   createCachedProcessModelProbe,
   PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES,
@@ -15,9 +18,11 @@ import {
 } from "./process-model-probe.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
 import {
+  assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
-  normalizeRedactionMetadata
+  normalizeRedactionMetadata,
+  truncateBoundaryString
 } from "./redaction.js";
 import { safeClone } from "./safe-clone.js";
 
@@ -26,6 +31,9 @@ const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const DEFAULT_TEMP_PREFIX = "pi-orchestrator-process-worker-";
 const DEFAULT_APPLY_TEMP_PREFIX = ".pi-orchestrator-apply-";
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
+const READ_ONLY_RETRY_STDOUT_SNIPPET_MAX_CHARS = 600;
+const LAUNCHER_STDOUT_SURFACE_MAX_CHARS = 1200;
+const LAUNCHER_STDERR_SURFACE_MAX_CHARS = 1200;
 const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
 const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
 const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
@@ -294,15 +302,6 @@ function normalizePath(pathValue) {
   return normalizeScopedPath(pathValue);
 }
 
-function truncate(text, maxLength = 1200) {
-  const normalized = String(text);
-  if (normalized.length <= maxLength) {
-    return normalized;
-  }
-
-  return `${normalized.slice(0, maxLength)}...[truncated ${normalized.length - maxLength} chars]`;
-}
-
 function findJsonObjectCandidate(text) {
   const normalized = String(text ?? "").trim();
   if (normalized.length === 0) {
@@ -365,11 +364,25 @@ function parseStructuredReadOnlyOutput({ role, stdout }) {
     return null;
   }
 
+  let normalizedReviewFindings = null;
+  const hasReviewFindings = Object.prototype.hasOwnProperty.call(parsed, "reviewFindings");
+  if (hasReviewFindings) {
+    try {
+      normalizedReviewFindings = normalizeReviewFindings(parsed.reviewFindings, {
+        fieldName: "result.reviewFindings",
+        allowMissing: false
+      });
+    } catch {
+      return null;
+    }
+  }
+
   return {
     status,
     summary,
     evidence: normalizeStringArray(parsed.evidence),
-    openQuestions: normalizeStringArray(parsed.openQuestions)
+    openQuestions: normalizeStringArray(parsed.openQuestions),
+    ...(hasReviewFindings ? { reviewFindings: normalizedReviewFindings } : {})
   };
 }
 
@@ -483,6 +496,56 @@ function createSuccessResult(summary, {
   });
 }
 
+function buildWorkerResultCoveredRedactionFields(result) {
+  const stringFields = [
+    {
+      fieldName: "result.summary",
+      value: result.summary
+    }
+  ];
+  const stringArrayFields = [
+    {
+      fieldName: "result.changedFiles",
+      value: result.changedFiles
+    },
+    {
+      fieldName: "result.commandsRun",
+      value: result.commandsRun
+    },
+    {
+      fieldName: "result.evidence",
+      value: result.evidence
+    },
+    {
+      fieldName: "result.openQuestions",
+      value: result.openQuestions
+    }
+  ];
+
+  if (Array.isArray(result.commandObservations)) {
+    result.commandObservations.forEach((observation, index) => {
+      stringFields.push({
+        fieldName: `result.commandObservations[${index}].command`,
+        value: observation.command
+      });
+    });
+  }
+
+  if (Array.isArray(result.reviewFindings)) {
+    result.reviewFindings.forEach((finding, index) => {
+      stringFields.push({
+        fieldName: `result.reviewFindings[${index}].message`,
+        value: finding.message
+      });
+    });
+  }
+
+  return {
+    stringFields,
+    stringArrayFields
+  };
+}
+
 function redactWorkerResultForBoundary(result, {
   repositoryRoot,
   processWorkspaceRoots = []
@@ -491,6 +554,7 @@ function redactWorkerResultForBoundary(result, {
     repositoryRoot,
     processWorkspaceRoots
   });
+  const coveredRedactionFields = buildWorkerResultCoveredRedactionFields(result);
 
   const summary = redactor.redactString(result.summary, {
     fieldName: "result.summary"
@@ -522,12 +586,32 @@ function redactWorkerResultForBoundary(result, {
     })
     : undefined;
 
-  const existingRedaction = Object.prototype.hasOwnProperty.call(result, "redaction")
-    ? normalizeRedactionMetadata(result.redaction, {
-      fieldName: "result.redaction",
-      allowMissing: false
+  const reviewFindingRedactions = [];
+  const reviewFindings = Array.isArray(result.reviewFindings)
+    ? result.reviewFindings.map((finding, index) => {
+      const message = redactor.redactString(finding.message, {
+        fieldName: `result.reviewFindings[${index}].message`
+      });
+      reviewFindingRedactions.push(message.redaction);
+      return {
+        ...finding,
+        message: message.value
+      };
     })
     : undefined;
+
+  if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
+    const normalizedExistingRedaction = normalizeRedactionMetadata(result.redaction, {
+      fieldName: "result.redaction",
+      allowMissing: false
+    });
+    assertRedactionMetadataMatchesCoveredStrings(normalizedExistingRedaction, {
+      redactor,
+      fieldName: "result.redaction",
+      stringFields: coveredRedactionFields.stringFields,
+      stringArrayFields: coveredRedactionFields.stringArrayFields
+    });
+  }
 
   const redacted = {
     ...result,
@@ -537,18 +621,22 @@ function redactWorkerResultForBoundary(result, {
     evidence: evidence.values,
     openQuestions: openQuestions.values,
     redaction: mergeRedactionMetadata(
-      existingRedaction,
       summary.redaction,
       changedFiles.redaction,
       commandsRun.redaction,
       evidence.redaction,
       openQuestions.redaction,
-      ...commandObservationRedactions
+      ...commandObservationRedactions,
+      ...reviewFindingRedactions
     )
   };
 
   if (commandObservations !== undefined) {
     redacted.commandObservations = commandObservations;
+  }
+
+  if (reviewFindings !== undefined) {
+    redacted.reviewFindings = reviewFindings;
   }
 
   return createWorkerResult(redacted);
@@ -910,7 +998,10 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuid
     : packet.role === "reviewer"
       ? "reviewer"
       : "verifier";
-  const previousOutputSnippet = truncate(previousStdout ?? "", 600).replace(/\r?\n/gu, "\\n");
+  const previousOutputSnippet = truncateBoundaryString(previousStdout ?? "", {
+    maxLength: READ_ONLY_RETRY_STDOUT_SNIPPET_MAX_CHARS,
+    fieldName: "previousStdout"
+  }).replace(/\r?\n/gu, "\\n");
   const lines = [
     `You are the ${roleLabel} worker for a bounded coding task.`,
     "Your previous response was invalid because it was not valid structured JSON.",
@@ -1474,11 +1565,17 @@ function buildEvidence({
   }
 
   if (launchResult?.stdout) {
-    evidence.push(`stdout: ${truncate(launchResult.stdout)}`);
+    evidence.push(`stdout: ${truncateBoundaryString(launchResult.stdout, {
+      maxLength: LAUNCHER_STDOUT_SURFACE_MAX_CHARS,
+      fieldName: "launchResult.stdout"
+    })}`);
   }
 
   if (launchResult?.stderr) {
-    evidence.push(`stderr: ${truncate(launchResult.stderr)}`);
+    evidence.push(`stderr: ${truncateBoundaryString(launchResult.stderr, {
+      maxLength: LAUNCHER_STDERR_SURFACE_MAX_CHARS,
+      fieldName: "launchResult.stderr"
+    })}`);
   }
 
   if (launchResult?.error) {
@@ -2120,6 +2217,9 @@ export function createProcessWorkerBackend({
               "repository_changes_applied: not_applicable"
             ]),
             openQuestions: structuredReadOnlyOutput.openQuestions,
+            ...(Object.prototype.hasOwnProperty.call(structuredReadOnlyOutput, "reviewFindings")
+              ? { reviewFindings: structuredReadOnlyOutput.reviewFindings }
+              : {}),
             providerModelSelection
           }));
         }

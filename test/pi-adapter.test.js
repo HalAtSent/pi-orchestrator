@@ -90,6 +90,44 @@ test("adapter forwards bounded worker request fields to the runtime host", async
   assert.equal(calls[0].context.packet.id, "packet-1");
 });
 
+test("adapter preserves runtime typed review findings when provided", async () => {
+  const adapter = createPiAdapter({
+    supportedRoles: ["reviewer"],
+    host: {
+      async runWorker() {
+        return {
+          status: "success",
+          summary: "Review completed.",
+          changedFiles: [],
+          commandsRun: ["git diff --stat"],
+          evidence: ["Scoped review completed."],
+          openQuestions: [],
+          reviewFindings: [
+            {
+              kind: "issue",
+              severity: "high",
+              message: "Missing scoped regression assertion.",
+              path: "src\\helpers.js"
+            }
+          ]
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("reviewer"), {});
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.reviewFindings, [
+    {
+      kind: "issue",
+      severity: "high",
+      message: "Missing scoped regression assertion.",
+      path: "src/helpers.js"
+    }
+  ]);
+});
+
 test("adapter blocks cleanly when the Pi runtime does not expose worker execution", async () => {
   const adapter = createPiAdapter({
     supportedRoles: ["implementer"],
@@ -204,6 +242,67 @@ test("adapter fails closed when workflowContext payloads drift from contextManif
   assert.equal(runtimeCallCount, 0);
 });
 
+test("adapter fails closed on duplicate workflowContext prior-result packet ids", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const duplicatePriorResult = {
+    packetId: "explorer-packet-1",
+    role: "explorer",
+    status: "success",
+    summary: "Mapped scope.",
+    changedFiles: [],
+    commandsRun: ["rg --files"],
+    evidence: ["Scope mapped."],
+    openQuestions: []
+  };
+  const request = createWorkerRequest("implementer");
+  const result = await adapter.runWorker(request, {
+    context: {
+      priorResults: [
+        duplicatePriorResult,
+        {
+          ...duplicatePriorResult,
+          summary: "Second payload entry with the same packet id."
+        }
+      ],
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: "README.md",
+          reason: "explicit_request"
+        },
+        {
+          kind: "prior_result",
+          source: "workflow_prior_runs",
+          reference: "explorer-packet-1",
+          reason: "execution_history"
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /duplicates packetId/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
 test("adapter fails closed on contradictory workflowContext.contextBudget metadata", async () => {
   let runtimeCallCount = 0;
   const adapter = createPiAdapter({
@@ -270,6 +369,75 @@ test("adapter fails closed on contradictory workflowContext.contextBudget metada
 
   assert.equal(result.status, "blocked");
   assert.match(result.summary, /context\.workflowContext\.contextBudget\.priorResultsTruncated/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
+test("adapter fails closed on contradictory workflowContext changed-surface contextBudget metadata", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const request = createWorkerRequest("implementer");
+  const result = await adapter.runWorker(request, {
+    context: {
+      changedSurfaceContext: [
+        {
+          packetId: "implementer-packet-1",
+          role: "implementer",
+          paths: ["src/helpers.js"]
+        }
+      ],
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: "README.md",
+          reason: "explicit_request"
+        },
+        {
+          kind: "changed_surface",
+          source: "trusted_changed_surface",
+          reference: "implementer-packet-1:implementer",
+          reason: "changed_scope_carry_forward"
+        }
+      ],
+      contextBudget: {
+        priorResultsTruncated: false,
+        truncatedPriorResultPacketIds: [],
+        perResultEvidenceTruncated: false,
+        perResultCommandsTruncated: false,
+        perResultChangedFilesTruncated: false,
+        reviewResultTruncated: false,
+        changedSurfaceTruncated: true,
+        truncationCount: {
+          priorResults: 0,
+          evidenceEntries: 0,
+          commandEntries: 0,
+          changedFiles: 0,
+          reviewResultEvidenceEntries: 0,
+          reviewResultOpenQuestionEntries: 0,
+          changedSurfacePaths: 0
+        }
+      }
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /context\.workflowContext\.contextBudget\.changedSurfaceTruncated/i);
   assert.equal(runtimeCallCount, 0);
 });
 

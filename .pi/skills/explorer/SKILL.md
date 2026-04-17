@@ -23,6 +23,8 @@ code changes.
 
 ## Output Contract
 
+Expected Output Shape: structured_worker_result
+
 Return:
 
 - relevant files

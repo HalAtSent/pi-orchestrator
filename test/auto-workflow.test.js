@@ -90,7 +90,10 @@ function buildContextBudgetFixture(overrides = {}) {
     priorResults: 0,
     evidenceEntries: 0,
     commandEntries: 0,
-    changedFiles: 0
+    changedFiles: 0,
+    reviewResultEvidenceEntries: 0,
+    reviewResultOpenQuestionEntries: 0,
+    changedSurfacePaths: 0
   };
 
   return {
@@ -99,6 +102,8 @@ function buildContextBudgetFixture(overrides = {}) {
     perResultEvidenceTruncated: false,
     perResultCommandsTruncated: false,
     perResultChangedFilesTruncated: false,
+    reviewResultTruncated: false,
+    changedSurfaceTruncated: false,
     ...overrides,
     truncationCount: {
       ...defaultTruncationCount,
@@ -403,6 +408,109 @@ test("validateRunContext accepts matching runtime payloads and context_file pack
   });
 });
 
+test("validateRunContext rejects duplicate priorResults packet ids", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.priorResults.push({
+    ...fixture.priorResults[0],
+    status: "repair_required",
+    summary: "Repeated packet identity should fail admission."
+  });
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /duplicates packetId/i
+  );
+});
+
+test("validateRunContext rejects duplicate contextManifest kind/reference pairs", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.contextManifest.push({
+    kind: "prior_result",
+    source: "repair_review",
+    reference: fixture.priorResults[0].packetId,
+    reason: "repair_context"
+  });
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /duplicates \(kind, reference\) pair/i
+  );
+});
+
+test("validateRunContext rejects duplicate changed-surface references", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.changedSurfaceContext.push({
+    packetId: fixture.changedSurfaceContext[0].packetId,
+    role: fixture.changedSurfaceContext[0].role,
+    paths: ["src/another-helper.js"]
+  });
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /duplicates changed-surface reference/i
+  );
+});
+
+test("validateRunContext accepts structurally deduplicated runtime context", () => {
+  const fixture = buildRuntimeContextFixture();
+  const duplicatedPriorResults = [
+    fixture.priorResults[0],
+    {
+      ...fixture.priorResults[0]
+    }
+  ];
+  const duplicatedChangedSurfaceContext = [
+    fixture.changedSurfaceContext[0],
+    {
+      ...fixture.changedSurfaceContext[0],
+      paths: ["src/another-helper.js"]
+    }
+  ];
+  const duplicatedManifest = [
+    ...fixture.contextManifest,
+    {
+      ...fixture.contextManifest[1]
+    }
+  ];
+  const deduplicatedManifest = Array.from(
+    new Map(
+      duplicatedManifest.map((entry) => [`${entry.kind}::${entry.reference}`, entry])
+    ).values()
+  );
+
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: deduplicatedManifest,
+      priorResults: [duplicatedPriorResults[0]],
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: [duplicatedChangedSurfaceContext[0]],
+      contextBudget: buildContextBudgetFixture()
+    });
+  });
+});
+
 test("validateRunContext rejects contradictory contextBudget truncation flags and counts", () => {
   const fixture = buildRuntimeContextFixture();
   const testCases = [
@@ -449,6 +557,20 @@ test("validateRunContext rejects contradictory contextBudget truncation flags an
         perResultChangedFilesTruncated: true
       }),
       errorPattern: /context\.contextBudget\.perResultChangedFilesTruncated/i
+    },
+    {
+      name: "reviewResultTruncated true with zero review-result truncation counts",
+      contextBudget: buildContextBudgetFixture({
+        reviewResultTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.reviewResultTruncated/i
+    },
+    {
+      name: "changedSurfaceTruncated true with zero changed-surface truncation count",
+      contextBudget: buildContextBudgetFixture({
+        changedSurfaceTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.changedSurfaceTruncated/i
     }
   ];
 
@@ -466,6 +588,80 @@ test("validateRunContext rejects contradictory contextBudget truncation flags an
       testCase.name
     );
   }
+});
+
+test("validateRunContext rejects untrusted nonzero review-result and changed-surface truncation counts", () => {
+  const fixture = buildRuntimeContextFixture();
+  fixture.reviewResult.evidence = Array.from(
+    { length: RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence },
+    (_, index) => `review evidence ${index}`
+  );
+  fixture.changedSurfaceContext[0].paths = Array.from(
+    { length: RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths },
+    (_, index) => `src/helpers-${index}.js`
+  );
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture({
+        reviewResultTruncated: true,
+        truncationCount: {
+          reviewResultEvidenceEntries: 99
+        }
+      })
+    }),
+    /context\.contextBudget\.truncationCount\.reviewResultEvidenceEntries must be 0 unless trusted forwarded truncation metadata is provided/i
+  );
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture({
+        changedSurfaceTruncated: true,
+        truncationCount: {
+          changedSurfacePaths: 3
+        }
+      })
+    }),
+    /context\.contextBudget\.truncationCount\.changedSurfacePaths must be 0 unless trusted forwarded truncation metadata is provided/i
+  );
+});
+
+test("validateRunContext rejects review-result truncation counts when forwarded payload is not capped", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture({
+        reviewResultTruncated: true,
+        truncationCount: {
+          reviewResultEvidenceEntries: 1
+        }
+      }),
+      forwardedRedactionMetadata: {
+        contextBudgetTruncation: {
+          reviewResultEvidenceEntries: 1,
+          reviewResultOpenQuestionEntries: 0,
+          changedSurfacePaths: 0
+        }
+      }
+    }),
+    /requires forwarded reviewResult\.evidence to contain exactly/i
+  );
 });
 
 test("validateRunContext rejects overlap between truncated and forwarded prior-result packet ids", () => {
@@ -933,6 +1129,160 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
       reviewResult: calls[1].context.reviewResult,
       changedSurfaceContext: calls[1].context.changedSurfaceContext,
       contextBudget: calls[1].context.contextBudget
+    });
+  });
+});
+
+test("runAutoWorkflow reports explicit review-result truncation in contextBudget", async () => {
+  const fixture = loadFixture("repair-loop.json");
+  const oversizedReviewEvidence = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence + 2)
+    .fill("repair evidence entry");
+  const oversizedReviewOpenQuestions = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions + 3)
+    .fill("repair open question");
+  fixture.script[3].result.evidence = oversizedReviewEvidence;
+  fixture.script[3].result.openQuestions = oversizedReviewOpenQuestions;
+
+  const runner = createScriptedWorkerRunner(fixture.script);
+  const execution = await runAutoWorkflow(fixture.input, { runner });
+  const calls = runner.getCalls();
+  const rereviewContext = calls[4].context;
+
+  assert.equal(execution.status, "success");
+  assert.equal(
+    rereviewContext.reviewResult.evidence.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence
+  );
+  assert.equal(
+    rereviewContext.reviewResult.openQuestions.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions
+  );
+  assert.equal(rereviewContext.contextBudget.reviewResultTruncated, true);
+  assert.equal(
+    rereviewContext.contextBudget.truncationCount.reviewResultEvidenceEntries,
+    oversizedReviewEvidence.length - RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence
+  );
+  assert.equal(
+    rereviewContext.contextBudget.truncationCount.reviewResultOpenQuestionEntries,
+    oversizedReviewOpenQuestions.length - RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions
+  );
+  assert.ok(rereviewContext.contextManifest.some((entry) => {
+    return entry.kind === "review_result"
+      && entry.source === "repair_review"
+      && entry.reason === "repair_context"
+      && entry.reference === "review_result";
+  }));
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: calls[4].packet.contextFiles,
+      contextManifest: rereviewContext.contextManifest,
+      priorResults: rereviewContext.priorResults,
+      reviewResult: rereviewContext.reviewResult,
+      changedSurfaceContext: rereviewContext.changedSurfaceContext,
+      contextBudget: rereviewContext.contextBudget,
+      forwardedRedactionMetadata: {
+        priorResults: rereviewContext.priorResults.map((priorResult) => priorResult.redaction),
+        reviewResult: rereviewContext.reviewResult?.redaction,
+        contextBudgetTruncation: {
+          reviewResultEvidenceEntries: (
+            rereviewContext.contextBudget.truncationCount.reviewResultEvidenceEntries
+          ),
+          reviewResultOpenQuestionEntries: (
+            rereviewContext.contextBudget.truncationCount.reviewResultOpenQuestionEntries
+          ),
+          changedSurfacePaths: rereviewContext.contextBudget.truncationCount.changedSurfacePaths
+        }
+      }
+    });
+  });
+});
+
+test("runAutoWorkflow reports explicit changed-surface truncation in contextBudget", async () => {
+  const oversizedChangedSurfacePaths = Array.from(
+    {
+      length: RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths + 4
+    },
+    (_, index) => `src/helpers-${index}.js`
+  );
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: oversizedChangedSurfacePaths
+        },
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Implementer step passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verifier step passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner: createScriptedWorkerRunner([]),
+    processBackend,
+    mode: "low_risk_process_implementer"
+  });
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"]
+  }, { runner });
+  const calls = runner.getCalls();
+  const verifierContext = calls[1].context;
+
+  assert.equal(execution.status, "success");
+  assert.equal(calls.length, 2);
+  assert.equal(verifierContext.changedSurfaceContext.length, 1);
+  assert.equal(
+    verifierContext.changedSurfaceContext[0].paths.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths
+  );
+  assert.equal(verifierContext.contextBudget.changedSurfaceTruncated, true);
+  assert.equal(
+    verifierContext.contextBudget.truncationCount.changedSurfacePaths,
+    oversizedChangedSurfacePaths.length - RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths
+  );
+  assert.ok(verifierContext.contextManifest.some((entry) => {
+    return entry.kind === "changed_surface"
+      && entry.source === "trusted_changed_surface"
+      && entry.reason === "changed_scope_carry_forward"
+      && entry.reference === `${calls[0].packet.id}:implementer`;
+  }));
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: calls[1].packet.contextFiles,
+      contextManifest: verifierContext.contextManifest,
+      priorResults: verifierContext.priorResults,
+      reviewResult: verifierContext.reviewResult,
+      changedSurfaceContext: verifierContext.changedSurfaceContext,
+      contextBudget: verifierContext.contextBudget,
+      forwardedRedactionMetadata: {
+        priorResults: verifierContext.priorResults.map((priorResult) => priorResult.redaction),
+        reviewResult: verifierContext.reviewResult?.redaction,
+        contextBudgetTruncation: {
+          reviewResultEvidenceEntries: (
+            verifierContext.contextBudget.truncationCount.reviewResultEvidenceEntries
+          ),
+          reviewResultOpenQuestionEntries: (
+            verifierContext.contextBudget.truncationCount.reviewResultOpenQuestionEntries
+          ),
+          changedSurfacePaths: verifierContext.contextBudget.truncationCount.changedSurfacePaths
+        }
+      }
     });
   });
 });

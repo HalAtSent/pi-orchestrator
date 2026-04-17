@@ -1,8 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { createProgramContractExecutor } from "../src/program-contract-executor.js";
 import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
+import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
 import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
 
 function buildLowRiskContract(overrides = {}) {
@@ -42,6 +46,11 @@ test("default program contract executor returns blocked when no worker handler e
   const result = await executeContract(buildLowRiskContract());
 
   assert.equal(result.status, "blocked");
+  assert.deepEqual(result.policyDecision, {
+    profileId: "default",
+    status: "allowed",
+    reason: "profile_allows_execution"
+  });
   assert.equal(result.providerModelEvidenceRequirement, "unknown");
   assert.match(result.summary, /No local worker handler is configured for the implementer role/i);
   assert.equal(result.evidence.some((line) => line.includes("compiled workflow:")), true);
@@ -77,6 +86,11 @@ test("default program contract executor can succeed with a scripted worker runne
   const result = await executeContract(buildLowRiskContract());
 
   assert.equal(result.status, "success");
+  assert.deepEqual(result.policyDecision, {
+    profileId: "default",
+    status: "allowed",
+    reason: "profile_allows_execution"
+  });
   assert.match(result.summary, /Executed contract-low-risk through 2 bounded packet run\(s\)\./);
   assert.deepEqual(result.changedSurface, {
     capture: "not_captured",
@@ -97,6 +111,60 @@ test("default program contract executor can succeed with a scripted worker runne
   assert.equal(result.providerModelEvidenceRequirement, "unknown");
   assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(runner.getPendingStepCount(), 0);
+});
+
+test("program contract executor fails closed on unsupported policy profile ids before worker launch", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Should never run.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: [],
+        evidence: [],
+        openQuestions: []
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract(), {
+    policyProfile: "operator_safe"
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /policy denied/i);
+  assert.deepEqual(result.policyDecision, {
+    profileId: "operator_safe",
+    status: "blocked",
+    reason: "unknown_profile"
+  });
+  assert.equal(runner.getCalls().length, 0);
+  assert.equal(runner.getPendingStepCount(), 1);
+});
+
+test("program contract executor preserves an allowed policy decision when workflow execution throws", async () => {
+  const runner = createLocalWorkerRunner();
+  let executePlannedWorkflowCalled = false;
+  const executeContract = createProgramContractExecutor({
+    runner,
+    executePlannedWorkflow: async () => {
+      executePlannedWorkflowCalled = true;
+      throw new Error("workflow exploded");
+    }
+  });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(executePlannedWorkflowCalled, true);
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /bounded execution failed safely: workflow exploded/u);
+  assert.deepEqual(result.policyDecision, {
+    profileId: "default",
+    status: "allowed",
+    reason: "profile_allows_execution"
+  });
 });
 
 test("program contract executor derives detector-backed command observations from worker-reported commands", async () => {
@@ -546,6 +614,195 @@ test("program contract executor marks changed-surface evidence partial when only
   ]);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor promotes typed review findings only from reviewer and verifier runs", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "explorer",
+      result: {
+        status: "success",
+        summary: "Mapped the contract scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope files enumerated."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Applied scoped updates.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Scoped update completed."],
+        openQuestions: [],
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "high",
+            message: "Implementer-authored findings must not be promoted."
+          }
+        ]
+      }
+    },
+    {
+      role: "reviewer",
+      result: {
+        status: "success",
+        summary: "Review completed.",
+        changedFiles: [],
+        commandsRun: ["git diff --stat"],
+        evidence: ["Independent review completed."],
+        openQuestions: [],
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "high",
+            message: "Potential null dereference in scoped helper path.",
+            path: "src/helpers.js"
+          }
+        ]
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification checks passed.",
+        changedFiles: [],
+        commandsRun: ["node --test --test-isolation=none"],
+        evidence: ["Verification completed."],
+        openQuestions: [],
+        reviewFindings: [
+          {
+            kind: "gap",
+            severity: "medium",
+            message: "No failing regression test artifact captured for the repaired branch."
+          },
+          {
+            kind: "risk",
+            severity: "low",
+            message: "Rollback instructions are implied, not explicit."
+          }
+        ]
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildDeclaredHighRiskContract(), {
+    approvedHighRisk: true
+  });
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.reviewFindings, [
+    {
+      kind: "issue",
+      severity: "high",
+      message: "Potential null dereference in scoped helper path.",
+      path: "src/helpers.js"
+    },
+    {
+      kind: "gap",
+      severity: "medium",
+      message: "No failing regression test artifact captured for the repaired branch."
+    },
+    {
+      kind: "risk",
+      severity: "low",
+      message: "Rollback instructions are implied, not explicit."
+    }
+  ]);
+});
+
+test("program contract executor preserves typed review findings through process-backed read-only JSON runs", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-review-findings-contract-executor-"));
+
+  try {
+    const defaultRunner = createScriptedWorkerRunner([]);
+    const processBackend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ packet }) => {
+        const stdoutByRole = {
+          explorer: JSON.stringify({
+            status: "success",
+            summary: "Scope mapped.",
+            evidence: ["Scope mapping completed."],
+            openQuestions: []
+          }),
+          reviewer: JSON.stringify({
+            status: "success",
+            summary: "Review completed.",
+            evidence: ["Review checks completed."],
+            openQuestions: [],
+            reviewFindings: [
+              {
+                kind: "issue",
+                severity: "high",
+                message: "Potential null dereference in helper guard.",
+                path: "src\\helpers.js"
+              }
+            ]
+          }),
+          verifier: JSON.stringify({
+            status: "success",
+            summary: "Verification checks passed.",
+            evidence: ["Verification checks completed."],
+            openQuestions: [],
+            reviewFindings: [
+              {
+                kind: "gap",
+                severity: "medium",
+                message: "No failing regression fixture was captured for the repaired path."
+              }
+            ]
+          })
+        };
+
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: stdoutByRole[packet.role] ?? "implementer completed",
+          stderr: "",
+          commandsRun: [`fake-worker --${packet.role}`]
+        };
+      }
+    });
+    const runner = createAutoBackendRunner({
+      defaultRunner,
+      processBackend,
+      mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+    });
+    const executeContract = createProgramContractExecutor({ runner });
+
+    const result = await executeContract(buildDeclaredHighRiskContract(), {
+      approvedHighRisk: true
+    });
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(result.reviewFindings, [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Potential null dereference in helper guard.",
+        path: "src/helpers.js"
+      },
+      {
+        kind: "gap",
+        severity: "medium",
+        message: "No failing regression fixture was captured for the repaired path."
+      }
+    ]);
+    assert.equal(defaultRunner.getCalls().length, 0);
+    assert.deepEqual(
+      processBackend.getCalls().map((call) => call.packet.role),
+      ["explorer", "implementer", "reviewer", "verifier"]
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
 });
 
 test("program contract executor threads program execution context into packet workers", async () => {

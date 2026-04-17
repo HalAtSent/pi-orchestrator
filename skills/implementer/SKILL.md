@@ -23,6 +23,8 @@ Use this skill for a bounded patch owned by a single worker.
 
 ## Output Contract
 
+Expected Output Shape: structured_worker_result
+
 Return:
 
 - status

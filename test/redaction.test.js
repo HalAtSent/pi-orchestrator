@@ -2,11 +2,14 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  BOUNDARY_TRUNCATION_MARKER_PREFIX,
+  BOUNDARY_TRUNCATION_MARKER_SUFFIX,
   assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
   normalizeRedactionMetadata,
-  recomputeRedactionMetadataFromCoveredStrings
+  recomputeRedactionMetadataFromCoveredStrings,
+  truncateBoundaryString
 } from "../src/redaction.js";
 
 function buildPathFixture() {
@@ -28,6 +31,19 @@ function buildPathFixture() {
     externalPath: "/opt/outside/secrets.txt"
   };
 }
+
+test("truncateBoundaryString keeps values at or below the configured cap unchanged", () => {
+  assert.equal(truncateBoundaryString("abcd", { maxLength: 4 }), "abcd");
+  assert.equal(truncateBoundaryString("ab", { maxLength: 4 }), "ab");
+});
+
+test("truncateBoundaryString appends a stable marker when values exceed the configured cap", () => {
+  const truncated = truncateBoundaryString("abcdef", { maxLength: 4 });
+  assert.equal(
+    truncated,
+    `abcd${BOUNDARY_TRUNCATION_MARKER_PREFIX}2${BOUNDARY_TRUNCATION_MARKER_SUFFIX}`
+  );
+});
 
 test("boundary path redactor rewrites repo/workspace/external absolute paths deterministically", () => {
   const fixture = buildPathFixture();
@@ -78,6 +94,25 @@ test("boundary path redactor keeps relative paths unchanged", () => {
     repoPathRewrites: 0,
     workspacePathRewrites: 0,
     externalPathRewrites: 0
+  });
+});
+
+test("boundary path redactor rewrites single-segment absolute posix roots without drive-letter false positives", () => {
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot: "/repo",
+    processWorkspaceRoots: ["/tmp"]
+  });
+
+  const result = redactor.redactString("repo:/repo workspace:/tmp external:/opt relative:relative/path.txt");
+  assert.equal(
+    result.value,
+    "repo:. workspace:<process_workspace> external:<absolute_path> relative:relative/path.txt"
+  );
+  assert.deepEqual(result.redaction, {
+    applied: true,
+    repoPathRewrites: 1,
+    workspacePathRewrites: 1,
+    externalPathRewrites: 1
   });
 });
 

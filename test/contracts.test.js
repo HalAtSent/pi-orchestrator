@@ -241,6 +241,35 @@ test("createWorkerResult rejects malformed commandObservations payloads", () => 
   );
 });
 
+test("createWorkerResult rejects malformed reviewFindings payloads", () => {
+  assert.throws(
+    () => createWorkerResult(validWorkerResult({
+      reviewFindings: [
+        {
+          kind: "issue",
+          severity: "critical",
+          message: "Potential regression in helper validation."
+        }
+      ]
+    })),
+    /result\.reviewFindings\[0\]\.severity must be one of: high, medium, low/u
+  );
+
+  assert.throws(
+    () => createWorkerResult(validWorkerResult({
+      reviewFindings: [
+        {
+          kind: "risk",
+          severity: "medium",
+          message: "Touches an out-of-scope file.",
+          path: "../outside.js"
+        }
+      ]
+    })),
+    /result\.reviewFindings\[0\]\.path must not escape the repository root/u
+  );
+});
+
 test("createWorkerResult rejects malformed providerModelSelection payloads", () => {
   assert.throws(
     () => createWorkerResult(validWorkerResult({
@@ -272,6 +301,14 @@ test("existing valid payloads still pass and optional arrays can be omitted", ()
         command: "npm install --save-dev vitest",
         source: "worker_reported",
         actionClasses: ["execute_local_command", "install_dependency"]
+      }
+    ],
+    reviewFindings: [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Missing regression assertion for scoped rename.",
+        path: "src\\contracts.js"
       }
     ],
     providerModelSelection: {

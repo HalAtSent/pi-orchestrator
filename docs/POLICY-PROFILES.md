@@ -43,8 +43,9 @@ The current closed set of valid policy profile ids is:
 
 Current implementation note:
 
+- current code-owned profile registry lives in `src/policy-profiles.js`
 - current code resolves and persists only the `default` profile
-- current code fail-closes on invalid or unresolved profile ids
+- unsupported, unknown, or malformed present profile ids fail closed before execution
 - additional profile models, including a possible operator-safe mode, are tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md) until they are actually selectable and enforced
 
 ## Defined Profiles
@@ -52,9 +53,21 @@ Current implementation note:
 ### `default`
 
 - Intended use: baseline execution with the contract and evidence floors exactly as written.
-- Allowed action classes: whatever the contract and live implementation currently permit, including detector-backed command-signal classes such as `install_dependency` and `mutate_git_state` when those signals are present.
+- Code-owned compiled profile fields:
+  - `id = default`
+  - `allowedActionClasses = [execute_local_command, install_dependency, mutate_git_state]`
+  - `allowProcessBackend = true`
+  - `requireHumanGateBeforeExecution = false`
 - Approval floor: unchanged from the contract.
 - Extra evidence requirements: none beyond the contract and evidence schema.
+
+These fields are intentionally narrow. They describe only what current code can enforce truthfully in this slice:
+
+- detector-backed command action classes (`execute_local_command`, `install_dependency`, `mutate_git_state`)
+- process-backend allowance
+- explicit human-gate requirement at pre-execution time
+
+They do not claim complete profile coverage of the broader action-class vocabulary in [RUN-EVIDENCE-SCHEMA.md](./RUN-EVIDENCE-SCHEMA.md).
 
 ## Resolution And Default Behavior
 
@@ -89,9 +102,18 @@ Profiles may tighten requirements, but they may never relax contract or evidence
 Current implemented behavior:
 
 - invalid, unknown, or ambiguous profile resolution must block before execution begins
+- pre-execution policy gates run in code-owned contract execution paths before worker launch
+- the live supported profile registry is currently closed to `default` only
+- through that live supported profile-id path today:
+  - `default` resolves and records an `allowed` `policyDecision` for current detector-backed enforcement inputs
+  - unsupported, unknown, or malformed profile ids fail closed before execution with `policyDecision.reason = unknown_profile`
+- compiled profile machinery also includes branches for process-backend disallow, detector-backed action-class disallow (`execute_local_command`, `install_dependency`, `mutate_git_state`), and profile-required human gate checks, but those branches are not currently reachable through the live supported profile-id set
 - persisted evidence must carry one resolved `policyProfile`, currently `default`
 - build-session approval bindings must carry that resolved `policyProfile`
-- this repository may still normalize `stopReasonCode = policy_denied` from denial wording in stop reasons, but that is conservative evidence inference, not proof of a detector-backed profile overlay for every action class
+- per-contract run evidence now persists a first-class typed `policyDecision` surface on `run_journal.contractRuns[]`:
+  - `status`: `allowed` | `blocked` | `approval_required`
+  - `reason`: `profile_allows_execution` | `profile_disallows_process_backend` | `profile_disallows_action_class` | `profile_requires_human_gate` | `unknown_profile`
+- this repository may still normalize `stopReasonCode = policy_denied` from denial wording in stop reasons, but that remains conservative evidence inference and not a claim of full profile completeness
 
 Richer profile overlays and operator-safe profile work are tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
 
@@ -103,6 +125,7 @@ A policy profile is invalid if:
 - more than one active profile is resolved for a single execution
 - it attempts to relax any contract or evidence requirement
 - it makes permissions or evidence depend on prompt text, free-form worker claims, or other non-authoritative inputs
+- a present compiled profile object omits required fields or contains unsupported fields for the enforced compiled shape
 
 ## Invalid Profile Handling
 

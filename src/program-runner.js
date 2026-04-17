@@ -3,7 +3,12 @@ import {
   createRunJournal,
   validateExecutionProgram
 } from "./project-contracts.js";
-import { normalizeReviewability, normalizeStopReasonCode, normalizeValidationOutcome } from "./run-evidence.js";
+import {
+  normalizeApprovalBinding,
+  normalizeReviewability,
+  normalizeStopReasonCode,
+  normalizeValidationOutcome
+} from "./run-evidence.js";
 import {
   assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
@@ -63,10 +68,23 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
   const openQuestions = redactor.redactStringArray(contractRunEntry.openQuestions, {
     fieldName: "contractRunEntry.openQuestions"
   });
+  const reviewFindingMessages = Array.isArray(contractRunEntry.reviewFindings)
+    ? contractRunEntry.reviewFindings.map((finding) => finding.message)
+    : [];
+  const redactedReviewFindingMessages = redactor.redactStringArray(reviewFindingMessages, {
+    fieldName: "contractRunEntry.reviewFindings[].message"
+  });
+  const redactedReviewFindings = Array.isArray(contractRunEntry.reviewFindings)
+    ? contractRunEntry.reviewFindings.map((finding, index) => ({
+      ...finding,
+      message: redactedReviewFindingMessages.values[index]
+    }))
+    : contractRunEntry.reviewFindings;
   const boundaryRedaction = mergeRedactionMetadata(
     summary.redaction,
     evidence.redaction,
-    openQuestions.redaction
+    openQuestions.redaction,
+    redactedReviewFindingMessages.redaction
   );
   if (Object.prototype.hasOwnProperty.call(contractRunEntry, "redaction")) {
     assertRedactionMetadataMatchesCoveredStrings(contractRunEntry.redaction, {
@@ -86,6 +104,10 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
         {
           fieldName: "contractRunEntry.openQuestions",
           value: contractRunEntry.openQuestions
+        },
+        {
+          fieldName: "contractRunEntry.reviewFindings[].message",
+          value: reviewFindingMessages
         }
       ]
     });
@@ -96,6 +118,7 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
     summary: summary.value,
     evidence: evidence.values,
     openQuestions: openQuestions.values,
+    ...(Array.isArray(redactedReviewFindings) ? { reviewFindings: redactedReviewFindings } : {}),
     redaction: boundaryRedaction
   };
 }
@@ -272,9 +295,10 @@ function createRunJournalSnapshot({
   status,
   stopReason,
   contractRuns,
-  completedContractIds
+  completedContractIds,
+  approvalBinding = null
 }) {
-  return createRunJournal({
+  const journal = {
     programId: program.id,
     status,
     stopReason,
@@ -288,7 +312,11 @@ function createRunJournalSnapshot({
     contractRuns,
     completedContractIds,
     pendingContractIds: pendingContractIds(program, completedContractIds)
-  });
+  };
+  if (approvalBinding !== null) {
+    journal.approvalBinding = approvalBinding;
+  }
+  return createRunJournal(journal);
 }
 
 function stopProgram({
@@ -296,19 +324,21 @@ function stopProgram({
   status,
   stopReason,
   contractRuns,
-  completedContractIds
+  completedContractIds,
+  approvalBinding = null
 }) {
   return createRunJournalSnapshot({
     program,
     status,
     stopReason,
     contractRuns,
-    completedContractIds
+    completedContractIds,
+    approvalBinding
   });
 }
 
-function createBlockedRunJournal(programId, stopReason) {
-  return createRunJournal({
+function createBlockedRunJournal(programId, stopReason, { approvalBinding = null } = {}) {
+  const journal = {
     programId,
     status: "blocked",
     stopReason,
@@ -322,7 +352,11 @@ function createBlockedRunJournal(programId, stopReason) {
     contractRuns: [],
     completedContractIds: [],
     pendingContractIds: []
-  });
+  };
+  if (approvalBinding !== null) {
+    journal.approvalBinding = approvalBinding;
+  }
+  return createRunJournal(journal);
 }
 
 function createTerminalResumeRejectedJournal(program, runJournal) {
@@ -335,7 +369,8 @@ function createTerminalResumeRejectedJournal(program, runJournal) {
     status: "blocked",
     stopReason: `Persisted run cannot be resumed because status "${runJournal.status}" is terminal.${priorStopReason}`,
     contractRuns: clone(runJournal.contractRuns),
-    completedContractIds: [...runJournal.completedContractIds]
+    completedContractIds: [...runJournal.completedContractIds],
+    approvalBinding: runJournal.approvalBinding ?? null
   });
 }
 
@@ -514,7 +549,8 @@ function createPersistenceFailureJournal({
   program,
   contractRuns,
   completedContractIds,
-  error
+  error,
+  approvalBinding = null
 }) {
   const message = error instanceof Error ? error.message : String(error);
   return stopProgram({
@@ -522,7 +558,8 @@ function createPersistenceFailureJournal({
     status: "blocked",
     stopReason: `Run persistence failed: ${message}`,
     contractRuns: clone(contractRuns),
-    completedContractIds: [...completedContractIds]
+    completedContractIds: [...completedContractIds],
+    approvalBinding
   });
 }
 
@@ -560,7 +597,8 @@ async function runProgramFromState(program, {
   executeContract,
   runStore,
   initialContractRuns = [],
-  initialCompletedContractIds = []
+  initialCompletedContractIds = [],
+  approvalBinding = null
 }) {
   const topologyResult = validateProgramTopology(program);
   if (!topologyResult.ok) {
@@ -569,7 +607,8 @@ async function runProgramFromState(program, {
       status: "blocked",
       stopReason: topologyResult.reason,
       contractRuns: [],
-      completedContractIds: []
+      completedContractIds: [],
+      approvalBinding
     });
   }
 
@@ -578,7 +617,8 @@ async function runProgramFromState(program, {
     status: "running",
     stopReason: null,
     contractRuns: clone(initialContractRuns),
-    completedContractIds: [...initialCompletedContractIds]
+    completedContractIds: [...initialCompletedContractIds],
+    approvalBinding
   });
 
   const completedContractIdSet = new Set(initialSnapshot.completedContractIds);
@@ -595,7 +635,8 @@ async function runProgramFromState(program, {
       status: "success",
       stopReason: null,
       contractRuns,
-      completedContractIds: [...completedContractIdSet]
+      completedContractIds: [...completedContractIdSet],
+      approvalBinding
     });
 
     try {
@@ -605,7 +646,8 @@ async function runProgramFromState(program, {
         program,
         contractRuns,
         completedContractIds: [...completedContractIdSet],
-        error
+        error,
+        approvalBinding
       });
     }
 
@@ -619,7 +661,8 @@ async function runProgramFromState(program, {
       program,
       contractRuns,
       completedContractIds: [...completedContractIdSet],
-      error
+      error,
+      approvalBinding
     });
   }
 
@@ -631,7 +674,8 @@ async function runProgramFromState(program, {
         status: "blocked",
         stopReason: "No contracts are ready to run with the current dependency state.",
         contractRuns: clone(contractRuns),
-        completedContractIds: [...completedContractIdSet]
+        completedContractIds: [...completedContractIdSet],
+        approvalBinding
       });
 
       try {
@@ -641,7 +685,8 @@ async function runProgramFromState(program, {
           program,
           contractRuns,
           completedContractIds: [...completedContractIdSet],
-          error
+          error,
+          approvalBinding
         });
       }
 
@@ -686,8 +731,14 @@ async function runProgramFromState(program, {
       status: result.status,
       summary: result.summary,
       evidence: result.evidence,
+      ...(Object.prototype.hasOwnProperty.call(result, "policyDecision")
+        ? { policyDecision: result.policyDecision }
+        : {}),
       ...(Array.isArray(result.commandObservations) && result.commandObservations.length > 0
         ? { commandObservations: result.commandObservations }
+        : {}),
+      ...(Array.isArray(result.reviewFindings) && result.reviewFindings.length > 0
+        ? { reviewFindings: result.reviewFindings }
         : {}),
       providerModelEvidenceRequirement: result.providerModelEvidenceRequirement,
       openQuestions: result.openQuestions,
@@ -712,7 +763,8 @@ async function runProgramFromState(program, {
         status: snapshotStatus,
         stopReason: null,
         contractRuns: clone(contractRuns),
-        completedContractIds: [...completedContractIdSet]
+        completedContractIds: [...completedContractIdSet],
+        approvalBinding
       });
 
       try {
@@ -722,7 +774,8 @@ async function runProgramFromState(program, {
           program,
           contractRuns,
           completedContractIds: [...completedContractIdSet],
-          error
+          error,
+          approvalBinding
         });
       }
 
@@ -749,7 +802,8 @@ async function runProgramFromState(program, {
       status: result.status,
       stopReason: terminalStopReason,
       contractRuns: clone(contractRuns),
-      completedContractIds: [...completedContractIdSet]
+      completedContractIds: [...completedContractIdSet],
+      approvalBinding
     });
 
     try {
@@ -759,7 +813,8 @@ async function runProgramFromState(program, {
         program,
         contractRuns,
         completedContractIds: [...completedContractIdSet],
-        error
+        error,
+        approvalBinding
       });
     }
 
@@ -771,7 +826,8 @@ async function runProgramFromState(program, {
     status: "success",
     stopReason: null,
     contractRuns: clone(contractRuns),
-    completedContractIds: [...completedContractIdSet]
+    completedContractIds: [...completedContractIdSet],
+    approvalBinding
   });
 }
 
@@ -785,7 +841,36 @@ export async function runExecutionProgram(programInput, {
 
   return runProgramFromState(program, {
     executeContract,
-    runStore: resolvedRunStore
+    runStore: resolvedRunStore,
+    // Generic callers must not inject persisted approval lineage directly.
+    approvalBinding: null
+  });
+}
+
+export async function runExecutionProgramFromApprovedBuildSession(programInput, {
+  contractExecutor,
+  runStore,
+  buildId = null
+} = {}) {
+  const program = validateExecutionProgram(clone(programInput));
+  const executeContract = resolveContractExecutor(contractExecutor);
+  const resolvedRunStore = resolveRunStore(runStore);
+  const normalizedBuildId = typeof buildId === "string" && buildId.trim().length > 0
+    ? buildId.trim()
+    : null;
+  const trustedApprovalBinding = normalizeApprovalBinding({
+    status: "approved",
+    source: "build_session",
+    ...(normalizedBuildId ? { buildId: normalizedBuildId } : {})
+  }, {
+    fieldName: "runExecutionProgramFromApprovedBuildSession.approvalBinding",
+    allowMissing: false
+  });
+
+  return runProgramFromState(program, {
+    executeContract,
+    runStore: resolvedRunStore,
+    approvalBinding: trustedApprovalBinding
   });
 }
 
@@ -847,7 +932,8 @@ export async function resumeExecutionProgram(programIdInput, {
     executeContract,
     runStore: resolvedRunStore,
     initialContractRuns: runJournal.contractRuns,
-    initialCompletedContractIds: runJournal.completedContractIds
+    initialCompletedContractIds: runJournal.completedContractIds,
+    approvalBinding: runJournal.approvalBinding ?? null
   });
 }
 
@@ -866,6 +952,10 @@ export function formatProgramRunJournal(journal) {
     validationArtifacts: journal.validationArtifacts,
     contractRuns: journal.contractRuns
   });
+  const journalApprovalBinding = normalizeApprovalBinding(journal.approvalBinding, {
+    fieldName: "journal.approvalBinding",
+    allowMissing: true
+  });
   const lines = [
     `program: ${journal.programId}`,
     `status: ${journal.status}`,
@@ -878,6 +968,14 @@ export function formatProgramRunJournal(journal) {
     `pending: ${journal.pendingContractIds.length}`,
     "contracts:"
   ];
+  if (journalApprovalBinding) {
+    lines.splice(lines.length - 1, 0,
+      `approval_binding_status: ${journalApprovalBinding.status}`,
+      `approval_binding_source: ${journalApprovalBinding.source}`,
+      `approval_binding_build_id: ${journalApprovalBinding.buildId ?? "none"}`,
+      `approval_binding_approval_id: ${journalApprovalBinding.approvalId ?? "none"}`
+    );
+  }
 
   if (journal.contractRuns.length === 0) {
     lines.push("- none");
@@ -888,11 +986,26 @@ export function formatProgramRunJournal(journal) {
       });
       lines.push(`- ${entry.contractId} (${entry.status}): ${entry.summary}`);
       lines.push(`  validation_outcome: ${entryValidationOutcome}`);
+      if (entry.policyDecision) {
+        lines.push(`  policy_decision_profile: ${entry.policyDecision.profileId}`);
+        lines.push(`  policy_decision_status: ${entry.policyDecision.status}`);
+        lines.push(`  policy_decision_reason: ${entry.policyDecision.reason}`);
+      }
       lines.push(`  changed_surface_capture: ${entry.changedSurface.capture}`);
       if (entry.changedSurface.paths.length > 0) {
         lines.push("  changed_paths:");
         for (const changedPath of entry.changedSurface.paths) {
           lines.push(`  - ${changedPath}`);
+        }
+      }
+      if (Array.isArray(entry.reviewFindings) && entry.reviewFindings.length > 0) {
+        lines.push("  review_findings:");
+        for (const finding of entry.reviewFindings) {
+          const findingPrefix = `${finding.severity}/${finding.kind}: ${finding.message}`;
+          const findingLine = typeof finding.path === "string" && finding.path.length > 0
+            ? `${findingPrefix} (path: ${finding.path})`
+            : findingPrefix;
+          lines.push(`  - ${findingLine}`);
         }
       }
       if (entry.evidence.length > 0) {

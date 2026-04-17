@@ -1,3 +1,10 @@
+import {
+  DEFAULT_POLICY_PROFILE,
+  VALID_POLICY_PROFILES,
+  normalizePolicyDecision,
+  normalizePolicyProfileId
+} from "./policy-profiles.js";
+
 export const VALIDATION_OUTCOMES = Object.freeze([
   "pass",
   "fail",
@@ -58,11 +65,11 @@ export const ACTION_CLASSES = Object.freeze([
   "recursive_delegate"
 ]);
 
-export const VALID_POLICY_PROFILES = Object.freeze([
-  "default"
-]);
-
-export const DEFAULT_POLICY_PROFILE = "default";
+export {
+  VALID_POLICY_PROFILES,
+  DEFAULT_POLICY_PROFILE,
+  normalizePolicyDecision
+};
 export const CHANGED_SURFACE_CAPTURE_MODES = Object.freeze([
   "complete",
   "partial",
@@ -95,6 +102,24 @@ export const COMMAND_OBSERVATION_ACTION_CLASSES = Object.freeze([
   "execute_local_command",
   "install_dependency",
   "mutate_git_state"
+]);
+export const REVIEW_FINDING_KINDS = Object.freeze([
+  "issue",
+  "risk",
+  "gap"
+]);
+export const REVIEW_FINDING_SEVERITIES = Object.freeze([
+  "high",
+  "medium",
+  "low"
+]);
+export const APPROVAL_BINDING_STATUSES = Object.freeze([
+  "approved",
+  "unknown"
+]);
+export const APPROVAL_BINDING_SOURCES = Object.freeze([
+  "build_session",
+  "unknown"
 ]);
 
 const ROLE_TO_ACTION_CLASSES = Object.freeze({
@@ -865,6 +890,82 @@ function normalizeRepoRelativePath(value, { fieldName = "path" } = {}) {
   return canonical;
 }
 
+function normalizeReviewFindingKind(value, { fieldName = "reviewFinding.kind" } = {}) {
+  const kind = normalizeString(value);
+  if (kind.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!REVIEW_FINDING_KINDS.includes(kind)) {
+    throw new Error(`${fieldName} must be one of: ${REVIEW_FINDING_KINDS.join(", ")}`);
+  }
+  return kind;
+}
+
+function normalizeReviewFindingSeverity(value, { fieldName = "reviewFinding.severity" } = {}) {
+  const severity = normalizeString(value);
+  if (severity.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!REVIEW_FINDING_SEVERITIES.includes(severity)) {
+    throw new Error(`${fieldName} must be one of: ${REVIEW_FINDING_SEVERITIES.join(", ")}`);
+  }
+  return severity;
+}
+
+function normalizeReviewFindingEntry(value, {
+  fieldName = "reviewFindings[]"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const message = normalizeString(value.message);
+  if (message.length === 0) {
+    throw new Error(`${fieldName}.message must be a non-empty string`);
+  }
+
+  const normalizedEntry = {
+    kind: normalizeReviewFindingKind(value.kind, {
+      fieldName: `${fieldName}.kind`
+    }),
+    severity: normalizeReviewFindingSeverity(value.severity, {
+      fieldName: `${fieldName}.severity`
+    }),
+    message
+  };
+
+  if (Object.prototype.hasOwnProperty.call(value, "path")) {
+    if (value.path === undefined || value.path === null) {
+      throw new Error(`${fieldName}.path must be a non-empty string when provided`);
+    }
+    normalizedEntry.path = normalizeRepoRelativePath(value.path, {
+      fieldName: `${fieldName}.path`
+    });
+  }
+
+  return normalizedEntry;
+}
+
+export function normalizeReviewFindings(value, {
+  fieldName = "reviewFindings",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  return value.map((entry, index) => normalizeReviewFindingEntry(entry, {
+    fieldName: `${fieldName}[${index}]`
+  }));
+}
+
 function normalizeExplicitActionClasses(value, { fieldName = "actionClasses" } = {}) {
   if (!Array.isArray(value)) {
     throw new Error("must be an array");
@@ -1209,14 +1310,10 @@ export function derivePlannedActionClassesFromWorkflow(workflowInput) {
 }
 
 export function normalizePolicyProfile(value) {
-  const normalized = normalizeString(value);
-  const resolved = normalized.length > 0 ? normalized : DEFAULT_POLICY_PROFILE;
-
-  if (!VALID_POLICY_PROFILES.includes(resolved)) {
-    throw new Error(`must be one of: ${VALID_POLICY_PROFILES.join(", ")}`);
-  }
-
-  return resolved;
+  return normalizePolicyProfileId(value, {
+    fieldName: "policyProfile",
+    allowMissing: true
+  });
 }
 
 function createValidationArtifactsPlaceholder(validationOutcome, { artifactType = "validation_artifact" } = {}) {
@@ -1564,4 +1661,59 @@ export function normalizeLineageDepth(value, { fallback = 0 } = {}) {
     throw new Error("must be an integer >= 0");
   }
   return source;
+}
+
+export function normalizeApprovalBinding(value, {
+  fieldName = "approvalBinding",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const status = normalizeString(value.status);
+  if (status.length === 0) {
+    throw new Error(`${fieldName}.status must be a non-empty string`);
+  }
+  if (!APPROVAL_BINDING_STATUSES.includes(status)) {
+    throw new Error(`${fieldName}.status must be one of: ${APPROVAL_BINDING_STATUSES.join(", ")}`);
+  }
+
+  const source = normalizeString(value.source);
+  if (source.length === 0) {
+    throw new Error(`${fieldName}.source must be a non-empty string`);
+  }
+  if (!APPROVAL_BINDING_SOURCES.includes(source)) {
+    throw new Error(`${fieldName}.source must be one of: ${APPROVAL_BINDING_SOURCES.join(", ")}`);
+  }
+
+  const rawBuildId = value.buildId;
+  const buildId = rawBuildId === undefined || rawBuildId === null
+    ? null
+    : normalizeString(rawBuildId);
+  if (rawBuildId !== undefined && rawBuildId !== null && buildId.length === 0) {
+    throw new Error(`${fieldName}.buildId must be a non-empty string when provided`);
+  }
+
+  const rawApprovalId = value.approvalId;
+  const approvalId = rawApprovalId === undefined || rawApprovalId === null
+    ? null
+    : normalizeString(rawApprovalId);
+  if (rawApprovalId !== undefined && rawApprovalId !== null && approvalId.length === 0) {
+    throw new Error(`${fieldName}.approvalId must be a non-empty string when provided`);
+  }
+
+  return {
+    status,
+    source,
+    ...(buildId ? { buildId } : {}),
+    ...(approvalId ? { approvalId } : {})
+  };
 }

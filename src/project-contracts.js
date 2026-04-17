@@ -4,10 +4,13 @@ import {
   validateEvaluationCriteria
 } from "./doctrine-evaluation.js";
 import {
+  normalizeApprovalBinding,
   normalizeChangedSurface,
   normalizeCommandObservations,
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelections,
+  normalizePolicyDecision,
+  normalizeReviewFindings,
   normalizeReviewability,
   normalizeStopReasonCode,
   normalizeValidationOutcome
@@ -241,6 +244,21 @@ export function validateContractExecutionResult(result) {
   assertString("contractExecutionResult.summary", result.summary);
   assertStringArray("contractExecutionResult.evidence", result.evidence);
   assertStringArray("contractExecutionResult.openQuestions", result.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(result, "reviewFindings")) {
+    try {
+      const normalizedReviewFindings = normalizeReviewFindings(result.reviewFindings, {
+        fieldName: "contractExecutionResult.reviewFindings",
+        allowMissing: false
+      });
+      if (normalizedReviewFindings.length === 0) {
+        delete result.reviewFindings;
+      } else {
+        result.reviewFindings = normalizedReviewFindings;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(result, "commandObservations")) {
     try {
       const normalizedCommandObservations = normalizeCommandObservations(result.commandObservations, {
@@ -292,6 +310,21 @@ export function validateContractExecutionResult(result) {
       throw new Error(`${error.message}`);
     }
   }
+  if (Object.prototype.hasOwnProperty.call(result, "policyDecision")) {
+    try {
+      const normalizedPolicyDecision = normalizePolicyDecision(result.policyDecision, {
+        fieldName: "contractExecutionResult.policyDecision",
+        allowMissing: false
+      });
+      if (normalizedPolicyDecision === null) {
+        delete result.policyDecision;
+      } else {
+        result.policyDecision = normalizedPolicyDecision;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
     result.redaction = normalizeRedactionMetadata(result.redaction, {
       fieldName: "contractExecutionResult.redaction",
@@ -311,6 +344,21 @@ export function validateRunJournalEntry(entry) {
   assertString("runJournalEntry.summary", entry.summary);
   assertStringArray("runJournalEntry.evidence", entry.evidence);
   assertStringArray("runJournalEntry.openQuestions", entry.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(entry, "reviewFindings")) {
+    try {
+      const normalizedReviewFindings = normalizeReviewFindings(entry.reviewFindings, {
+        fieldName: "runJournalEntry.reviewFindings",
+        allowMissing: false
+      });
+      if (normalizedReviewFindings.length === 0) {
+        delete entry.reviewFindings;
+      } else {
+        entry.reviewFindings = normalizedReviewFindings;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(entry, "commandObservations")) {
     try {
       const normalizedCommandObservations = normalizeCommandObservations(entry.commandObservations, {
@@ -360,6 +408,21 @@ export function validateRunJournalEntry(entry) {
       throw new Error(`${error.message}`);
     }
   }
+  if (Object.prototype.hasOwnProperty.call(entry, "policyDecision")) {
+    try {
+      const normalizedPolicyDecision = normalizePolicyDecision(entry.policyDecision, {
+        fieldName: "runJournalEntry.policyDecision",
+        allowMissing: false
+      });
+      if (normalizedPolicyDecision === null) {
+        delete entry.policyDecision;
+      } else {
+        entry.policyDecision = normalizedPolicyDecision;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(entry, "redaction")) {
     entry.redaction = normalizeRedactionMetadata(entry.redaction, {
       fieldName: "runJournalEntry.redaction",
@@ -404,6 +467,16 @@ export function validateRunJournal(journal) {
   assertArrayOfObjects("runJournal.contractRuns", journal.contractRuns);
   for (const entry of journal.contractRuns) {
     validateRunJournalEntry(entry);
+  }
+  if (Object.prototype.hasOwnProperty.call(journal, "approvalBinding")) {
+    try {
+      journal.approvalBinding = normalizeApprovalBinding(journal.approvalBinding, {
+        fieldName: "runJournal.approvalBinding",
+        allowMissing: false
+      });
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
   }
   assertStringArray("runJournal.completedContractIds", journal.completedContractIds);
   assertStringArray("runJournal.pendingContractIds", journal.pendingContractIds);

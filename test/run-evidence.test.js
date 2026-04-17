@@ -8,6 +8,7 @@ import {
   inferStopReasonCode,
   inferValidationOutcome,
   normalizeActionClasses,
+  normalizeApprovalBinding,
   normalizeDeclaredActionClasses,
   normalizeLineageDepth,
   normalizePolicyProfile,
@@ -17,6 +18,7 @@ import {
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelection,
   normalizeProviderModelSelections,
+  normalizeReviewFindings,
   normalizeReviewability,
   normalizeSourceArtifactIds,
   normalizeStopReasonCode,
@@ -263,6 +265,57 @@ test("run evidence normalizes policy profile, lineage metadata, and validation p
   );
 });
 
+test("run evidence normalizes typed approval lineage and fails closed on malformed present values", () => {
+  assert.equal(
+    normalizeApprovalBinding(undefined, {
+      fieldName: "runJournal.approvalBinding",
+      allowMissing: true
+    }),
+    null
+  );
+
+  assert.deepEqual(
+    normalizeApprovalBinding({
+      status: "approved",
+      source: "build_session",
+      buildId: " build-abc123 ",
+      approvalId: " approval-xyz "
+    }, {
+      fieldName: "runJournal.approvalBinding",
+      allowMissing: false
+    }),
+    {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-abc123",
+      approvalId: "approval-xyz"
+    }
+  );
+
+  assert.throws(
+    () => normalizeApprovalBinding({
+      status: "approved_now",
+      source: "build_session"
+    }, {
+      fieldName: "runJournal.approvalBinding",
+      allowMissing: false
+    }),
+    /runJournal\.approvalBinding\.status must be one of: approved, unknown/u
+  );
+
+  assert.throws(
+    () => normalizeApprovalBinding({
+      status: "approved",
+      source: "build_session",
+      buildId: "   "
+    }, {
+      fieldName: "runJournal.approvalBinding",
+      allowMissing: false
+    }),
+    /runJournal\.approvalBinding\.buildId must be a non-empty string when provided/u
+  );
+});
+
 test("run evidence action class normalization does not persist unsupported caller assertions", () => {
   assert.deepEqual(
     normalizeActionClasses(["access_secret", "mutate_git_state"], {
@@ -320,6 +373,74 @@ test("run evidence normalizes typed command observations and fails closed on mal
       fieldName: "runJournalEntry.commandObservations"
     }),
     /runJournalEntry\.commandObservations\[0\]\.actionClasses includes install_dependency, which is not command-detector-backed for this command/u
+  );
+});
+
+test("run evidence normalizes review findings and fails closed on malformed present values", () => {
+  assert.deepEqual(
+    normalizeReviewFindings([
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Missing assertion around renamed helper output.",
+        path: "src\\helpers.js"
+      },
+      {
+        kind: "gap",
+        severity: "low",
+        message: "No explicit rollback note in this contract run."
+      }
+    ], {
+      fieldName: "runJournalEntry.reviewFindings"
+    }),
+    [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Missing assertion around renamed helper output.",
+        path: "src/helpers.js"
+      },
+      {
+        kind: "gap",
+        severity: "low",
+        message: "No explicit rollback note in this contract run."
+      }
+    ]
+  );
+
+  assert.equal(
+    normalizeReviewFindings(undefined, {
+      fieldName: "runJournalEntry.reviewFindings",
+      allowMissing: true
+    }),
+    null
+  );
+
+  assert.throws(
+    () => normalizeReviewFindings([
+      {
+        kind: "issue",
+        severity: "critical",
+        message: "Severity must be closed enum."
+      }
+    ], {
+      fieldName: "runJournalEntry.reviewFindings"
+    }),
+    /runJournalEntry\.reviewFindings\[0\]\.severity must be one of: high, medium, low/u
+  );
+
+  assert.throws(
+    () => normalizeReviewFindings([
+      {
+        kind: "risk",
+        severity: "medium",
+        message: "Path escaped root.",
+        path: "../outside.js"
+      }
+    ], {
+      fieldName: "runJournalEntry.reviewFindings"
+    }),
+    /runJournalEntry\.reviewFindings\[0\]\.path must not escape the repository root/u
   );
 });
 

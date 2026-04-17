@@ -9,7 +9,8 @@ import {
   formatProgramRunJournal,
   getRunJournalResumePolicy,
   resumeExecutionProgram,
-  runExecutionProgram
+  runExecutionProgram,
+  runExecutionProgramFromApprovedBuildSession
 } from "../src/program-runner.js";
 import { createProgramContractExecutor } from "../src/program-contract-executor.js";
 import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
@@ -93,6 +94,86 @@ test("program runner executes contracts in dependency order", async () => {
   assert.deepEqual(journal.pendingContractIds, []);
 });
 
+test("runExecutionProgram does not synthesize approvalBinding without trusted launch lineage", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(Object.prototype.hasOwnProperty.call(journal, "approvalBinding"), false);
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(Object.prototype.hasOwnProperty.call(persisted.runJournal, "approvalBinding"), false);
+  });
+});
+
+test("runExecutionProgram ignores caller-supplied approvalBinding so direct callers cannot forge lineage", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore,
+      approvalBinding: {
+        status: "approved",
+        source: "build_session",
+        buildId: "build-approved-777"
+      }
+    });
+
+    assert.equal(Object.prototype.hasOwnProperty.call(journal, "approvalBinding"), false);
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.equal(Object.prototype.hasOwnProperty.call(persisted.runJournal, "approvalBinding"), false);
+  });
+});
+
+test("trusted build-session runner path persists approvalBinding lineage", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        openQuestions: []
+      }),
+      runStore,
+      buildId: "build-approved-777"
+    });
+
+    assert.deepEqual(journal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-approved-777"
+    });
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.deepEqual(persisted.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-approved-777"
+    });
+  });
+});
+
 test("runExecutionProgram omits empty providerModelSelections from contract runs", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const program = buildProgram();
@@ -123,6 +204,277 @@ test("runExecutionProgram omits empty providerModelSelections from contract runs
       assert.equal(entry.providerModelEvidenceRequirement, "unknown");
       assert.equal(Object.prototype.hasOwnProperty.call(entry, "providerModelSelections"), false);
     }
+  });
+});
+
+test("runExecutionProgram persists typed review findings on contract runs", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: ["review finding trace: scoped review completed"],
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "high",
+            message: `Missing scoped regression assertion for ${contract.id}.`,
+            path: `src\\${contract.id}.js`
+          }
+        ],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    for (const entry of journal.contractRuns) {
+      assert.deepEqual(entry.reviewFindings, [
+        {
+          kind: "issue",
+          severity: "high",
+          message: `Missing scoped regression assertion for ${entry.contractId}.`,
+          path: `src/${entry.contractId}.js`
+        }
+      ]);
+    }
+
+    const persisted = await runStore.loadRun(program.id);
+    for (const entry of persisted.runJournal.contractRuns) {
+      assert.deepEqual(entry.reviewFindings, [
+        {
+          kind: "issue",
+          severity: "high",
+          message: `Missing scoped regression assertion for ${entry.contractId}.`,
+          path: `src/${entry.contractId}.js`
+        }
+      ]);
+    }
+  });
+});
+
+test("runExecutionProgram redacts absolute paths in persisted review-finding messages", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePath = join(process.cwd(), "src", "helpers.js");
+    const workspaceAbsolutePath = process.platform === "win32"
+      ? "C:\\tmp\\pi-orchestrator-process-worker-abc\\scratch.txt"
+      : "/tmp/pi-orchestrator-process-worker-abc/scratch.txt";
+    const externalAbsolutePath = process.platform === "win32"
+      ? "D:\\outside\\audit.txt"
+      : "/opt/outside/audit.txt";
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "high",
+            message: `Raw paths: ${repoAbsolutePath}, ${workspaceAbsolutePath}, ${externalAbsolutePath}`,
+            path: "src/helpers.js"
+          }
+        ],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    const journalFindingMessage = journal.contractRuns[0].reviewFindings[0].message;
+    assert.equal(journalFindingMessage.includes(repoAbsolutePath), false);
+    assert.equal(journalFindingMessage.includes(workspaceAbsolutePath), false);
+    assert.equal(journalFindingMessage.includes(externalAbsolutePath), false);
+    assert.equal(journalFindingMessage.includes("<absolute_path>"), true);
+    assert.equal(journal.contractRuns[0].reviewFindings[0].path, "src/helpers.js");
+    assert.equal(journal.contractRuns[0].redaction.applied, true);
+    assert.equal(journal.contractRuns[0].redaction.externalPathRewrites > 0, true);
+
+    const persisted = await runStore.loadRun(program.id);
+    const persistedFindingMessage = persisted.runJournal.contractRuns[0].reviewFindings[0].message;
+    assert.equal(persistedFindingMessage.includes(repoAbsolutePath), false);
+    assert.equal(persistedFindingMessage.includes(workspaceAbsolutePath), false);
+    assert.equal(persistedFindingMessage.includes(externalAbsolutePath), false);
+    assert.equal(persistedFindingMessage.includes("<absolute_path>"), true);
+    assert.equal(persisted.runJournal.contractRuns[0].reviewFindings[0].path, "src/helpers.js");
+  });
+});
+
+test("runExecutionProgram does not synthesize typed review findings from legacy evidence strings", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [
+          "review_finding: potential scoped regression",
+          "review_finding_severity: high"
+        ],
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    for (const entry of journal.contractRuns) {
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "reviewFindings"), false);
+    }
+
+    const persisted = await runStore.loadRun(program.id);
+    for (const entry of persisted.runJournal.contractRuns) {
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "reviewFindings"), false);
+    }
+  });
+});
+
+test("runExecutionProgram persists allowed policy decisions on contract runs", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        openQuestions: [],
+        policyDecision: {
+          profileId: "default",
+          status: "allowed",
+          reason: "profile_allows_execution"
+        }
+      }),
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    assert.equal(journal.contractRuns.length > 0, true);
+    assert.deepEqual(journal.contractRuns[0].policyDecision, {
+      profileId: "default",
+      status: "allowed",
+      reason: "profile_allows_execution"
+    });
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.deepEqual(persisted.runJournal.contractRuns[0].policyDecision, {
+      profileId: "default",
+      status: "allowed",
+      reason: "profile_allows_execution"
+    });
+  });
+});
+
+test("runExecutionProgram persists blocked policy decisions on contract runs", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: `Policy denied for ${contract.id}.`,
+            evidence: [],
+            openQuestions: [],
+            policyDecision: {
+              profileId: "default",
+              status: "blocked",
+              reason: "profile_disallows_action_class"
+            }
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: [],
+          policyDecision: {
+            profileId: "default",
+            status: "allowed",
+            reason: "profile_allows_execution"
+          }
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.deepEqual(journal.contractRuns[1].policyDecision, {
+      profileId: "default",
+      status: "blocked",
+      reason: "profile_disallows_action_class"
+    });
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.deepEqual(persisted.runJournal.contractRuns[1].policyDecision, {
+      profileId: "default",
+      status: "blocked",
+      reason: "profile_disallows_action_class"
+    });
+  });
+});
+
+test("runExecutionProgram persists approval-required policy decisions on blocked contract runs", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const approvalContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === approvalContractId) {
+          return {
+            status: "blocked",
+            summary: `Approval required for ${contract.id}.`,
+            evidence: [],
+            openQuestions: [],
+            policyDecision: {
+              profileId: "default",
+              status: "approval_required",
+              reason: "profile_requires_human_gate"
+            }
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: [],
+          policyDecision: {
+            profileId: "default",
+            status: "allowed",
+            reason: "profile_allows_execution"
+          }
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.deepEqual(journal.contractRuns[1].policyDecision, {
+      profileId: "default",
+      status: "approval_required",
+      reason: "profile_requires_human_gate"
+    });
+
+    const persisted = await runStore.loadRun(program.id);
+    assert.deepEqual(persisted.runJournal.contractRuns[1].policyDecision, {
+      profileId: "default",
+      status: "approval_required",
+      reason: "profile_requires_human_gate"
+    });
   });
 });
 
@@ -652,6 +1004,56 @@ test("runExecutionProgram fails closed when contract executor returns malformed 
   });
 });
 
+test("runExecutionProgram fails closed when contract executor returns malformed review findings", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed review findings payload.",
+            evidence: [],
+            reviewFindings: [
+              {
+                kind: "issue",
+                severity: "critical",
+                message: "Invalid severity should fail closed."
+              }
+            ],
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(
+      journal.stopReason,
+      /contractExecutionResult\.reviewFindings\[0\]\.severity must be one of: high, medium, low/i
+    );
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
+  });
+});
+
 test("runExecutionProgram fails closed when contract executor returns malformed redaction metadata", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async () => {
     const program = buildProgram();
@@ -1072,6 +1474,14 @@ test("formatProgramRunJournal includes contract evidence", () => {
           paths: ["src/helpers.js"]
         },
         validationOutcome: "pass",
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "high",
+            message: "Missing guard around helper output.",
+            path: "src/helpers.js"
+          }
+        ],
         evidence: [
           "selected_provider: openai-codex",
           "selected_model: gpt-5.4"
@@ -1086,6 +1496,8 @@ test("formatProgramRunJournal includes contract evidence", () => {
   assert.match(formatted, /changed_surface_capture: complete/i);
   assert.match(formatted, /src\/helpers\.js/i);
   assert.match(formatted, /validation_outcome: pass/i);
+  assert.match(formatted, /review_findings:/i);
+  assert.match(formatted, /high\/issue: Missing guard around helper output\./i);
 });
 
 test("program runner exports shared resume-policy mapping for operator surfaces", () => {

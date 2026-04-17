@@ -162,6 +162,11 @@ test("build session status formatter shows a plain-English status snapshot", () 
 
   assert.match(status, /Build Session/u);
   assert.match(status, /Build ID: build-abc123/u);
+  assert.match(status, /Operator Summary/u);
+  assert.match(status, /requested outcome: Build an onboarding portal/u);
+  assert.match(status, /actual outcome: status: awaiting_approval/u);
+  assert.match(status, /unproven claims: Execution has not started, so the requested outcome is not yet proven\./u);
+  assert.match(status, /next step: Approve kickoff with \/build-approve build-abc123\./u);
   assert.match(status, /Approval: pending/u);
   assert.match(status, /Plan fingerprint: /u);
   assert.match(status, /Approval scope: read_repo, write_allowed, execute_local_command/u);
@@ -211,6 +216,12 @@ test("build session status distinguishes planned scope from executed evidence wh
 test("build session status reports exact observed changed paths when complete capture exists", () => {
   const buildSession = createSampleBuildSession();
   const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+  buildSession.approval.approved = true;
+  buildSession.approval.approvedAt = new Date().toISOString();
+  buildSession.execution.status = "success";
+  buildSession.execution.programId = buildSession.lifecycle.executionProgram.id;
+  buildSession.execution.completedContracts = 1;
+  buildSession.execution.pendingContracts = 0;
 
   const status = formatOperatorBuildSessionStatus(buildSession, {
     runJournal: {
@@ -235,8 +246,144 @@ test("build session status reports exact observed changed paths when complete ca
     }
   });
 
+  assert.match(status, /Operator Summary/u);
+  assert.match(status, /requested outcome: Build an onboarding portal/u);
+  assert.match(status, /actual outcome: status: success/u);
+  assert.match(status, /unproven claims: No unproven claims are recorded from persisted evidence\./u);
+  assert.match(status, /next step: Review evidence and decide whether to run another \/build for the next slice\./u);
   assert.match(status, /Changed surfaces: Observed changed paths are exact for recorded runs: src\/helpers\.js\./u);
   assert.doesNotMatch(status, /Changed-path capture is partial/u);
+});
+
+test("blocked run summary distinguishes requested outcome from actual outcome", () => {
+  const buildSession = createSampleBuildSession();
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "blocked",
+      stopReason: "waiting for dependency",
+      contractRuns: [],
+      completedContractIds: [],
+      pendingContractIds: buildSession.lifecycle.executionProgram.contracts.map((contract) => contract.id)
+    }
+  });
+
+  assert.match(status, /requested outcome: Build an onboarding portal/u);
+  assert.match(status, /actual outcome: status: blocked; stop reason: waiting for dependency/u);
+  assert.doesNotMatch(status, /actual outcome: status: success/u);
+});
+
+test("unproven outcomes surface a truthful unproven claims section from typed fields", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+  buildSession.lifecycle.auditReport.evaluationCoverage[0].status = "missing";
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "success",
+      stopReason: null,
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: ["run reviewer: success"],
+          changedSurface: {
+            capture: "complete",
+            paths: ["src/helpers.js"]
+          },
+          reviewFindings: [
+            {
+              kind: "risk",
+              severity: "high",
+              message: "Regression evidence is incomplete."
+            }
+          ],
+          openQuestions: []
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: []
+    }
+  });
+
+  assert.match(status, /unproven claims: .*typed review finding\(s\) are recorded/u);
+  assert.match(status, /Audit evaluation coverage marks 1 criterion\/criteria as missing/u);
+});
+
+test("summary labels still render when newer typed fields are absent", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+  delete buildSession.lifecycle.auditReport.evaluationCoverage;
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "success",
+      stopReason: null,
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: ["legacy evidence note"],
+          openQuestions: []
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: []
+    }
+  });
+
+  assert.match(status, /Operator Summary/u);
+  assert.match(status, /requested outcome:/u);
+  assert.match(status, /actual outcome: status: success/u);
+  assert.match(status, /unproven claims:/u);
+  assert.match(status, /next step:/u);
+});
+
+test("policy and blocked states stay visible in the summary and guidance", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+  buildSession.execution.status = "blocked";
+  buildSession.execution.programId = buildSession.lifecycle.executionProgram.id;
+  buildSession.execution.stopReason = "Human gate policy requires explicit approval.";
+  buildSession.execution.stopReasonCode = "approval_required";
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "blocked",
+      stopReason: "Human gate policy requires explicit approval.",
+      stopReasonCode: "approval_required",
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "blocked",
+          summary: "Execution blocked for policy gate.",
+          evidence: ["policy gate denied execution"],
+          changedSurface: {
+            capture: "not_captured",
+            paths: []
+          },
+          policyDecision: {
+            profileId: "default",
+            status: "approval_required",
+            reason: "profile_requires_human_gate"
+          },
+          openQuestions: []
+        }
+      ],
+      completedContractIds: [],
+      pendingContractIds: buildSession.lifecycle.executionProgram.contracts.map((contract) => contract.id)
+    }
+  });
+
+  assert.match(status, /actual outcome: status: blocked; stop reason code: approval_required/u);
+  assert.match(status, /policy decisions: 1 approval_required; non-allowed reasons: profile_requires_human_gate/u);
+  assert.match(status, /Approval needed: Yes\. Fresh approval is required before execution can continue\. Use \/build-approve build-abc123\./u);
+  assert.match(status, /next step: Approve kickoff with \/build-approve build-abc123\./u);
 });
 
 test("build session status reports partial observed changed paths honestly", () => {
@@ -279,7 +426,7 @@ test("build session status reports partial observed changed paths honestly", () 
 
   assert.match(status, /Changed surfaces: Observed changed paths are partial for recorded runs: src\/helpers\.js\./u);
   assert.match(status, /Planned scope for runs without complete changed-path capture:/u);
-  assert.match(status, /Unproven claims: Changed-path capture is partial;/u);
+  assert.match(status, /Unproven claims: .*Changed-path capture is partial;/u);
 });
 
 test("build session blocked lookup formatter stays operator-friendly", () => {

@@ -483,17 +483,20 @@ function modulesFor(projectType) {
           "src/orchestrator.js",
           "src/path-scopes.js",
           "src/policies.js",
+          "src/policy-profiles.js",
           "src/program-compiler.js",
           "src/program-contract-executor.js",
           "src/program-runner.js",
           "src/project-contracts.js",
           "src/project-workflows.js",
+          "src/redaction.js",
           "src/auto-workflow.js",
           "src/build-session-store.js",
           "src/run-evidence.js",
           "src/run-store.js",
           "src/safe-clone.js",
-          "src/schema.js"
+          "src/schema.js",
+          "src/skill-governance.js"
         ],
         dependsOn: []
       },

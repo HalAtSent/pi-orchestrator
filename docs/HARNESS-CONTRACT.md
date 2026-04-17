@@ -248,6 +248,16 @@ Current approval behavior over those classes is still narrower than a full actio
 - build approval bindings persist the currently derived action-class set and fail closed if the stored plan drifts outside that scope before execution starts
 - current code does not implement mid-run step-level reapproval
 
+Current profile-enforcement slice over detector-backed classes is also intentionally narrow:
+
+- pre-execution profile gates run before worker launch in the contract executor path
+- compiled profile-gate branches are limited to:
+  - process-backend allow/disallow
+  - detector-backed command action-class allow/disallow (`execute_local_command`, `install_dependency`, `mutate_git_state`)
+  - profile-required human gate at pre-execution time
+- live supported profile ids are currently `default` only, so the supported-id runtime path currently records `allowed` for `default`; unsupported ids fail closed before execution
+- broader policy completeness across the full action-class vocabulary remains future work
+
 ## Approval Matrix
 
 The current approval and denial surface is:
@@ -325,7 +335,7 @@ Current runtime approval binding remains enforced through stored `programId`, `p
 - `success` in the current state machine means all contracts completed with no terminal non-success result.
 - Reviewable `success` requires that terminal `success` state plus enough direct evidence to inspect what was approved, what ran, what was validated, and what remains uncertain.
 - Current v1 persists a narrow machine reviewability summary (`reviewability.status` and `reviewability.reasons[]`) on run and build execution artifacts. That summary is authoritative for the machine-checkable surface, not for every reviewer judgment.
-- The following must be directly evidenced in persisted artifacts when they are applicable to the claim being made: terminal status and completed-contract state, the approval binding and active `policyProfile` when approval was required, captured validation evidence for validations actually exercised, the concrete source of any blocked, failed, or repair-required outcome, and lineage linking the build session, execution program, and run journal.
+- The following must be directly evidenced in persisted artifacts when they are applicable to the claim being made: terminal status and completed-contract state, the approval binding and active `policyProfile` when approval was required, per-contract `policyDecision` when the profile gate was evaluated for that run, captured validation evidence for validations actually exercised, the concrete source of any blocked, failed, or repair-required outcome, and lineage linking the build session, execution program, and run journal.
 - Evidence and reviewability surfaces are part of the runtime contract. Persisted artifacts and operator-facing summaries must distinguish observed execution facts from planned scope, normalized inference, or not-captured evidence.
 - The following may be inferred conservatively from current normalization or repository-local backend context: normalized `stopReasonCode`, normalized `validationOutcome`, conservative `actionClasses`, and whether provider or model evidence should have existed for that run.
 - Acceptable inference may classify or summarize directly persisted evidence. It may not replace missing required direct evidence.
@@ -506,6 +516,10 @@ The harness must deny or block when:
   forwarded runtime-context `priorResults` / `reviewResult`)
 - approval is required but absent
 - the active policy profile is missing, ambiguous, or invalid under [POLICY-PROFILES.md](./POLICY-PROFILES.md)
+- the active profile disallows process-backend execution for the current run path
+- the active profile disallows one or more detector-backed command action classes in the current planned workflow
+- the active profile requires a human gate before execution and no explicit approval signal is present
+- with the current live `default`-only registry, the three active-profile disallow bullets above describe compiled-gate behavior but are not yet reachable through supported profile selection
 - the current stored plan requires action classes outside the recorded approval scope before execution begins
 - evidence required for a claimed reviewable terminal state is missing
 

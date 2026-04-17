@@ -44,6 +44,16 @@ important ways:
 - plan-derived approval scope and post-run evidence now treat
   `install_dependency` and `mutate_git_state` as concrete detector-backed
   classes
+- policy profiles now have a code-owned registry and a first compiled
+  pre-execution decision slice
+- the live supported profile-id set is still `default` only, so current runtime
+  behavior is:
+  - supported `default` resolves to `allowed`
+  - unsupported ids fail closed with `unknown_profile`
+- compiled decision branches for detector-backed action-class disallow,
+  process-backend disallow, and profile-required human-gate checks exist, but
+  are not yet reachable through live supported profile selection
+- per-contract runs now persist typed `policyDecision` truth
 - the control plane already stays intentionally narrower than the broader
   vocabulary carried by persisted artifacts
 
@@ -62,7 +72,8 @@ Important future gaps still remain:
 - a narrow deterministic path/workspace redaction landing now exists at selected
   context and persistence boundaries, but repository-wide redaction hardening is
   still incomplete
-- runtime profiles and operator-safe mode are still effectively narrow
+- runtime profiles and operator-safe mode are still narrow beyond the first
+  default-profile enforcement slice
 - additional orchestration work remains selectively useful, but it is no longer
   the default growth path
 
@@ -393,7 +404,10 @@ Landing condition:
 
 Current gap:
 
-- runtime profile resolution is still effectively `default` only
+- runtime profile resolution is still effectively `default` only, even though
+  that default now has a narrow code-enforced gate slice
+- current default-profile enforcement is intentionally partial and covers only
+  detector-backed command action classes plus process-backend/human-gate checks
 - the repository does not yet ship a live operator-safe profile with enforced
   archetypes, escalation rules, and narrower evidence expectations
 - current operator summaries are stronger, but operator-safe mode is still not a

@@ -11,6 +11,18 @@ export const GOVERNED_SKILL_OUTPUT_SHAPES = Object.freeze([
   "doc_update_bundle"
 ]);
 
+const COMMON_ROLE_DOC_PATH = "docs/agents/COMMON.md";
+const SKILL_ENTRY_OUTPUT_CONTRACT_HEADING = "Output Contract";
+const SKILL_ENTRY_OUTPUT_SHAPE_MARKER_PREFIX = "Expected Output Shape:";
+const ROLE_DOC_REQUIRED_COMMON_HEADINGS = Object.freeze([
+  "Role Envelope Model",
+  "Output Discipline"
+]);
+const ROLE_DOC_REQUIRED_ROLE_HEADINGS = Object.freeze([
+  "Capability Envelope",
+  "Output Shape"
+]);
+
 function freezeGovernedSkillEntry(entry) {
   return Object.freeze({
     ...entry,
@@ -40,12 +52,12 @@ export const GOVERNED_SKILLS = Object.freeze([
     expectedOutputShape: "structured_worker_result",
     requiredDocHeadings: [
       {
-        path: "docs/agents/COMMON.md",
+        path: COMMON_ROLE_DOC_PATH,
         headings: ["Role Envelope Model", "Output Discipline"]
       },
       {
         path: "docs/agents/EXPLORER.md",
-        headings: ["Output Shape"]
+        headings: ["Capability Envelope", "Output Shape"]
       }
     ]
   }),
@@ -61,12 +73,12 @@ export const GOVERNED_SKILLS = Object.freeze([
     expectedOutputShape: "structured_worker_result",
     requiredDocHeadings: [
       {
-        path: "docs/agents/COMMON.md",
+        path: COMMON_ROLE_DOC_PATH,
         headings: ["Role Envelope Model", "Output Discipline"]
       },
       {
         path: "docs/agents/IMPLEMENTER.md",
-        headings: ["Output Shape"]
+        headings: ["Capability Envelope", "Output Shape"]
       }
     ]
   }),
@@ -82,12 +94,12 @@ export const GOVERNED_SKILLS = Object.freeze([
     expectedOutputShape: "review_findings",
     requiredDocHeadings: [
       {
-        path: "docs/agents/COMMON.md",
+        path: COMMON_ROLE_DOC_PATH,
         headings: ["Role Envelope Model", "Output Discipline"]
       },
       {
         path: "docs/agents/REVIEWER.md",
-        headings: ["Output Shape"]
+        headings: ["Capability Envelope", "Output Shape"]
       }
     ]
   }),
@@ -103,12 +115,12 @@ export const GOVERNED_SKILLS = Object.freeze([
     expectedOutputShape: "verification_report",
     requiredDocHeadings: [
       {
-        path: "docs/agents/COMMON.md",
+        path: COMMON_ROLE_DOC_PATH,
         headings: ["Role Envelope Model", "Output Discipline"]
       },
       {
         path: "docs/agents/VERIFIER.md",
-        headings: ["Output Shape"]
+        headings: ["Capability Envelope", "Output Shape"]
       }
     ]
   })
@@ -144,6 +156,73 @@ function hasCommandLiteral(markdown, command) {
     "mu"
   );
   return commandPattern.test(normalizedMarkdown);
+}
+
+function parseMarkdownHeadingLine(lineValue) {
+  const line = String(lineValue ?? "");
+  const match = /^(#{1,6})\s+(.+?)\s*$/u.exec(line);
+  if (!match) {
+    return null;
+  }
+
+  return {
+    level: match[1].length,
+    text: match[2].trim()
+  };
+}
+
+function getMarkdownHeadingSection(markdown, heading) {
+  const normalizedHeading = String(heading ?? "").trim();
+  if (!normalizedHeading) {
+    return null;
+  }
+
+  const normalizedMarkdown = String(markdown ?? "").replace(/\r\n?/gu, "\n");
+  const lines = normalizedMarkdown.split("\n");
+  let headingLineIndex = -1;
+  let headingLevel = 0;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const parsedHeading = parseMarkdownHeadingLine(lines[lineIndex]);
+    if (!parsedHeading || parsedHeading.text !== normalizedHeading) {
+      continue;
+    }
+
+    headingLineIndex = lineIndex;
+    headingLevel = parsedHeading.level;
+    break;
+  }
+
+  if (headingLineIndex === -1) {
+    return null;
+  }
+
+  let sectionEndLineIndex = lines.length;
+  for (let lineIndex = headingLineIndex + 1; lineIndex < lines.length; lineIndex += 1) {
+    const parsedHeading = parseMarkdownHeadingLine(lines[lineIndex]);
+    if (!parsedHeading || parsedHeading.level > headingLevel) {
+      continue;
+    }
+
+    sectionEndLineIndex = lineIndex;
+    break;
+  }
+
+  return lines.slice(headingLineIndex + 1, sectionEndLineIndex).join("\n");
+}
+
+function getOutputShapeMarkerFromOutputContractSection(sectionMarkdown) {
+  const normalizedSectionMarkdown = String(sectionMarkdown ?? "").replace(/\r\n?/gu, "\n");
+  const markerPattern = new RegExp(
+    `^${escapeRegExp(SKILL_ENTRY_OUTPUT_SHAPE_MARKER_PREFIX)}\\s*(\\S+)\\s*$`,
+    "mu"
+  );
+  const markerMatch = markerPattern.exec(normalizedSectionMarkdown);
+  if (!markerMatch) {
+    return null;
+  }
+
+  return markerMatch[1].trim();
 }
 
 function getPathStat(pathValue, { statFn }) {
@@ -265,8 +344,96 @@ function validateReferencedCommands({ entry, skillId, errors }) {
   }
 }
 
+function isRoleSpecificAgentDocPath(pathValue) {
+  if (!isNonEmptyString(pathValue)) {
+    return false;
+  }
+
+  const normalizedPath = normalizePath(pathValue);
+  return normalizedPath.startsWith("docs/agents/")
+    && normalizedPath.endsWith(".md")
+    && normalizedPath !== COMMON_ROLE_DOC_PATH;
+}
+
+function validateRoleDocHeadingDependencies({ entry, skillId, errors }) {
+  if (!Array.isArray(entry.referencedFiles)) {
+    return;
+  }
+  const requiredDocHeadings = Array.isArray(entry.requiredDocHeadings)
+    ? entry.requiredDocHeadings
+    : [];
+
+  const referencedRoleDocPaths = new Set(
+    entry.referencedFiles
+      .filter((pathValue) => isRoleSpecificAgentDocPath(pathValue))
+      .map((pathValue) => normalizePath(pathValue))
+  );
+
+  if (referencedRoleDocPaths.size === 0) {
+    return;
+  }
+
+  const declaredHeadingsByPath = new Map();
+  for (const headingRequirement of requiredDocHeadings) {
+    if (!headingRequirement || typeof headingRequirement !== "object" || Array.isArray(headingRequirement)) {
+      continue;
+    }
+
+    if (!isNonEmptyString(headingRequirement.path) || !Array.isArray(headingRequirement.headings)) {
+      continue;
+    }
+
+    const requirementPath = normalizePath(headingRequirement.path);
+    const headingSet = declaredHeadingsByPath.get(requirementPath) ?? new Set();
+    for (const headingValue of headingRequirement.headings) {
+      if (!isNonEmptyString(headingValue)) {
+        continue;
+      }
+
+      headingSet.add(headingValue.trim());
+    }
+    declaredHeadingsByPath.set(requirementPath, headingSet);
+  }
+
+  const validateRequiredPathHeadings = (pathValue, requiredHeadings) => {
+    const declaredHeadings = declaredHeadingsByPath.get(pathValue);
+    if (!declaredHeadings) {
+      errors.push(createGovernedSkillError({
+        skillId,
+        code: "missing_required_role_doc_heading_dependency_path",
+        message: `requiredDocHeadings must declare path when role-doc dependency exists: ${pathValue}`,
+        path: pathValue
+      }));
+      return;
+    }
+
+    for (const requiredHeading of requiredHeadings) {
+      if (!declaredHeadings.has(requiredHeading)) {
+        errors.push(createGovernedSkillError({
+          skillId,
+          code: "missing_required_role_doc_heading_dependency",
+          message: `requiredDocHeadings for ${pathValue} must include heading: ${requiredHeading}`,
+          path: pathValue,
+          heading: requiredHeading
+        }));
+      }
+    }
+  };
+
+  validateRequiredPathHeadings(COMMON_ROLE_DOC_PATH, ROLE_DOC_REQUIRED_COMMON_HEADINGS);
+
+  for (const roleDocPath of referencedRoleDocPaths) {
+    validateRequiredPathHeadings(roleDocPath, ROLE_DOC_REQUIRED_ROLE_HEADINGS);
+  }
+}
+
 function validateRequiredDocHeadingsDefinition({ entry, skillId, errors, repositoryRoot, statFn }) {
   if (entry.requiredDocHeadings === undefined) {
+    validateRoleDocHeadingDependencies({
+      entry,
+      skillId,
+      errors
+    });
     return;
   }
 
@@ -354,6 +521,12 @@ function validateRequiredDocHeadingsDefinition({ entry, skillId, errors, reposit
       }
     }
   }
+
+  validateRoleDocHeadingDependencies({
+    entry,
+    skillId,
+    errors
+  });
 }
 
 function validateUniqueSkillIds({ inventory, errors }) {
@@ -522,6 +695,58 @@ function auditCommandReferences({
   }
 }
 
+function auditEntryOutputContract({
+  entry,
+  skillId,
+  skillEntryMarkdown,
+  errors
+}) {
+  if (!hasMarkdownHeading(skillEntryMarkdown, SKILL_ENTRY_OUTPUT_CONTRACT_HEADING)) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "missing_output_contract_heading",
+      message: `entryPath is missing required heading: ${SKILL_ENTRY_OUTPUT_CONTRACT_HEADING}`,
+      heading: SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+    }));
+    return;
+  }
+
+  const outputContractSection = getMarkdownHeadingSection(
+    skillEntryMarkdown,
+    SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+  );
+  if (outputContractSection === null) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "missing_output_contract_heading",
+      message: `entryPath is missing required heading: ${SKILL_ENTRY_OUTPUT_CONTRACT_HEADING}`,
+      heading: SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+    }));
+    return;
+  }
+
+  const expectedOutputShape = String(entry.expectedOutputShape ?? "").trim();
+  const actualOutputShapeMarker = getOutputShapeMarkerFromOutputContractSection(outputContractSection);
+  if (!actualOutputShapeMarker) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "missing_output_contract_shape_marker",
+      message: `Output Contract section must include marker: ${SKILL_ENTRY_OUTPUT_SHAPE_MARKER_PREFIX} ${expectedOutputShape}`,
+      heading: SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+    }));
+    return;
+  }
+
+  if (actualOutputShapeMarker !== expectedOutputShape) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "mismatched_output_contract_shape_marker",
+      message: `Output Contract shape marker mismatch: expected ${expectedOutputShape}, received ${actualOutputShapeMarker}`,
+      heading: SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+    }));
+  }
+}
+
 function auditRequiredDocHeadings({
   entry,
   skillId,
@@ -637,6 +862,13 @@ export function validateGovernedSkills({
     }
 
     auditCommandReferences({
+      entry,
+      skillId,
+      skillEntryMarkdown,
+      errors
+    });
+
+    auditEntryOutputContract({
       entry,
       skillId,
       skillEntryMarkdown,

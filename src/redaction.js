@@ -2,13 +2,29 @@ import { posix, win32 } from "node:path";
 
 export const REDACTION_PROCESS_WORKSPACE_PLACEHOLDER = "<process_workspace>";
 export const REDACTION_ABSOLUTE_PATH_PLACEHOLDER = "<absolute_path>";
+export const BOUNDARY_TRUNCATION_MARKER_PREFIX = "...[truncated ";
+export const BOUNDARY_TRUNCATION_MARKER_SUFFIX = " chars]";
 
-const ABSOLUTE_PATH_PATTERN = /[A-Za-z]:[\\/][^\s"'`<>()\[\]{}|,;:]+|(?<![A-Za-z0-9._-])\/(?:[^\s"'`<>()\[\]{}|,;:\/]+\/)+[^\s"'`<>()\[\]{}|,;:]*/gu;
+const ABSOLUTE_PATH_PATTERN = /(?<![A-Za-z0-9._-])[A-Za-z]:[\\/][^\s"'`<>()\[\]{}|,;:]*|(?<![A-Za-z0-9._-])\/[^\s"'`<>()\[\]{}|,;:\/]+(?:\/[^\s"'`<>()\[\]{}|,;:\/]+)*\/?/gu;
 
 function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+export function truncateBoundaryString(value, {
+  maxLength,
+  fieldName = "value"
+} = {}) {
+  assert(Number.isInteger(maxLength) && maxLength >= 0, `${fieldName}.maxLength must be a non-negative integer`);
+  const normalizedValue = String(value ?? "");
+  if (normalizedValue.length <= maxLength) {
+    return normalizedValue;
+  }
+
+  const omittedChars = normalizedValue.length - maxLength;
+  return `${normalizedValue.slice(0, maxLength)}${BOUNDARY_TRUNCATION_MARKER_PREFIX}${omittedChars}${BOUNDARY_TRUNCATION_MARKER_SUFFIX}`;
 }
 
 function createRedactionCounts() {

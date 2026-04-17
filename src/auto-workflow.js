@@ -7,6 +7,7 @@ import {
   buildChangedSurfaceContextManifest,
   buildPriorResultContextManifest,
   buildReviewResultContextManifest,
+  RUN_CONTEXT_BUDGET_LIMITS,
   setTrustedForwardedRedactionMetadata,
   mergeContextManifestEntries,
   resolvePacketContextManifest as resolveCanonicalPacketContextManifest,
@@ -20,13 +21,7 @@ import { createBoundaryPathRedactor, mergeRedactionMetadata } from "./redaction.
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
-
-export const RUN_CONTEXT_BUDGET_LIMITS = Object.freeze({
-  maxPriorResults: 4,
-  maxPriorResultEvidence: 8,
-  maxPriorResultCommands: 8,
-  maxPriorResultChangedFiles: 8
-});
+export { RUN_CONTEXT_BUDGET_LIMITS };
 
 function assert(condition, message) {
   if (!condition) {
@@ -181,11 +176,16 @@ function createContextBudget() {
     perResultEvidenceTruncated: false,
     perResultCommandsTruncated: false,
     perResultChangedFilesTruncated: false,
+    reviewResultTruncated: false,
+    changedSurfaceTruncated: false,
     truncationCount: {
       priorResults: 0,
       evidenceEntries: 0,
       commandEntries: 0,
-      changedFiles: 0
+      changedFiles: 0,
+      reviewResultEvidenceEntries: 0,
+      reviewResultOpenQuestionEntries: 0,
+      changedSurfacePaths: 0
     }
   };
 }
@@ -271,19 +271,38 @@ function applyPriorResultContextBudget(priorResults) {
   };
 }
 
-function sanitizeReviewResult(reviewResult, { redactor }) {
+function sanitizeReviewResult(reviewResult, { redactor, contextBudget }) {
   if (!reviewResult) {
     return null;
+  }
+
+  const maxReviewEvidence = RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence;
+  const maxReviewOpenQuestions = RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions;
+  const reviewEvidenceLength = Array.isArray(reviewResult?.evidence) ? reviewResult.evidence.length : 0;
+  const reviewOpenQuestionLength = Array.isArray(reviewResult?.openQuestions) ? reviewResult.openQuestions.length : 0;
+  const boundedEvidence = truncateStringArray(reviewResult?.evidence, maxReviewEvidence);
+  const boundedOpenQuestions = truncateStringArray(reviewResult?.openQuestions, maxReviewOpenQuestions);
+
+  if (reviewEvidenceLength > maxReviewEvidence) {
+    contextBudget.reviewResultTruncated = true;
+    contextBudget.truncationCount.reviewResultEvidenceEntries += reviewEvidenceLength - maxReviewEvidence;
+  }
+
+  if (reviewOpenQuestionLength > maxReviewOpenQuestions) {
+    contextBudget.reviewResultTruncated = true;
+    contextBudget.truncationCount.reviewResultOpenQuestionEntries += (
+      reviewOpenQuestionLength - maxReviewOpenQuestions
+    );
   }
 
   const fieldPrefix = "reviewResult";
   const summary = redactor.redactString(reviewResult.summary, {
     fieldName: `${fieldPrefix}.summary`
   });
-  const evidence = redactor.redactStringArray(clone(reviewResult.evidence), {
+  const evidence = redactor.redactStringArray(boundedEvidence, {
     fieldName: `${fieldPrefix}.evidence`
   });
-  const openQuestions = redactor.redactStringArray(clone(reviewResult.openQuestions), {
+  const openQuestions = redactor.redactStringArray(boundedOpenQuestions, {
     fieldName: `${fieldPrefix}.openQuestions`
   });
   const redaction = mergeRedactionMetadata(
@@ -310,8 +329,9 @@ function resolvePacketContextManifest(packet) {
   });
 }
 
-function sanitizeChangedSurfaceContext(runs) {
+function sanitizeChangedSurfaceContext(runs, { contextBudget }) {
   const changedSurfaceContext = [];
+  const maxChangedSurfacePaths = RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths;
 
   for (const run of runs) {
     if (run?.provenance?.changedSurfaceObservationTrusted !== true) {
@@ -344,10 +364,17 @@ function sanitizeChangedSurfaceContext(runs) {
       continue;
     }
 
+    let boundedObservedPaths = observedPaths;
+    if (observedPaths.length > maxChangedSurfacePaths) {
+      contextBudget.changedSurfaceTruncated = true;
+      contextBudget.truncationCount.changedSurfacePaths += observedPaths.length - maxChangedSurfacePaths;
+      boundedObservedPaths = observedPaths.slice(0, maxChangedSurfacePaths);
+    }
+
     changedSurfaceContext.push({
       packetId,
       role,
-      paths: observedPaths
+      paths: clone(boundedObservedPaths)
     });
   }
 
@@ -411,9 +438,12 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
     contextBudget
   } = applyPriorResultContextBudget(sanitizedPriorResults);
   const normalizedReviewResult = sanitizeReviewResult(reviewResult, {
-    redactor
+    redactor,
+    contextBudget
   });
-  const changedSurfaceContext = sanitizeChangedSurfaceContext(runs);
+  const changedSurfaceContext = sanitizeChangedSurfaceContext(runs, {
+    contextBudget
+  });
   const contextManifest = mergeContextManifestEntries(
     resolvePacketContextManifest(packet),
     buildPriorResultContextManifest(priorResults),
@@ -438,7 +468,12 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
   };
   const forwardedRedactionMetadata = {
     priorResults: priorResults.map((priorResult) => priorResult?.redaction),
-    reviewResult: normalizedReviewResult?.redaction
+    reviewResult: normalizedReviewResult?.redaction,
+    contextBudgetTruncation: {
+      reviewResultEvidenceEntries: contextBudget.truncationCount.reviewResultEvidenceEntries,
+      reviewResultOpenQuestionEntries: contextBudget.truncationCount.reviewResultOpenQuestionEntries,
+      changedSurfacePaths: contextBudget.truncationCount.changedSurfacePaths
+    }
   };
 
   const normalizedRunContext = validateRunContext({
@@ -647,7 +682,7 @@ export function summarizeWorkflowLaunchSelection(execution) {
 }
 
 function createRepairPacket({ workflow, packet, role, repairCount }) {
-  return buildTaskPacket({
+  const repairPacket = buildTaskPacket({
     goal: `${role === "implementer" ? "Address review findings for" : "Re-review repaired patch for"}: ${workflow.goal}`,
     role,
     allowedFiles: packet.allowedFiles,
@@ -659,6 +694,9 @@ function createRepairPacket({ workflow, packet, role, repairCount }) {
       ...packet.allowedFiles
     ])
   });
+
+  repairPacket.id = `${repairPacket.id}-repair-${repairCount}`;
+  return repairPacket;
 }
 
 async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount, baseContext }) {

@@ -301,6 +301,21 @@ function formatProofCollected(buildSession, runJournal) {
     if (evidenceCount > 0) {
       proofNotes.push(`${evidenceCount} run evidence note(s) are persisted in the journal.`);
     }
+
+    const policyStatusCounts = new Map();
+    for (const runEntry of runEntries) {
+      const policyStatus = normalizeNonEmptyString(runEntry?.policyDecision?.status);
+      if (!policyStatus) {
+        continue;
+      }
+      policyStatusCounts.set(policyStatus, (policyStatusCounts.get(policyStatus) ?? 0) + 1);
+    }
+    if (policyStatusCounts.size > 0) {
+      const policyStatusSummary = [...policyStatusCounts.entries()]
+        .map(([status, count]) => `${count} ${status}`)
+        .join(", ");
+      proofNotes.push(`Policy decisions recorded: ${policyStatusSummary}.`);
+    }
   }
 
   const validationArtifacts = collectValidationArtifacts(buildSession);
@@ -330,6 +345,22 @@ function formatProofCollected(buildSession, runJournal) {
 
 function formatUnprovenClaims(buildSession, runJournal) {
   const claims = [];
+  const executionStatus = normalizeNonEmptyString(runJournal?.status)
+    ?? normalizeNonEmptyString(buildSession?.execution?.status);
+  if (executionStatus === "running") {
+    claims.push("Execution is still running, so the requested outcome is not yet proven.");
+  } else if (
+    executionStatus === "awaiting_approval" ||
+    executionStatus === "approved"
+  ) {
+    claims.push("Execution has not started, so the requested outcome is not yet proven.");
+  } else if (
+    executionStatus !== null &&
+    executionStatus !== "success"
+  ) {
+    claims.push(`Execution ended with status ${executionStatus}, so the requested outcome is not yet proven.`);
+  }
+
   const changedSurfaceEvidence = collectRunChangedSurfaceEvidence(runJournal);
 
   if (!changedSurfaceEvidence.hasRunEntries || !changedSurfaceEvidence.anyObserved) {
@@ -350,22 +381,132 @@ function formatUnprovenClaims(buildSession, runJournal) {
   }
 
   const runEntries = Array.isArray(runJournal?.contractRuns) ? runJournal.contractRuns : [];
-  if (runEntries.length === 0) {
-    if (buildSession.execution.status === "running") {
-      claims.push("Execution is still running, so the final outcome is not yet proven.");
-    } else if (
-      buildSession.execution.status === "awaiting_approval" ||
-      buildSession.execution.status === "approved"
-    ) {
-      claims.push("No contract run evidence is recorded yet.");
+  if (runEntries.length === 0 && (
+    executionStatus === "running"
+    || executionStatus === "awaiting_approval"
+    || executionStatus === "approved"
+  )) {
+    claims.push("No contract run evidence is recorded yet.");
+  }
+
+  const reviewFindings = runEntries.flatMap((runEntry) => (
+    Array.isArray(runEntry?.reviewFindings) ? runEntry.reviewFindings : []
+  ));
+  if (reviewFindings.length > 0) {
+    const severityCounts = new Map();
+    for (const finding of reviewFindings) {
+      const severity = normalizeNonEmptyString(finding?.severity) ?? "unknown";
+      severityCounts.set(severity, (severityCounts.get(severity) ?? 0) + 1);
+    }
+    const severitySummary = [...severityCounts.entries()]
+      .map(([severity, count]) => `${count} ${severity}`)
+      .join(", ");
+    claims.push(
+      `${reviewFindings.length} typed review finding(s) are recorded (${severitySummary}).`
+    );
+  }
+
+  const evaluationCoverage = buildSession?.lifecycle?.auditReport?.evaluationCoverage;
+  if (Array.isArray(evaluationCoverage) && evaluationCoverage.length > 0) {
+    const missingCriteriaIds = uniqueStrings(
+      evaluationCoverage
+        .filter((entry) => normalizeNonEmptyString(entry?.status) === "missing")
+        .map((entry) => normalizeNonEmptyString(entry?.criterionId))
+        .filter(Boolean)
+    );
+    if (missingCriteriaIds.length > 0) {
+      claims.push(
+        `Audit evaluation coverage marks ${missingCriteriaIds.length} criterion/criteria as missing (${formatListPreview(missingCriteriaIds, { max: 4 })}).`
+      );
     }
   }
 
   if (claims.length === 0) {
-    claims.push("No unproven changed-surface claims are recorded from persisted run evidence.");
+    claims.push("No unproven claims are recorded from persisted evidence.");
   }
 
   return claims.join(" ");
+}
+
+function formatRequestedOutcome(buildSession) {
+  const goal = normalizeNonEmptyString(buildSession?.intake?.goal);
+  if (!goal) {
+    return null;
+  }
+
+  const successSignals = Array.isArray(buildSession?.intake?.successSignals)
+    ? buildSession.intake.successSignals.map((signal) => normalizeNonEmptyString(signal)).filter(Boolean)
+    : [];
+  if (successSignals.length === 0) {
+    return goal;
+  }
+
+  return `${goal}. success signals: ${formatListPreview(uniqueStrings(successSignals), { max: 3 })}.`;
+}
+
+function formatActualOutcome(buildSession, runJournal) {
+  const status = normalizeNonEmptyString(runJournal?.status)
+    ?? normalizeNonEmptyString(buildSession?.execution?.status);
+  if (!status) {
+    return null;
+  }
+
+  const stopReasonCode = normalizeNonEmptyString(runJournal?.stopReasonCode)
+    ?? normalizeNonEmptyString(buildSession?.execution?.stopReasonCode);
+  const stopReason = normalizeNonEmptyString(runJournal?.stopReason)
+    ?? normalizeNonEmptyString(buildSession?.execution?.stopReason);
+  const validationOutcome = normalizeNonEmptyString(runJournal?.validationOutcome)
+    ?? normalizeNonEmptyString(buildSession?.execution?.validationOutcome);
+
+  const parts = [`status: ${status}`];
+  if (stopReasonCode) {
+    parts.push(`stop reason code: ${stopReasonCode}`);
+  }
+  if (stopReason) {
+    parts.push(`stop reason: ${stopReason}`);
+  }
+  if (validationOutcome) {
+    parts.push(`validation outcome: ${validationOutcome}`);
+  }
+
+  const policyDecisions = Array.isArray(runJournal?.contractRuns)
+    ? runJournal.contractRuns
+      .map((runEntry) => runEntry?.policyDecision)
+      .filter((decision) => (
+        decision && typeof decision === "object" && !Array.isArray(decision)
+      ))
+      .map((decision) => ({
+        status: normalizeNonEmptyString(decision.status),
+        reason: normalizeNonEmptyString(decision.reason),
+        profileId: normalizeNonEmptyString(decision.profileId)
+      }))
+      .filter((decision) => decision.status !== null)
+    : [];
+  if (policyDecisions.length > 0) {
+    const decisionStatusCounts = new Map();
+    for (const decision of policyDecisions) {
+      decisionStatusCounts.set(
+        decision.status,
+        (decisionStatusCounts.get(decision.status) ?? 0) + 1
+      );
+    }
+    const decisionStatusSummary = [...decisionStatusCounts.entries()]
+      .map(([decisionStatus, count]) => `${count} ${decisionStatus}`)
+      .join(", ");
+    const nonAllowedReasons = uniqueStrings(policyDecisions
+      .filter((decision) => decision.status !== "allowed")
+      .map((decision) => decision.reason)
+      .filter(Boolean));
+    if (nonAllowedReasons.length > 0) {
+      parts.push(
+        `policy decisions: ${decisionStatusSummary}; non-allowed reasons: ${formatListPreview(nonAllowedReasons, { max: 3 })}`
+      );
+    } else {
+      parts.push(`policy decisions: ${decisionStatusSummary}`);
+    }
+  }
+
+  return parts.join("; ");
 }
 
 const REVIEWABILITY_REASON_LABELS = Object.freeze({
@@ -548,9 +689,23 @@ export function formatOperatorBlockedMessage({ message }) {
 }
 
 export function formatOperatorBuildSessionStatus(buildSession, { runJournal = null } = {}) {
+  const requestedOutcome = formatRequestedOutcome(buildSession);
+  const actualOutcome = formatActualOutcome(buildSession, runJournal);
+  const unprovenClaims = formatUnprovenClaims(buildSession, runJournal);
+  const nextStep = formatBuildSessionNextAction(buildSession);
+
   return [
     "Build Session",
     `Build ID: ${buildSession.buildId}`,
+    ...(requestedOutcome || actualOutcome || unprovenClaims || nextStep
+      ? [
+        "Operator Summary",
+        ...(requestedOutcome ? [`requested outcome: ${requestedOutcome}`] : []),
+        ...(actualOutcome ? [`actual outcome: ${actualOutcome}`] : []),
+        ...(unprovenClaims ? [`unproven claims: ${unprovenClaims}`] : []),
+        ...(nextStep ? [`next step: ${nextStep}`] : [])
+      ]
+      : []),
     `Goal: ${buildSession.intake.goal}`,
     `Approval: ${formatApprovalState(buildSession.approval)}`,
     `Plan fingerprint: ${buildSession.planFingerprint ?? "not captured"}`,
@@ -562,11 +717,11 @@ export function formatOperatorBuildSessionStatus(buildSession, { runJournal = nu
     `Pending contracts: ${buildSession.execution.pendingContracts}`,
     `Changed surfaces: ${formatChangedSurfaces(buildSession, runJournal)}`,
     `Proof collected: ${formatProofCollected(buildSession, runJournal)}`,
-    `Unproven claims: ${formatUnprovenClaims(buildSession, runJournal)}`,
+    `Unproven claims: ${unprovenClaims}`,
     `Reviewability: ${formatReviewability(buildSession, runJournal)}`,
     `Approval needed: ${formatApprovalNeeded(buildSession)}`,
     `Recovery / undo notes: ${formatRecoveryUndoNotes(buildSession, runJournal)}`,
-    `Next action: ${formatBuildSessionNextAction(buildSession)}`
+    `Next action: ${nextStep}`
   ].join("\n");
 }
 

@@ -1,7 +1,8 @@
 import {
   normalizeChangedSurfaceObservation,
   normalizeCommandObservations,
-  normalizeProviderModelSelection
+  normalizeProviderModelSelection,
+  normalizeReviewFindings
 } from "./run-evidence.js";
 import { resolvePacketContextManifest } from "./context-manifest.js";
 import { normalizeRedactionMetadata } from "./redaction.js";
@@ -83,6 +84,21 @@ export function validateWorkerResult(result) {
   assertStringArray("result.commandsRun", result.commandsRun);
   assertStringArray("result.evidence", result.evidence);
   assertStringArray("result.openQuestions", result.openQuestions);
+  try {
+    if (Object.prototype.hasOwnProperty.call(result, "reviewFindings")) {
+      const normalizedReviewFindings = normalizeReviewFindings(result.reviewFindings, {
+        fieldName: "result.reviewFindings",
+        allowMissing: false
+      });
+      if (normalizedReviewFindings.length === 0) {
+        delete result.reviewFindings;
+      } else {
+        result.reviewFindings = normalizedReviewFindings;
+      }
+    }
+  } catch (error) {
+    throw new Error(`${error.message}`);
+  }
   try {
     if (Object.prototype.hasOwnProperty.call(result, "commandObservations")) {
       const normalizedCommandObservations = normalizeCommandObservations(result.commandObservations, {

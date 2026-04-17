@@ -85,6 +85,7 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     assert.deepEqual(saved.runJournal.sourceArtifactIds, [`execution_program:${program.id}`]);
     assert.equal(saved.runJournal.lineageDepth, 1);
     assert.deepEqual(saved.runJournal.actionClasses, []);
+    assert.equal(Object.prototype.hasOwnProperty.call(saved.runJournal, "approvalBinding"), false);
     assert.equal(saved.runJournal.policyProfile, "default");
     assert.equal(saved.runJournal.validationArtifacts.length, 1);
     assert.equal(saved.runJournal.validationArtifacts[0].status, "not_captured");
@@ -99,6 +100,7 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     assert.equal(loaded.programId, program.id);
     assert.equal(loaded.lastStatus, "running");
     assert.equal(loaded.validationOutcome, "not_run");
+    assert.equal(Object.prototype.hasOwnProperty.call(loaded.runJournal, "approvalBinding"), false);
     assert.deepEqual(loaded.reviewability, {
       status: "not_reviewable",
       reasons: ["non_terminal_status"]
@@ -116,6 +118,7 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     ]);
     assert.equal(persistedOnDisk.runJournal.status, "running");
     assert.equal(persistedOnDisk.runJournal.artifactType, "run_journal");
+    assert.equal(Object.prototype.hasOwnProperty.call(persistedOnDisk.runJournal, "approvalBinding"), false);
   });
 });
 
@@ -607,6 +610,48 @@ test("run store persists typed providerModelSelections and keeps execution-order
   });
 });
 
+test("run store persists typed approvalBinding on run-journal truth when provided", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const runWithApprovalProgramId = `${program.id}-approval-binding`;
+
+    const saved = await runStore.saveRun({
+      programId: runWithApprovalProgramId,
+      program: {
+        ...program,
+        id: runWithApprovalProgramId
+      },
+      runJournal: {
+        programId: runWithApprovalProgramId,
+        status: "running",
+        stopReason: null,
+        approvalBinding: {
+          status: "approved",
+          source: "build_session",
+          buildId: "build-approved-123"
+        },
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      }
+    });
+
+    assert.deepEqual(saved.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-approved-123"
+    });
+
+    const loaded = await runStore.loadRun(runWithApprovalProgramId);
+    assert.deepEqual(loaded.runJournal.approvalBinding, {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-approved-123"
+    });
+  });
+});
+
 test("run store load backfills lineage and evidence metadata for legacy persisted records", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();
@@ -662,6 +707,7 @@ test("run store load backfills lineage and evidence metadata for legacy persiste
       status: "not_reviewable",
       reasons: ["non_terminal_status"]
     });
+    assert.equal(Object.prototype.hasOwnProperty.call(loaded.runJournal, "approvalBinding"), false);
     assert.equal(loaded.runJournal.contractRuns.length, 0);
   });
 });
@@ -712,6 +758,44 @@ test("run store load rejects malformed present changed-surface evidence", async 
     await assert.rejects(
       () => runStore.loadRun(program.id),
       /runJournalEntry\.changedSurface\.paths\[0\] must not escape the repository root/u
+    );
+  });
+});
+
+test("run store load fails closed on malformed present approvalBinding", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        approvalBinding: {
+          status: "approved",
+          source: "build_session",
+          buildId: "build-valid"
+        },
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      }
+    });
+
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+    const persisted = JSON.parse(await readFile(runPath, "utf8"));
+    persisted.runJournal.approvalBinding = {
+      status: "approved",
+      source: "session_build"
+    };
+    await writeFile(runPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournal\.approvalBinding\.source must be one of: build_session, unknown/u
     );
   });
 });
@@ -1189,6 +1273,208 @@ test("run store persists typed command observations and infers action classes fr
     assert.deepEqual(loaded.runJournal.contractRuns[0].commandObservations, commandObservations);
     assert.deepEqual(loaded.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
     assert.deepEqual(loaded.runJournal.actionClasses, ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]);
+  });
+});
+
+test("run store persists typed review findings on contract runs", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const reviewFindings = [
+      {
+        kind: "issue",
+        severity: "high",
+        message: "Missing regression assertion around scoped helper rename.",
+        path: "src/helpers.js"
+      },
+      {
+        kind: "gap",
+        severity: "medium",
+        message: "Rollback guidance is not explicit in persisted notes."
+      }
+    ];
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            reviewFindings,
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    assert.deepEqual(saved.runJournal.contractRuns[0].reviewFindings, reviewFindings);
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.deepEqual(loaded.runJournal.contractRuns[0].reviewFindings, reviewFindings);
+  });
+});
+
+test("run store load fails closed when present reviewFindings entries are malformed", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+    const persisted = JSON.parse(await readFile(runPath, "utf8"));
+    persisted.runJournal.contractRuns[0].reviewFindings = [
+      {
+        kind: "issue",
+        severity: "critical",
+        message: "Malformed severity should fail closed."
+      }
+    ];
+    await writeFile(runPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.reviewFindings\[0\]\.severity must be one of: high, medium, low/u
+    );
+  });
+});
+
+test("run store load fails closed when present policyDecision entries are malformed", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+    const persisted = JSON.parse(await readFile(runPath, "utf8"));
+    persisted.runJournal.contractRuns[0].policyDecision = {
+      profileId: "default",
+      status: "not_supported",
+      reason: "profile_allows_execution"
+    };
+    await writeFile(runPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.policyDecision\.status must be one of: allowed, blocked, approval_required/u
+    );
+  });
+});
+
+test("run store keeps legacy contract-run entries readable when reviewFindings is omitted", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(loaded.runJournal.contractRuns[0], "reviewFindings"),
+      false
+    );
+  });
+});
+
+test("run store keeps legacy contract-run entries readable when policyDecision is omitted", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(loaded.runJournal.contractRuns[0], "policyDecision"),
+      false
+    );
   });
 });
 

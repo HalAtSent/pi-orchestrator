@@ -99,6 +99,45 @@ function shouldUseProcessBackend({ mode, packet, context }) {
   return effectiveRisk(packet, context) === "low" && (packet?.role === "implementer" || packet?.role === "verifier");
 }
 
+export function inferWorkflowProcessBackendRequirement({
+  mode,
+  workflow
+} = {}) {
+  const normalizedMode = normalizeMode(mode);
+  validateMode(normalizedMode);
+
+  if (normalizedMode === AUTO_BACKEND_MODE_PI_RUNTIME) {
+    return false;
+  }
+
+  if (!workflow || typeof workflow !== "object" || !Array.isArray(workflow.packets)) {
+    return null;
+  }
+
+  const risk = isValidRiskLevel(workflow.risk) ? workflow.risk : null;
+  const context = risk ? { risk } : {};
+
+  for (const packet of workflow.packets) {
+    if (!packet || typeof packet !== "object") {
+      return null;
+    }
+
+    if (typeof packet.role !== "string" || packet.role.trim().length === 0) {
+      return null;
+    }
+
+    if (shouldUseProcessBackend({
+      mode: normalizedMode,
+      packet,
+      context
+    })) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function createAutoBackendRunner({
   defaultRunner,
   processBackend = null,
@@ -143,6 +182,17 @@ export function createAutoBackendRunner({
 
     getCalls() {
       return clone(calls);
+    },
+
+    getExecutionBackendMode() {
+      return normalizedMode;
+    },
+
+    requiresProcessBackendForWorkflow(workflow) {
+      return inferWorkflowProcessBackendRequirement({
+        mode: normalizedMode,
+        workflow
+      });
     }
   };
 }

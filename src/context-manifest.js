@@ -34,6 +34,15 @@ const CONTEXT_MANIFEST_SOURCE_SET = new Set(CONTEXT_MANIFEST_SOURCES);
 const CONTEXT_MANIFEST_REASON_SET = new Set(CONTEXT_MANIFEST_REASONS);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
 const TRUSTED_FORWARDED_REDACTION_METADATA_BY_CONTEXT = new WeakMap();
+export const RUN_CONTEXT_BUDGET_LIMITS = Object.freeze({
+  maxPriorResults: 4,
+  maxPriorResultEvidence: 8,
+  maxPriorResultCommands: 8,
+  maxPriorResultChangedFiles: 8,
+  maxReviewResultEvidence: 8,
+  maxReviewResultOpenQuestions: 8,
+  maxChangedSurfacePaths: 8
+});
 
 function assert(condition, message) {
   if (!condition) {
@@ -89,6 +98,10 @@ function normalizeStringArray(fieldName, value, { allowMissing = false } = {}) {
 
 function contextManifestEntryKey(entry) {
   return `${entry.kind}::${entry.source}::${entry.reference}::${entry.reason}`;
+}
+
+function contextManifestKindReferenceKey(entry) {
+  return `${entry.kind}::${entry.reference}`;
 }
 
 function uniqueContextManifestEntries(entries) {
@@ -170,7 +183,8 @@ export function createContextManifestEntry(entry, { fieldName = "contextManifest
 
 export function normalizeContextManifest(manifest, {
   fieldName = "contextManifest",
-  allowMissing = true
+  allowMissing = true,
+  dedupe = true
 } = {}) {
   if (manifest === undefined) {
     if (allowMissing) {
@@ -184,7 +198,7 @@ export function normalizeContextManifest(manifest, {
     fieldName: `${fieldName}[${index}]`
   }));
 
-  return uniqueContextManifestEntries(entries);
+  return dedupe ? uniqueContextManifestEntries(entries) : entries;
 }
 
 export function mergeContextManifestEntries(...entryGroups) {
@@ -213,22 +227,74 @@ function formatManifestEntriesForError(entries) {
     .join(", ");
 }
 
+function assertNoDuplicateManifestKindReferenceEntries(entries, {
+  fieldName
+} = {}) {
+  const seen = new Map();
+  for (const [index, entry] of entries.entries()) {
+    const key = contextManifestKindReferenceKey(entry);
+    const firstIndex = seen.get(key);
+    assert(
+      firstIndex === undefined,
+      `${fieldName}[${index}] duplicates (kind, reference) pair ${entry.kind}:${entry.reference} already present at ${fieldName}[${firstIndex}]`
+    );
+    seen.set(key, index);
+  }
+}
+
 function compareManifestEntriesByKind({
   kind,
   actualEntries,
   expectedEntries
 }) {
+  const actualByKindReference = new Map(
+    actualEntries.map((entry) => [contextManifestKindReferenceKey(entry), entry])
+  );
+  const expectedByKindReference = new Map(
+    expectedEntries.map((entry) => [contextManifestKindReferenceKey(entry), entry])
+  );
+  const conflictingEntries = [];
+  for (const [key, actualEntry] of actualByKindReference.entries()) {
+    const expectedEntry = expectedByKindReference.get(key);
+    if (!expectedEntry) {
+      continue;
+    }
+    if (contextManifestEntryKey(actualEntry) !== contextManifestEntryKey(expectedEntry)) {
+      conflictingEntries.push({
+        expectedEntry,
+        actualEntry
+      });
+    }
+  }
+  const conflictingKindReferenceKeys = new Set(
+    conflictingEntries.map(({ actualEntry }) => contextManifestKindReferenceKey(actualEntry))
+  );
   const actualSet = new Set(actualEntries.map((entry) => contextManifestEntryKey(entry)));
   const expectedSet = new Set(expectedEntries.map((entry) => contextManifestEntryKey(entry)));
 
-  const missingEntries = expectedEntries.filter((entry) => !actualSet.has(contextManifestEntryKey(entry)));
-  const unexpectedEntries = actualEntries.filter((entry) => !expectedSet.has(contextManifestEntryKey(entry)));
+  const missingEntries = expectedEntries.filter((entry) => (
+    !actualSet.has(contextManifestEntryKey(entry))
+    && !conflictingKindReferenceKeys.has(contextManifestKindReferenceKey(entry))
+  ));
+  const unexpectedEntries = actualEntries.filter((entry) => (
+    !expectedSet.has(contextManifestEntryKey(entry))
+    && !conflictingKindReferenceKeys.has(contextManifestKindReferenceKey(entry))
+  ));
 
-  if (missingEntries.length === 0 && unexpectedEntries.length === 0) {
+  if (
+    missingEntries.length === 0
+    && unexpectedEntries.length === 0
+    && conflictingEntries.length === 0
+  ) {
     return;
   }
 
   const details = [];
+  if (conflictingEntries.length > 0) {
+    details.push(`conflicting ${kind}: ${conflictingEntries.map(({ expectedEntry, actualEntry }) => (
+      `${kind}:${expectedEntry.reference} expected ${expectedEntry.source}/${expectedEntry.reason} but received ${actualEntry.source}/${actualEntry.reason}`
+    )).join(", ")}`);
+  }
   if (missingEntries.length > 0) {
     details.push(`missing ${kind}: ${formatManifestEntriesForError(missingEntries)}`);
   }
@@ -263,6 +329,16 @@ function cloneExpectedForwardedRedactionMetadata(value) {
   };
 }
 
+function cloneExpectedForwardedTruncationMetadata(value) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return {
+    ...value
+  };
+}
+
 function cloneExpectedPriorResultRedactionMetadata(value) {
   if (value === undefined) {
     return undefined;
@@ -276,10 +352,16 @@ function cloneTrustedForwardedRedactionMetadata(value) {
     return undefined;
   }
 
-  return {
+  const cloned = {
     priorResults: cloneExpectedPriorResultRedactionMetadata(value.priorResults),
     reviewResult: cloneExpectedForwardedRedactionMetadata(value.reviewResult)
   };
+  if (value.contextBudgetTruncation !== undefined) {
+    cloned.contextBudgetTruncation = cloneExpectedForwardedTruncationMetadata(
+      value.contextBudgetTruncation
+    );
+  }
+  return cloned;
 }
 
 function assertRedactionMatchesTrustedForwardedMetadata(redaction, expectedRedactionMetadata, {
@@ -325,6 +407,36 @@ function normalizeExpectedPriorResultRedactionMetadata(value, {
   }));
 }
 
+function normalizeExpectedForwardedTruncationMetadata(value, {
+  fieldName
+} = {}) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  assert(
+    value && typeof value === "object" && !Array.isArray(value),
+    `${fieldName} must be an object`
+  );
+  return {
+    reviewResultEvidenceEntries: normalizeNonNegativeInteger({
+      fieldName: `${fieldName}.reviewResultEvidenceEntries`,
+      value: value.reviewResultEvidenceEntries,
+      defaultValue: 0
+    }),
+    reviewResultOpenQuestionEntries: normalizeNonNegativeInteger({
+      fieldName: `${fieldName}.reviewResultOpenQuestionEntries`,
+      value: value.reviewResultOpenQuestionEntries,
+      defaultValue: 0
+    }),
+    changedSurfacePaths: normalizeNonNegativeInteger({
+      fieldName: `${fieldName}.changedSurfacePaths`,
+      value: value.changedSurfacePaths,
+      defaultValue: 0
+    })
+  };
+}
+
 function normalizeTrustedForwardedRedactionMetadata(value, {
   fieldName = "trustedForwardedRedactionMetadata"
 } = {}) {
@@ -343,8 +455,99 @@ function normalizeTrustedForwardedRedactionMetadata(value, {
     }),
     reviewResult: normalizeExpectedForwardedRedactionMetadata(value.reviewResult, {
       fieldName: `${fieldName}.reviewResult`
-    })
+    }),
+    contextBudgetTruncation: normalizeExpectedForwardedTruncationMetadata(
+      value.contextBudgetTruncation,
+      {
+        fieldName: `${fieldName}.contextBudgetTruncation`
+      }
+    )
   };
+}
+
+function assertRunContextPayloadTruncationSignalConsistency({
+  contextBudget,
+  reviewResult,
+  changedSurfaceReferences,
+  fieldName
+}) {
+  if (!contextBudget) {
+    return;
+  }
+
+  const reviewEvidenceCount = contextBudget.truncationCount.reviewResultEvidenceEntries;
+  const reviewOpenQuestionCount = contextBudget.truncationCount.reviewResultOpenQuestionEntries;
+  const changedSurfacePathCount = contextBudget.truncationCount.changedSurfacePaths;
+
+  if (reviewEvidenceCount > 0) {
+    const forwardedReviewEvidenceLength = Array.isArray(reviewResult?.evidence)
+      ? reviewResult.evidence.length
+      : 0;
+    assert(
+      forwardedReviewEvidenceLength === RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence,
+      `${fieldName}.truncationCount.reviewResultEvidenceEntries > 0 requires forwarded reviewResult.evidence to contain exactly ${RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence} entries`
+    );
+  }
+  if (reviewOpenQuestionCount > 0) {
+    const forwardedReviewOpenQuestionLength = Array.isArray(reviewResult?.openQuestions)
+      ? reviewResult.openQuestions.length
+      : 0;
+    assert(
+      forwardedReviewOpenQuestionLength === RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions,
+      `${fieldName}.truncationCount.reviewResultOpenQuestionEntries > 0 requires forwarded reviewResult.openQuestions to contain exactly ${RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions} entries`
+    );
+  }
+  if (changedSurfacePathCount > 0) {
+    const hasAtLeastOneBoundedChangedSurfaceEntry = changedSurfaceReferences.some((entry) => (
+      entry.pathCount === RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths
+    ));
+    assert(
+      hasAtLeastOneBoundedChangedSurfaceEntry,
+      `${fieldName}.truncationCount.changedSurfacePaths > 0 requires at least one forwarded changedSurfaceContext entry with exactly ${RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths} paths`
+    );
+  }
+}
+
+function assertContextBudgetTruncationCountsAreTrusted({
+  contextBudget,
+  trustedTruncationMetadata,
+  fieldName
+}) {
+  if (!contextBudget) {
+    return;
+  }
+
+  const reviewResultEvidenceEntries = contextBudget.truncationCount.reviewResultEvidenceEntries;
+  const reviewResultOpenQuestionEntries = contextBudget.truncationCount.reviewResultOpenQuestionEntries;
+  const changedSurfacePaths = contextBudget.truncationCount.changedSurfacePaths;
+  if (trustedTruncationMetadata === undefined) {
+    assert(
+      reviewResultEvidenceEntries === 0,
+      `${fieldName}.truncationCount.reviewResultEvidenceEntries must be 0 unless trusted forwarded truncation metadata is provided`
+    );
+    assert(
+      reviewResultOpenQuestionEntries === 0,
+      `${fieldName}.truncationCount.reviewResultOpenQuestionEntries must be 0 unless trusted forwarded truncation metadata is provided`
+    );
+    assert(
+      changedSurfacePaths === 0,
+      `${fieldName}.truncationCount.changedSurfacePaths must be 0 unless trusted forwarded truncation metadata is provided`
+    );
+    return;
+  }
+
+  assert(
+    reviewResultEvidenceEntries === trustedTruncationMetadata.reviewResultEvidenceEntries,
+    `${fieldName}.truncationCount.reviewResultEvidenceEntries must exactly match trusted forwarded truncation metadata (expected ${trustedTruncationMetadata.reviewResultEvidenceEntries}, received ${reviewResultEvidenceEntries})`
+  );
+  assert(
+    reviewResultOpenQuestionEntries === trustedTruncationMetadata.reviewResultOpenQuestionEntries,
+    `${fieldName}.truncationCount.reviewResultOpenQuestionEntries must exactly match trusted forwarded truncation metadata (expected ${trustedTruncationMetadata.reviewResultOpenQuestionEntries}, received ${reviewResultOpenQuestionEntries})`
+  );
+  assert(
+    changedSurfacePaths === trustedTruncationMetadata.changedSurfacePaths,
+    `${fieldName}.truncationCount.changedSurfacePaths must exactly match trusted forwarded truncation metadata (expected ${trustedTruncationMetadata.changedSurfacePaths}, received ${changedSurfacePaths})`
+  );
 }
 
 export function setTrustedForwardedRedactionMetadata(context, forwardedRedactionMetadata, {
@@ -367,6 +570,11 @@ export function setTrustedForwardedRedactionMetadata(context, forwardedRedaction
     priorResults: cloneExpectedPriorResultRedactionMetadata(normalizedMetadata.priorResults),
     reviewResult: cloneExpectedForwardedRedactionMetadata(normalizedMetadata.reviewResult)
   };
+  if (normalizedMetadata.contextBudgetTruncation !== undefined) {
+    clonedMetadata.contextBudgetTruncation = cloneExpectedForwardedTruncationMetadata(
+      normalizedMetadata.contextBudgetTruncation
+    );
+  }
   TRUSTED_FORWARDED_REDACTION_METADATA_BY_CONTEXT.set(context, clonedMetadata);
   return cloneTrustedForwardedRedactionMetadata(clonedMetadata);
 }
@@ -396,7 +604,10 @@ function normalizePriorResultReferences(priorResults, fieldName, {
     );
   }
 
-  return priorResults.map((priorResult, index) => {
+  const references = [];
+  const seenPacketIds = new Map();
+
+  for (const [index, priorResult] of priorResults.entries()) {
     assert(
       priorResult && typeof priorResult === "object" && !Array.isArray(priorResult),
       `${fieldName}[${index}] must be an object`
@@ -444,8 +655,17 @@ function normalizePriorResultReferences(priorResults, fieldName, {
         ]
       });
     }
-    return normalizeReference(`${fieldName}[${index}].packetId`, priorResult.packetId);
-  });
+    const packetId = normalizeReference(`${fieldName}[${index}].packetId`, priorResult.packetId);
+    const firstIndex = seenPacketIds.get(packetId);
+    assert(
+      firstIndex === undefined,
+      `${fieldName}[${index}].packetId duplicates packetId ${packetId} already present at ${fieldName}[${firstIndex}].packetId`
+    );
+    seenPacketIds.set(packetId, index);
+    references.push(packetId);
+  }
+
+  return references;
 }
 
 function normalizeReviewResultPresence(reviewResult, fieldName, {
@@ -505,7 +725,10 @@ function normalizeReviewResultPresence(reviewResult, fieldName, {
 function normalizeChangedSurfaceReferences(changedSurfaceContext, fieldName) {
   assert(Array.isArray(changedSurfaceContext), `${fieldName} must be an array`);
 
-  return changedSurfaceContext.map((entry, index) => {
+  const references = [];
+  const seenReferences = new Map();
+
+  for (const [index, entry] of changedSurfaceContext.entries()) {
     assert(
       entry && typeof entry === "object" && !Array.isArray(entry),
       `${fieldName}[${index}] must be an object`
@@ -516,8 +739,48 @@ function normalizeChangedSurfaceReferences(changedSurfaceContext, fieldName) {
     const paths = normalizeStringArray(`${fieldName}[${index}].paths`, entry.paths);
     assert(paths.length > 0, `${fieldName}[${index}].paths must contain at least one path`);
 
-    return `${packetId}:${role}`;
-  });
+    const reference = `${packetId}:${role}`;
+    const firstIndex = seenReferences.get(reference);
+    assert(
+      firstIndex === undefined,
+      `${fieldName}[${index}] duplicates changed-surface reference ${reference} already present at ${fieldName}[${firstIndex}]`
+    );
+    seenReferences.set(reference, index);
+
+    references.push({
+      reference,
+      pathCount: paths.length,
+      index
+    });
+  }
+
+  return references;
+}
+
+function assertContextPayloadWithinBudgetCaps({
+  reviewResult,
+  changedSurfaceReferences,
+  fieldName
+}) {
+  const reviewEvidenceCount = Array.isArray(reviewResult?.evidence) ? reviewResult.evidence.length : 0;
+  assert(
+    reviewEvidenceCount <= RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence,
+    `${fieldName}.reviewResult.evidence must contain at most ${RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence} entries`
+  );
+  const reviewOpenQuestionCount = Array.isArray(reviewResult?.openQuestions)
+    ? reviewResult.openQuestions.length
+    : 0;
+  assert(
+    reviewOpenQuestionCount <= RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions,
+    `${fieldName}.reviewResult.openQuestions must contain at most ${RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions} entries`
+  );
+
+  for (const entry of changedSurfaceReferences) {
+    assert(
+      entry.pathCount <= RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths,
+      `${fieldName}.changedSurfaceContext[${entry.index}].paths must contain at most ${RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths} entries`
+    );
+  }
 }
 
 function assertContextBudgetTruncationFlag({
@@ -535,6 +798,9 @@ function assertContextBudgetTruncationFlag({
 function assertContextBudgetConsistency({
   contextBudget,
   priorResultReferences,
+  reviewResult,
+  changedSurfaceReferences,
+  trustedTruncationMetadata,
   fieldName
 }) {
   if (!contextBudget) {
@@ -583,6 +849,31 @@ function assertContextBudgetConsistency({
     fieldName: `${fieldName}.perResultChangedFilesTruncated`,
     truncated: contextBudget.perResultChangedFilesTruncated,
     count: contextBudget.truncationCount.changedFiles
+  });
+  const reviewResultCountSignal = (
+    contextBudget.truncationCount.reviewResultEvidenceEntries > 0
+    || contextBudget.truncationCount.reviewResultOpenQuestionEntries > 0
+  );
+  assert(
+    contextBudget.reviewResultTruncated === reviewResultCountSignal,
+    `${fieldName}.reviewResultTruncated must be true iff truncationCount.reviewResultEvidenceEntries > 0 or truncationCount.reviewResultOpenQuestionEntries > 0`
+  );
+
+  const changedSurfaceCountSignal = contextBudget.truncationCount.changedSurfacePaths > 0;
+  assert(
+    contextBudget.changedSurfaceTruncated === changedSurfaceCountSignal,
+    `${fieldName}.changedSurfaceTruncated must be true iff truncationCount.changedSurfacePaths > 0`
+  );
+  assertRunContextPayloadTruncationSignalConsistency({
+    contextBudget,
+    reviewResult,
+    changedSurfaceReferences,
+    fieldName
+  });
+  assertContextBudgetTruncationCountsAreTrusted({
+    contextBudget,
+    trustedTruncationMetadata,
+    fieldName
   });
 }
 
@@ -635,6 +926,16 @@ export function normalizeContextBudget(contextBudget, {
       value: contextBudget.perResultChangedFilesTruncated,
       defaultValue: false
     }),
+    reviewResultTruncated: normalizeOptionalBoolean({
+      fieldName: `${fieldName}.reviewResultTruncated`,
+      value: contextBudget.reviewResultTruncated,
+      defaultValue: false
+    }),
+    changedSurfaceTruncated: normalizeOptionalBoolean({
+      fieldName: `${fieldName}.changedSurfaceTruncated`,
+      value: contextBudget.changedSurfaceTruncated,
+      defaultValue: false
+    }),
     truncationCount: {
       priorResults: normalizeNonNegativeInteger({
         fieldName: `${fieldName}.truncationCount.priorResults`,
@@ -654,6 +955,21 @@ export function normalizeContextBudget(contextBudget, {
       changedFiles: normalizeNonNegativeInteger({
         fieldName: `${fieldName}.truncationCount.changedFiles`,
         value: truncationCount.changedFiles,
+        defaultValue: 0
+      }),
+      reviewResultEvidenceEntries: normalizeNonNegativeInteger({
+        fieldName: `${fieldName}.truncationCount.reviewResultEvidenceEntries`,
+        value: truncationCount.reviewResultEvidenceEntries,
+        defaultValue: 0
+      }),
+      reviewResultOpenQuestionEntries: normalizeNonNegativeInteger({
+        fieldName: `${fieldName}.truncationCount.reviewResultOpenQuestionEntries`,
+        value: truncationCount.reviewResultOpenQuestionEntries,
+        defaultValue: 0
+      }),
+      changedSurfacePaths: normalizeNonNegativeInteger({
+        fieldName: `${fieldName}.truncationCount.changedSurfacePaths`,
+        value: truncationCount.changedSurfacePaths,
         defaultValue: 0
       })
     }
@@ -686,9 +1002,19 @@ export function validateRunContext({
       fieldName: `${fieldName}.forwardedRedactionMetadata.reviewResult`
     }
   );
+  const expectedForwardedTruncationMetadata = normalizeExpectedForwardedTruncationMetadata(
+    forwardedRedactionMetadata?.contextBudgetTruncation,
+    {
+      fieldName: `${fieldName}.forwardedRedactionMetadata.contextBudgetTruncation`
+    }
+  );
   const normalizedManifest = normalizeContextManifest(contextManifest, {
     fieldName: `${fieldName}.contextManifest`,
-    allowMissing: false
+    allowMissing: false,
+    dedupe: false
+  });
+  assertNoDuplicateManifestKindReferenceEntries(normalizedManifest, {
+    fieldName: `${fieldName}.contextManifest`
   });
 
   const priorResultReferences = normalizePriorResultReferences(
@@ -711,6 +1037,11 @@ export function validateRunContext({
     changedSurfaceContext,
     `${fieldName}.changedSurfaceContext`
   );
+  assertContextPayloadWithinBudgetCaps({
+    reviewResult: normalizedReviewResult,
+    changedSurfaceReferences,
+    fieldName
+  });
   const normalizedContextBudget = normalizeContextBudget(contextBudget, {
     fieldName: `${fieldName}.contextBudget`,
     allowMissing: true
@@ -718,6 +1049,9 @@ export function validateRunContext({
   assertContextBudgetConsistency({
     contextBudget: normalizedContextBudget,
     priorResultReferences,
+    reviewResult: normalizedReviewResult,
+    changedSurfaceReferences,
+    trustedTruncationMetadata: expectedForwardedTruncationMetadata,
     fieldName: `${fieldName}.contextBudget`
   });
 
@@ -726,7 +1060,9 @@ export function validateRunContext({
     priorResultReferences.map((packetId) => ({ packetId }))
   );
   const expectedReviewResultEntries = buildReviewResultContextManifest(normalizedReviewResult);
-  const expectedChangedSurfaceEntries = buildChangedSurfaceContextManifest(changedSurfaceReferences);
+  const expectedChangedSurfaceEntries = buildChangedSurfaceContextManifest(
+    changedSurfaceReferences.map((entry) => entry.reference)
+  );
 
   compareManifestEntriesByKind({
     kind: CONTEXT_MANIFEST_KIND.CONTEXT_FILE,
