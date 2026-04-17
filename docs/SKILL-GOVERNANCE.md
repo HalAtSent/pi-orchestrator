@@ -82,6 +82,33 @@ Not every instruction file is a skill. Role docs, contract docs, evidence
 schema docs, policy profiles, operator guides, and planning notes are distinct
 surfaces with different owners.
 
+## Governed Skill Inventory And Regression (Current Narrow Slice)
+
+The repository now has a first-class, code-owned governed-skill inventory in
+`src/skill-governance.js` for a small closed set of high-value repo-governed
+skills (`explorer`, `implementer`, `reviewer`, `verifier`).
+
+This slice is intentionally narrow:
+
+- closed explicit inventory for high-value governed skills only
+- deterministic validation of entry metadata, file references, command
+  references, and required role-doc headings
+- governed-skill inventory ids are unique (duplicate ids fail closed)
+- each `requiredDocHeadings[].path` is a declared file dependency and must also
+  appear in `referencedFiles[]` for that same skill (with slash-style path
+  normalization)
+- deterministic regression tests in `test/skill-governance.test.js`
+
+This is governance and drift detection, not runtime skill orchestration:
+
+- no dynamic skill loading
+- no runtime permission or approval semantics
+- no policy ownership transfer into skill text
+- no marketplace or plugin-manager behavior
+
+Skills remain advisory reusable-method surfaces. Code, contract, schema,
+profiles, and role docs remain the policy and truth owners.
+
 ## What Belongs In A Skill
 
 Skills are the preferred home for reusable task method such as:
@@ -175,8 +202,10 @@ Practical authoring rules:
 
 Current repo truth:
 
-- the repository does not currently have a first-class runtime skill registry,
-  skill-version pinning surface, or automatic skill-evaluation harness
+- the repository now has a narrow first-class governed-skill inventory and
+  regression checks for high-value repo-governed skills
+- the repository still does not have a runtime skill loader, runtime skill
+  pinning surface, or broad repo-wide automatic skill evaluation
 - "versioned" currently means normal repository history, review, and rollback
 - a skill change is governed like any other repo change: inspectable in git,
   reviewable by a human, and expected to stay aligned with code and docs
@@ -197,6 +226,8 @@ Current evaluation expectation:
 
 - where practical, exercise the skill on at least one representative local task
   or fixture
+- run governed-skill regression checks when touched surfaces include governed
+  skills, role docs, or their explicit references
 - verify that referenced files, commands, and outputs still exist
 - verify that the skill does not contradict code, contract, schema, profile, or
   role truth

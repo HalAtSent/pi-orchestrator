@@ -298,13 +298,33 @@ Landing condition:
 
 ### 5. Skill Governance And Skill Regression
 
+Partial landing already shipped:
+
+- `src/skill-governance.js` now provides a first-class code-owned governed
+  skill inventory for a closed high-value repo-governed set
+  (`explorer`, `implementer`, `reviewer`, `verifier`)
+- governed inventory entries now carry explicit ownership, entry path,
+  referenced files, referenced command literals, and a closed
+  `expectedOutputShape` enum
+- deterministic governed-skill regression checks now verify inventory validity,
+  unique governed-skill ids, required file existence, required command-literal
+  presence in skill entries, and required role-doc heading presence where
+  explicitly declared
+- required role-doc heading dependencies now also validate as declared
+  `referencedFiles[]` dependencies for the same governed skill (slash-style
+  path normalization)
+- targeted regression tests now cover this governed-skill drift surface in
+  `test/skill-governance.test.js`
+
 Current gap:
 
-- the repository now treats skills as the preferred reusable-method layer, but
-  current governance is still mostly documentation and review discipline
-- there is no first-class skill registry, pinning surface, or regression
-  harness, and no routine proof that high-value skills still reference valid
-  commands, files, and output expectations
+- current governed-skill coverage is intentionally narrow and limited to the
+  high-value repo-governed set above; this is not broad repo-wide skill
+  coverage
+- there is still no runtime skill loading, runtime pinning, or plugin-style
+  management surface
+- governed-skill regression currently proves deterministic structural truth
+  (files, command literals, required headings), not qualitative skill quality
 
 Hardening target:
 
