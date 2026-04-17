@@ -740,6 +740,9 @@ async function runProgramFromState(program, {
       ...(Array.isArray(result.reviewFindings) && result.reviewFindings.length > 0
         ? { reviewFindings: result.reviewFindings }
         : {}),
+      ...(Object.prototype.hasOwnProperty.call(result, "scopeOwnership")
+        ? { scopeOwnership: result.scopeOwnership }
+        : {}),
       providerModelEvidenceRequirement: result.providerModelEvidenceRequirement,
       openQuestions: result.openQuestions,
       changedSurface: result.changedSurface,
@@ -990,6 +993,26 @@ export function formatProgramRunJournal(journal) {
         lines.push(`  policy_decision_profile: ${entry.policyDecision.profileId}`);
         lines.push(`  policy_decision_status: ${entry.policyDecision.status}`);
         lines.push(`  policy_decision_reason: ${entry.policyDecision.reason}`);
+      }
+      if (entry.scopeOwnership) {
+        lines.push(`  scope_ownership_status: ${entry.scopeOwnership.status}`);
+        lines.push(`  scope_declared_mode: ${entry.scopeOwnership.declaredScope.mode}`);
+        lines.push("  scope_declared_paths:");
+        if (entry.scopeOwnership.declaredScope.paths.length === 0) {
+          lines.push("  - none");
+        } else {
+          for (const declaredPath of entry.scopeOwnership.declaredScope.paths) {
+            lines.push(`  - ${declaredPath}`);
+          }
+        }
+        lines.push("  scope_observed_paths:");
+        if (entry.scopeOwnership.observedChanges.paths.length === 0) {
+          lines.push("  - none");
+        } else {
+          for (const observedPath of entry.scopeOwnership.observedChanges.paths) {
+            lines.push(`  - ${observedPath}`);
+          }
+        }
       }
       lines.push(`  changed_surface_capture: ${entry.changedSurface.capture}`);
       if (entry.changedSurface.paths.length > 0) {

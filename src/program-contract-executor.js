@@ -7,7 +7,8 @@ import {
   normalizeChangedSurfaceObservation,
   deriveCommandObservationsFromCommands,
   normalizeProviderModelSelection,
-  normalizeReviewFindings
+  normalizeReviewFindings,
+  normalizeScopeOwnership
 } from "./run-evidence.js";
 import {
   evaluatePolicyDecision,
@@ -15,6 +16,7 @@ import {
   normalizePolicyProfileId,
   POLICY_ENFORCED_ACTION_CLASSES
 } from "./policy-profiles.js";
+import { isPathWithinScope } from "./path-scopes.js";
 
 const IMPLEMENTER_ROLE = "implementer";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED = "required";
@@ -185,15 +187,13 @@ function deriveCommandObservations(execution) {
 
 function deriveChangedSurface(execution) {
   const runs = Array.isArray(execution?.runs) ? execution.runs : [];
-  const successfulImplementerRuns = runs.filter((run) => (
-    run?.packet?.role === IMPLEMENTER_ROLE && run?.result?.status === "success"
-  ));
+  const implementerRuns = runs.filter((run) => run?.packet?.role === IMPLEMENTER_ROLE);
 
-  if (successfulImplementerRuns.length === 0) {
+  if (implementerRuns.length === 0) {
     return normalizeChangedSurface(null);
   }
 
-  const observedRuns = successfulImplementerRuns
+  const observedRuns = implementerRuns
     .map((run) => ({
       run,
       trusted: run?.provenance?.changedSurfaceObservationTrusted === true,
@@ -208,13 +208,71 @@ function deriveChangedSurface(execution) {
     Array.isArray(entry.observation?.paths) ? entry.observation.paths : []
   ));
 
-  const capture = observedRuns.length === successfulImplementerRuns.length
+  const capture = observedRuns.length === implementerRuns.length
     ? "complete"
     : "partial";
 
   return normalizeChangedSurface({
     capture,
     paths: observedPaths
+  });
+}
+
+function deriveDeclaredScopePaths(compiledPlan) {
+  const allowedFileScope = Array.isArray(compiledPlan?.allowedFileScope)
+    ? compiledPlan.allowedFileScope
+    : [];
+  const declaredScopePaths = allowedFileScope
+    .filter((pathValue) => typeof pathValue === "string" && pathValue.trim().length > 0);
+  if (declaredScopePaths.length === 0) {
+    return [];
+  }
+  return unique(declaredScopePaths);
+}
+
+function hasObservedScopeViolation(observedPaths, declaredScopePaths) {
+  return observedPaths.some((observedPath) => (
+    !declaredScopePaths.some((scopePath) => isPathWithinScope(observedPath, scopePath))
+  ));
+}
+
+function deriveScopeOwnership(compiledPlan, changedSurface) {
+  const declaredScopePaths = deriveDeclaredScopePaths(compiledPlan);
+  if (declaredScopePaths.length === 0) {
+    return null;
+  }
+
+  const observedPaths = Array.isArray(changedSurface?.paths)
+    ? changedSurface.paths
+    : [];
+  const capture = typeof changedSurface?.capture === "string"
+    ? changedSurface.capture
+    : "not_captured";
+  const observedScopeViolation = hasObservedScopeViolation(observedPaths, declaredScopePaths);
+
+  let status = "unknown";
+  if (capture === "complete") {
+    if (observedPaths.length === 0) {
+      status = "no_observed_changes";
+    } else {
+      status = observedScopeViolation ? "scope_violation" : "aligned";
+    }
+  } else if (capture === "partial") {
+    status = observedScopeViolation ? "scope_violation" : "unknown";
+  }
+
+  return normalizeScopeOwnership({
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: declaredScopePaths
+    },
+    observedChanges: {
+      paths: observedPaths
+    },
+    status
+  }, {
+    fieldName: "contractExecutionResult.scopeOwnership",
+    allowMissing: false
   });
 }
 
@@ -305,6 +363,7 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
   const evidence = createExecutionEvidence(compiledPlan, execution);
   const openQuestions = createExecutionOpenQuestions(execution);
   const changedSurface = deriveChangedSurface(execution);
+  const scopeOwnership = deriveScopeOwnership(compiledPlan, changedSurface);
   const commandObservations = deriveCommandObservations(execution);
   const providerModelSelections = deriveProviderModelSelections(execution);
   const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(execution);
@@ -321,6 +380,9 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     changedSurface,
     openQuestions
   };
+  if (scopeOwnership) {
+    contractResult.scopeOwnership = scopeOwnership;
+  }
 
   if (commandObservations.length > 0) {
     contractResult.commandObservations = commandObservations;

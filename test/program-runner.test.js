@@ -701,6 +701,94 @@ test("runExecutionProgram persists required provider/model evidence requirement 
   });
 });
 
+test("runExecutionProgram persists typed scope ownership from contract executor results", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const sourceProgram = buildProgram();
+    const program = {
+      ...sourceProgram,
+      contracts: [sourceProgram.contracts[0]]
+    };
+    const runStore = createRunStore({ rootDir });
+    const defaultRunner = createScriptedWorkerRunner([]);
+    const processBackend = createLocalWorkerRunner({
+      handlers: {
+        explorer: async () => ({
+          status: "success",
+          summary: "Explorer step completed.",
+          changedFiles: [],
+          commandsRun: ["rg --files"],
+          evidence: ["explorer succeeded"],
+          openQuestions: []
+        }),
+        implementer: async (packet) => {
+          const firstAllowedPath = Array.isArray(packet?.allowedFiles)
+            && typeof packet.allowedFiles[0] === "string"
+            ? packet.allowedFiles[0].replace(/\\/gu, "/").trim()
+            : "src/helpers.js";
+          const observedPath = firstAllowedPath.endsWith("/")
+            ? `${firstAllowedPath}scope-ownership-touch.js`
+            : firstAllowedPath;
+          return {
+            status: "success",
+            summary: "Implementer step completed.",
+            changedFiles: [observedPath],
+            commandsRun: [`node --check ${observedPath}`],
+            evidence: ["implementer succeeded"],
+            openQuestions: [],
+            changedSurfaceObservation: {
+              capture: "complete",
+              paths: [observedPath]
+            }
+          };
+        },
+        reviewer: async () => ({
+          status: "success",
+          summary: "Reviewer step completed.",
+          changedFiles: [],
+          commandsRun: ["git diff --stat"],
+          evidence: ["reviewer succeeded"],
+          openQuestions: []
+        }),
+        verifier: async () => ({
+          status: "success",
+          summary: "Verifier step completed.",
+          changedFiles: [],
+          commandsRun: ["node --test"],
+          evidence: ["verifier succeeded"],
+          openQuestions: []
+        })
+      }
+    });
+    const runner = createAutoBackendRunner({
+      defaultRunner,
+      processBackend,
+      mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+    });
+    const contractExecutor = createProgramContractExecutor({ runner });
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor,
+      runStore
+    });
+
+    assert.equal(journal.status, "success");
+    for (const entry of journal.contractRuns) {
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "scopeOwnership"), true);
+      assert.equal(entry.scopeOwnership.declaredScope.mode, "explicit_paths");
+      assert.equal(entry.scopeOwnership.status, "aligned");
+      assert.equal(entry.scopeOwnership.observedChanges.paths.length > 0, true);
+    }
+
+    const persisted = await runStore.loadRun(program.id);
+    for (const entry of persisted.runJournal.contractRuns) {
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "scopeOwnership"), true);
+      assert.equal(entry.scopeOwnership.declaredScope.mode, "explicit_paths");
+      assert.equal(entry.scopeOwnership.status, "aligned");
+      assert.equal(entry.scopeOwnership.observedChanges.paths.length > 0, true);
+    }
+  });
+});
+
 test("program runner stops on the first blocked contract", async () => {
   const program = buildProgram();
 
@@ -951,6 +1039,59 @@ test("runExecutionProgram fails closed when contract executor returns malformed 
     const persisted = await runStore.loadRun(program.id);
     assert.equal(persisted.lastStatus, "blocked");
     assert.equal(persisted.runJournal.stopReason, journal.stopReason);
+  });
+});
+
+test("runExecutionProgram fails closed when contract executor returns malformed scope ownership", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const firstContractId = program.contracts[0].id;
+    const failingContractId = program.contracts[1].id;
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => {
+        if (contract.id === failingContractId) {
+          return {
+            status: "blocked",
+            summary: "Malformed scope ownership payload.",
+            evidence: [],
+            scopeOwnership: {
+              declaredScope: {
+                mode: "explicit_paths",
+                paths: ["src/helpers.js"]
+              },
+              observedChanges: {
+                paths: ["src/helpers.js"]
+              },
+              status: "not_supported"
+            },
+            openQuestions: []
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `Executed ${contract.id}.`,
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore
+    });
+
+    assert.equal(journal.status, "blocked");
+    assert.match(journal.stopReason, /returned an invalid result/i);
+    assert.match(
+      journal.stopReason,
+      /contractExecutionResult\.scopeOwnership\.status must be one of: aligned, scope_violation, no_observed_changes, unknown/i
+    );
+    assert.equal(journal.contractRuns.length, 2);
+    assert.equal(journal.contractRuns[1].contractId, failingContractId);
+    assert.equal(journal.contractRuns[1].status, "blocked");
+    assert.match(journal.contractRuns[1].summary, /returned an invalid result/i);
+    assert.deepEqual(journal.completedContractIds, [firstContractId]);
+    assert.deepEqual(journal.pendingContractIds, program.contracts.slice(1).map((contract) => contract.id));
   });
 });
 
@@ -1469,6 +1610,16 @@ test("formatProgramRunJournal includes contract evidence", () => {
         contractId: "contract-a",
         status: "success",
         summary: "Executed contract-a.",
+        scopeOwnership: {
+          declaredScope: {
+            mode: "explicit_paths",
+            paths: ["src/helpers.js"]
+          },
+          observedChanges: {
+            paths: ["src/helpers.js"]
+          },
+          status: "aligned"
+        },
         changedSurface: {
           capture: "complete",
           paths: ["src/helpers.js"]
@@ -1493,6 +1644,8 @@ test("formatProgramRunJournal includes contract evidence", () => {
 
   assert.match(formatted, /selected_provider: openai-codex/i);
   assert.match(formatted, /selected_model: gpt-5\.4/i);
+  assert.match(formatted, /scope_ownership_status: aligned/i);
+  assert.match(formatted, /scope_declared_mode: explicit_paths/i);
   assert.match(formatted, /changed_surface_capture: complete/i);
   assert.match(formatted, /src\/helpers\.js/i);
   assert.match(formatted, /validation_outcome: pass/i);

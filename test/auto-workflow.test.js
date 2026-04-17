@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 
 import {
   formatWorkflowExecution,
@@ -110,6 +111,32 @@ function buildContextBudgetFixture(overrides = {}) {
       ...(overrides.truncationCount ?? {})
     }
   };
+}
+
+function setSinglePacketContextFileReference(fixture, reference) {
+  fixture.packetContextFiles = [reference];
+  fixture.contextManifest = fixture.contextManifest.map((entry) => (
+    entry.kind === "context_file"
+      ? {
+        ...entry,
+        reference
+      }
+      : entry
+  ));
+}
+
+function normalizeRepairLoopFixtureForExistingPaths(fixture) {
+  fixture.input.allowedFiles = [
+    "src/auto-workflow.js",
+    "src/context-manifest.js",
+    "src/pi-worker-runner.js",
+    "src/pi-adapter.js",
+    "src/orchestrator.js",
+    "src/contracts.js",
+    "README.md"
+  ];
+  fixture.script[1].result.changedFiles = ["src/auto-workflow.js"];
+  fixture.script[3].result.changedFiles = ["src/auto-workflow.js"];
 }
 
 test("auto workflow executes a low-risk plan straight through the runner", async () => {
@@ -338,6 +365,7 @@ test("runPlannedWorkflow does not trust context.repositoryRoot for repo-relative
 
 test("runAutoWorkflow forwards nonzero reviewResult redaction metadata for repair-loop admission rewrites", async () => {
   const fixture = loadFixture("repair-loop.json");
+  normalizeRepairLoopFixtureForExistingPaths(fixture);
   const repositoryRoot = process.cwd();
   const absoluteRepoPath = join(repositoryRoot, "src", "helpers.js");
   const externalAbsolutePath = process.platform === "win32"
@@ -395,6 +423,65 @@ test("runAutoWorkflow forwards nonzero reviewResult redaction metadata for repai
 
 test("validateRunContext accepts matching runtime payloads and context_file packet entries", () => {
   const fixture = buildRuntimeContextFixture();
+
+  assert.doesNotThrow(() => {
+    validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    });
+  });
+});
+
+test("validateRunContext fails closed when packetContextFiles references a missing context file", () => {
+  const fixture = buildRuntimeContextFixture();
+  setSinglePacketContextFileReference(fixture, "docs/DOES-NOT-EXIST.md");
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest,
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /context\.packetContextFiles\[0\] must reference an existing repository file/i
+  );
+});
+
+test("validateRunContext fails closed when packetContextFiles escapes the repository root", () => {
+  const fixture = buildRuntimeContextFixture();
+  const temporaryDirectory = mkdtempSync(join(tmpdir(), "pi-orchestrator-context-"));
+  const escapedContextFile = join(temporaryDirectory, "escaped-context.md");
+  writeFileSync(escapedContextFile, "outside of repository root");
+  const repoEscapeReference = relative(process.cwd(), escapedContextFile).replace(/\\/g, "/");
+  assert.match(repoEscapeReference, /^\.\.\//u);
+  setSinglePacketContextFileReference(fixture, repoEscapeReference);
+
+  try {
+    assert.throws(
+      () => validateRunContext({
+        packetContextFiles: fixture.packetContextFiles,
+        contextManifest: fixture.contextManifest,
+        priorResults: fixture.priorResults,
+        reviewResult: fixture.reviewResult,
+        changedSurfaceContext: fixture.changedSurfaceContext,
+        contextBudget: buildContextBudgetFixture()
+      }),
+      /context\.packetContextFiles\[0\] must resolve within the repository root/i
+    );
+  } finally {
+    rmSync(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test("validateRunContext accepts existing repo-relative packetContextFiles references", () => {
+  const fixture = buildRuntimeContextFixture();
+  setSinglePacketContextFileReference(fixture, "docs/OPERATING-GUIDE.md");
 
   assert.doesNotThrow(() => {
     validateRunContext({
@@ -941,6 +1028,7 @@ test("validateRunContext fails closed on changed-surface context drift", () => {
 
 test("auto workflow runs one repair loop after an independent review finding", async () => {
   const fixture = loadFixture("repair-loop.json");
+  normalizeRepairLoopFixtureForExistingPaths(fixture);
   const runner = createScriptedWorkerRunner(fixture.script);
 
   const execution = await runAutoWorkflow(fixture.input, { runner });
@@ -1135,6 +1223,7 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
 
 test("runAutoWorkflow reports explicit review-result truncation in contextBudget", async () => {
   const fixture = loadFixture("repair-loop.json");
+  normalizeRepairLoopFixtureForExistingPaths(fixture);
   const oversizedReviewEvidence = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultEvidence + 2)
     .fill("repair evidence entry");
   const oversizedReviewOpenQuestions = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxReviewResultOpenQuestions + 3)

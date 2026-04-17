@@ -338,6 +338,149 @@ test("process backend redacts launcher-derived repo/workspace/external absolute 
   }
 });
 
+test("process backend redacts launcher metadata evidence and launch diagnostics with truthful boundary metadata", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-launch-metadata-redaction-"));
+  const repoLauncherPath = join(repositoryRoot, "tools", "pi-launcher.js");
+  const repoResolutionPath = join(repositoryRoot, "pi", "resolved", "pi.js");
+  const repoErrorPath = join(repositoryRoot, "errors", "launch-error.js");
+  const externalAbsolutePath = process.platform === "win32"
+    ? "D:\\outside\\pi\\runtime"
+    : "/opt/outside/pi/runtime";
+  const relativeResolutionPath = "scripts/relative-pi.js";
+  const relativeErrorPath = "logs/worker.log";
+  let observedWorkspaceScriptPath = null;
+  let observedWorkspaceResolutionPath = null;
+  let observedWorkspaceErrorPath = null;
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        observedWorkspaceScriptPath = join(workspaceRoot, "bin", "pi-worker.js");
+        observedWorkspaceResolutionPath = join(workspaceRoot, "resolved", "pi-worker.js");
+        observedWorkspaceErrorPath = join(workspaceRoot, "errors", "pi-worker-error.log");
+        return {
+          launcher: "fake_launcher",
+          launcherPath: repoLauncherPath,
+          piScriptPath: observedWorkspaceScriptPath,
+          piPackageRoot: externalAbsolutePath,
+          piSpawnResolution: [
+            `repo_resolution: ${repoResolutionPath}`,
+            `workspace_resolution: ${observedWorkspaceResolutionPath}`,
+            `external_resolution: ${externalAbsolutePath}`,
+            `relative_resolution: ${relativeResolutionPath}`
+          ].join(" "),
+          exitCode: null,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          error: new Error([
+            "launcher resolution failed",
+            `repo_error: ${repoErrorPath}`,
+            `workspace_error: ${observedWorkspaceErrorPath}`,
+            `external_error: ${externalAbsolutePath}`,
+            `relative_error: ${relativeErrorPath}`
+          ].join(" ")),
+          durationMs: 4,
+          commandsRun: ["fake-worker --launch-check"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-launch-metadata-redaction"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.evidence.some((entry) => entry.includes(repoLauncherPath)), false);
+    assert.equal(
+      result.evidence.some((entry) => observedWorkspaceScriptPath && entry.includes(observedWorkspaceScriptPath)),
+      false
+    );
+    assert.equal(result.evidence.some((entry) => entry.includes(externalAbsolutePath)), false);
+    assert.equal(result.summary.includes(repoErrorPath), false);
+    assert.equal(result.summary.includes(observedWorkspaceErrorPath ?? ""), false);
+    assert.equal(result.summary.includes(externalAbsolutePath), false);
+
+    assert.equal(result.evidence.includes("launcher_path: tools/pi-launcher.js"), true);
+    assert.equal(result.evidence.includes("pi_script_path: <process_workspace>/bin/pi-worker.js"), true);
+    assert.equal(result.evidence.includes("pi_package_root: <absolute_path>"), true);
+
+    const spawnResolutionEntry = result.evidence.find((entry) => entry.startsWith("pi_spawn_resolution: "));
+    assert.equal(Boolean(spawnResolutionEntry), true);
+    assert.equal(spawnResolutionEntry?.includes("repo_resolution: pi/resolved/pi.js"), true);
+    assert.equal(spawnResolutionEntry?.includes("workspace_resolution: <process_workspace>/resolved/pi-worker.js"), true);
+    assert.equal(spawnResolutionEntry?.includes("external_resolution: <absolute_path>"), true);
+    assert.equal(spawnResolutionEntry?.includes(`relative_resolution: ${relativeResolutionPath}`), true);
+
+    const launchErrorEntry = result.evidence.find((entry) => entry.startsWith("launch_error: "));
+    assert.equal(Boolean(launchErrorEntry), true);
+    assert.equal(launchErrorEntry?.includes("repo_error: errors/launch-error.js"), true);
+    assert.equal(launchErrorEntry?.includes("workspace_error: <process_workspace>/errors/pi-worker-error.log"), true);
+    assert.equal(launchErrorEntry?.includes("external_error: <absolute_path>"), true);
+    assert.equal(launchErrorEntry?.includes(`relative_error: ${relativeErrorPath}`), true);
+
+    assert.equal(result.summary.includes("repo_error: errors/launch-error.js"), true);
+    assert.equal(result.summary.includes("workspace_error: <process_workspace>/errors/pi-worker-error.log"), true);
+    assert.equal(result.summary.includes("external_error: <absolute_path>"), true);
+    assert.equal(result.summary.includes(`relative_error: ${relativeErrorPath}`), true);
+
+    assert.deepEqual(result.redaction, {
+      applied: true,
+      repoPathRewrites: 5,
+      workspacePathRewrites: 5,
+      externalPathRewrites: 4
+    });
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend preserves relative launcher metadata evidence paths", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-relative-launch-metadata-"));
+  const relativeLauncherPath = "bin/pi";
+  const relativeScriptPath = "scripts/pi.js";
+  const relativePackageRoot = "vendor/pi";
+  const relativeResolutionPath = "scripts/resolve-pi.js";
+  const relativeErrorPath = "logs/pi-error.log";
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        launcherPath: relativeLauncherPath,
+        piScriptPath: relativeScriptPath,
+        piPackageRoot: relativePackageRoot,
+        piSpawnResolution: `relative_resolution: ${relativeResolutionPath}`,
+        exitCode: null,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: "",
+        error: new Error(`relative_error: ${relativeErrorPath}`),
+        durationMs: 1,
+        commandsRun: ["fake-worker --relative-launch-metadata"]
+      })
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-relative-launch-metadata"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.evidence.includes(`launcher_path: ${relativeLauncherPath}`), true);
+    assert.equal(result.evidence.includes(`pi_script_path: ${relativeScriptPath}`), true);
+    assert.equal(result.evidence.includes(`pi_package_root: ${relativePackageRoot}`), true);
+    assert.equal(result.evidence.includes(`pi_spawn_resolution: relative_resolution: ${relativeResolutionPath}`), true);
+    assert.equal(result.evidence.includes(`launch_error: relative_error: ${relativeErrorPath}`), true);
+    assert.equal(result.summary.includes(`relative_error: ${relativeErrorPath}`), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend deterministically truncates oversized stdout with an explicit marker before boundary redaction", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-stdout-cap-"));
   const repoAbsolutePath = join(repositoryRoot, "src", "long-stdout-path.js");

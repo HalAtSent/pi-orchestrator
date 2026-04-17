@@ -9,6 +9,7 @@ import {
   buildReviewResultContextManifest,
   RUN_CONTEXT_BUDGET_LIMITS,
   setTrustedForwardedRedactionMetadata,
+  setTrustedRuntimeRepositoryRoot,
   mergeContextManifestEntries,
   resolvePacketContextManifest as resolveCanonicalPacketContextManifest,
   validateRunContext
@@ -494,6 +495,9 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
     contextBudget: normalizedRunContext.contextBudget ?? runContext.contextBudget
   };
   setTrustedForwardedRedactionMetadata(normalizedContext, forwardedRedactionMetadata);
+  setTrustedRuntimeRepositoryRoot(normalizedContext, repositoryRoot, {
+    fieldName: "context.repositoryRoot"
+  });
   return normalizedContext;
 }
 
@@ -578,13 +582,24 @@ async function executePacket({
   try {
     validateChangedFiles(packet, result);
   } catch (error) {
+    const preservedChangedSurfaceObservation = (
+      changedSurfaceObservationTrusted === true
+      && result?.changedSurfaceObservation
+    )
+      ? clone(result.changedSurfaceObservation)
+      : null;
     result = createExecutionFailureResult({
       packet,
       failureKind: "validation",
       reason: toErrorMessage(error),
       priorResult: result
     });
-    changedSurfaceObservationTrusted = false;
+    if (preservedChangedSurfaceObservation) {
+      result.changedSurfaceObservation = preservedChangedSurfaceObservation;
+      changedSurfaceObservationTrusted = true;
+    } else {
+      changedSurfaceObservationTrusted = false;
+    }
     providerModelSelectionTrusted = false;
   }
 

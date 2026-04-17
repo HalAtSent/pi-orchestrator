@@ -1276,6 +1276,51 @@ test("run store persists typed command observations and infers action classes fr
   });
 });
 
+test("run store persists typed scope ownership on contract runs", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    const scopeOwnership = {
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/helpers.js"]
+      },
+      observedChanges: {
+        paths: ["src/helpers.js"]
+      },
+      status: "aligned"
+    };
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            scopeOwnership,
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    assert.deepEqual(saved.runJournal.contractRuns[0].scopeOwnership, scopeOwnership);
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.deepEqual(loaded.runJournal.contractRuns[0].scopeOwnership, scopeOwnership);
+  });
+});
+
 test("run store persists typed review findings on contract runs", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();
@@ -1410,6 +1455,53 @@ test("run store load fails closed when present policyDecision entries are malfor
   });
 });
 
+test("run store load fails closed when present scopeOwnership entries are malformed", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const runPath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+    const persisted = JSON.parse(await readFile(runPath, "utf8"));
+    persisted.runJournal.contractRuns[0].scopeOwnership = {
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/helpers.js"]
+      },
+      observedChanges: {
+        paths: ["src/helpers.js"]
+      },
+      status: "not_supported"
+    };
+    await writeFile(runPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    await assert.rejects(
+      () => runStore.loadRun(program.id),
+      /runJournalEntry\.scopeOwnership\.status must be one of: aligned, scope_violation, no_observed_changes, unknown/u
+    );
+  });
+});
+
 test("run store keeps legacy contract-run entries readable when reviewFindings is omitted", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();
@@ -1439,6 +1531,40 @@ test("run store keeps legacy contract-run entries readable when reviewFindings i
     const loaded = await runStore.loadRun(program.id);
     assert.equal(
       Object.prototype.hasOwnProperty.call(loaded.runJournal.contractRuns[0], "reviewFindings"),
+      false
+    );
+  });
+});
+
+test("run store keeps legacy contract-run entries readable when scopeOwnership is omitted", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for external dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: `Executed ${program.contracts[0].id}.`,
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(loaded.runJournal.contractRuns[0], "scopeOwnership"),
       false
     );
   });

@@ -263,6 +263,16 @@ test("program contract executor does not promote exact changed-surface evidence 
     capture: "not_captured",
     paths: []
   });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: []
+    },
+    status: "unknown"
+  });
   assert.equal(result.providerModelEvidenceRequirement, "unknown");
   assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
 });
@@ -323,6 +333,16 @@ test("program contract executor promotes exact changed-surface evidence only for
     capture: "complete",
     paths: ["src/helpers.js"]
   });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/helpers.js"]
+    },
+    status: "aligned"
+  });
   assert.deepEqual(result.commandObservations, [
     {
       command: "node --check src/helpers.js",
@@ -356,6 +376,384 @@ test("program contract executor promotes exact changed-surface evidence only for
   ]);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor marks scope ownership as scope_violation when trusted observed paths are out of declared scope", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Changed an out-of-scope file.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/outside.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: [],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/outside.js"]
+        }
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification checks passed.",
+        changedFiles: [],
+        commandsRun: ["node --test --test-name-pattern helpers"],
+        evidence: ["Verification command passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/outside.js"]
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/outside.js"]
+    },
+    status: "scope_violation"
+  });
+});
+
+test("program contract executor marks scope ownership as no_observed_changes when trusted changed-surface capture has no paths", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "No file changes were needed.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["repository_changes_applied: false"],
+        openQuestions: [],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: []
+        }
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification checks passed.",
+        changedFiles: [],
+        commandsRun: ["node --test --test-name-pattern helpers"],
+        evidence: ["Verification command passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: []
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: []
+    },
+    status: "no_observed_changes"
+  });
+});
+
+test("program contract executor marks scope ownership as scope_violation for failed implementer runs with trusted out-of-scope changed-surface", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "failed",
+        summary: "Scoped change failed after touching an out-of-scope path.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Re-run with tighter file-scoping guards."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/outside.js"]
+        }
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/outside.js"]
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/outside.js"]
+    },
+    status: "scope_violation"
+  });
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor marks scope ownership as aligned for failed implementer runs with trusted in-scope changed-surface", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "failed",
+        summary: "Scoped change failed after touching only in-scope paths.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Fix failing checks and re-run."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/helpers.js"]
+        }
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/helpers.js"]
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/helpers.js"]
+    },
+    status: "aligned"
+  });
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor marks scope ownership as scope_violation for validation-failed implementer runs with trusted out-of-scope changed-surface", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Worker reported out-of-scope changedFiles before validation.",
+        changedFiles: ["src/outside.js"],
+        commandsRun: ["node --check src/outside.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Re-run with scoped writes only."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/outside.js"]
+        }
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/outside.js"]
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/outside.js"]
+    },
+    status: "scope_violation"
+  });
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor keeps changed-surface unknown for validation-failed implementer runs without trusted changed-surface provenance", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Worker reported out-of-scope changedFiles before validation.",
+        changedFiles: ["src/outside.js"],
+        commandsRun: ["node --check src/outside.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Re-run with scoped writes only."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/outside.js"]
+        }
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "not_captured",
+    paths: []
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: []
+    },
+    status: "unknown"
+  });
+});
+
+test("program contract executor preserves trusted in-scope changed-surface on validation-failed implementer runs", async () => {
+  const defaultRunner = createScriptedWorkerRunner([]);
+  const processBackend = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Worker reported out-of-scope changedFiles before validation.",
+        changedFiles: ["src/outside.js"],
+        commandsRun: ["node --check src/outside.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Re-run with scoped writes only."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/helpers.js"]
+        }
+      }
+    }
+  ]);
+  const runner = createAutoBackendRunner({
+    defaultRunner,
+    processBackend,
+    mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
+  });
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/helpers.js"]
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: ["src/helpers.js"]
+    },
+    status: "aligned"
+  });
+  assert.equal(defaultRunner.getCalls().length, 0);
+  assert.equal(processBackend.getPendingStepCount(), 0);
+});
+
+test("program contract executor keeps scope ownership unknown for failed implementer runs without trusted changed-surface evidence", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "failed",
+        summary: "Scoped change failed before trusted runtime observations were available.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["repository_changes_applied: true"],
+        openQuestions: ["Re-run with process backend evidence enabled."],
+        changedSurfaceObservation: {
+          capture: "complete",
+          paths: ["src/outside.js"]
+        }
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "failed");
+  assert.deepEqual(result.changedSurface, {
+    capture: "not_captured",
+    paths: []
+  });
+  assert.deepEqual(result.scopeOwnership, {
+    declaredScope: {
+      mode: "explicit_paths",
+      paths: ["src/helpers.js"]
+    },
+    observedChanges: {
+      paths: []
+    },
+    status: "unknown"
+  });
 });
 
 test("program contract executor promotes trusted provider/model selections from failed process-backend runs", async () => {

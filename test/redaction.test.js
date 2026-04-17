@@ -8,6 +8,7 @@ import {
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
   normalizeRedactionMetadata,
+  redactCoveredStringFields,
   recomputeRedactionMetadataFromCoveredStrings,
   truncateBoundaryString
 } from "../src/redaction.js";
@@ -113,6 +114,53 @@ test("boundary path redactor rewrites single-segment absolute posix roots withou
     repoPathRewrites: 1,
     workspacePathRewrites: 1,
     externalPathRewrites: 1
+  });
+});
+
+test("redactCoveredStringFields rewrites launcher metadata and launch diagnostics while preserving relative paths", () => {
+  const fixture = buildPathFixture();
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot: fixture.repositoryRoot,
+    processWorkspaceRoots: [fixture.workspaceRoot]
+  });
+  const redacted = redactCoveredStringFields({
+    redactor,
+    stringFields: [
+      {
+        fieldName: "result.launcherMetadata.launcher_path",
+        value: `launcher_path: ${fixture.repoFilePath}`
+      },
+      {
+        fieldName: "result.launcherMetadata.pi_script_path",
+        value: `pi_script_path: ${fixture.workspaceFilePath}`
+      },
+      {
+        fieldName: "result.launcherMetadata.pi_package_root",
+        value: `pi_package_root: ${fixture.externalPath}`
+      },
+      {
+        fieldName: "result.launcherMetadata.pi_spawn_resolution",
+        value: `pi_spawn_resolution: repo=${fixture.repoFilePath} workspace=${fixture.workspaceFilePath} external=${fixture.externalPath} relative=scripts/pi.js`
+      },
+      {
+        fieldName: "result.launchDiagnostics.launch_error",
+        value: `launch_error: repo=${fixture.repoFilePath} workspace=${fixture.workspaceFilePath} external=${fixture.externalPath} relative=logs/pi.log`
+      }
+    ]
+  });
+
+  assert.deepEqual(redacted.values, [
+    "launcher_path: src/index.js",
+    "pi_script_path: <process_workspace>/src/scratch.js",
+    "pi_package_root: <absolute_path>",
+    "pi_spawn_resolution: repo=src/index.js workspace=<process_workspace>/src/scratch.js external=<absolute_path> relative=scripts/pi.js",
+    "launch_error: repo=src/index.js workspace=<process_workspace>/src/scratch.js external=<absolute_path> relative=logs/pi.log"
+  ]);
+  assert.deepEqual(redacted.redaction, {
+    applied: true,
+    repoPathRewrites: 3,
+    workspacePathRewrites: 3,
+    externalPathRewrites: 3
   });
 });
 

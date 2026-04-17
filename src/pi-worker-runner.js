@@ -3,8 +3,10 @@ import { isPathWithinScope, normalizeScopedPath, scopesOverlap } from "./path-sc
 import { safeClone } from "./safe-clone.js";
 import {
   getTrustedForwardedRedactionMetadata,
+  getTrustedRuntimeRepositoryRoot,
   resolvePacketContextManifest,
   setTrustedForwardedRedactionMetadata,
+  setTrustedRuntimeRepositoryRoot,
   validateRunContext
 } from "./context-manifest.js";
 
@@ -83,8 +85,17 @@ function hasStructuredRuntimeContextFields(context = {}) {
     || Object.prototype.hasOwnProperty.call(context, "contextBudget");
 }
 
+function resolveRuntimeRepositoryRoot({
+  context
+} = {}) {
+  return getTrustedRuntimeRepositoryRoot(context);
+}
+
 function normalizeRuntimeContext(packet, context = {}) {
   const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(context);
+  const runtimeRepositoryRoot = resolveRuntimeRepositoryRoot({
+    context
+  });
   const normalizedContext = context && typeof context === "object" && !Array.isArray(context)
     ? clone(context)
     : {};
@@ -93,6 +104,9 @@ function normalizeRuntimeContext(packet, context = {}) {
     if (trustedForwardedRedactionMetadata !== undefined) {
       setTrustedForwardedRedactionMetadata(normalizedContext, trustedForwardedRedactionMetadata);
     }
+    setTrustedRuntimeRepositoryRoot(normalizedContext, runtimeRepositoryRoot, {
+      fieldName: "context.repositoryRoot"
+    });
     return normalizedContext;
   }
 
@@ -104,6 +118,7 @@ function normalizeRuntimeContext(packet, context = {}) {
     changedSurfaceContext: normalizedContext.changedSurfaceContext ?? [],
     contextBudget: normalizedContext.contextBudget,
     forwardedRedactionMetadata: trustedForwardedRedactionMetadata,
+    repositoryRoot: runtimeRepositoryRoot,
     fieldName: "context"
   });
 
@@ -117,6 +132,9 @@ function normalizeRuntimeContext(packet, context = {}) {
   if (trustedForwardedRedactionMetadata !== undefined) {
     setTrustedForwardedRedactionMetadata(normalizedContext, trustedForwardedRedactionMetadata);
   }
+  setTrustedRuntimeRepositoryRoot(normalizedContext, runtimeRepositoryRoot, {
+    fieldName: "context.repositoryRoot"
+  });
 
   return normalizedContext;
 }
@@ -400,6 +418,16 @@ export function createPiWorkerRunner({
           setTrustedForwardedRedactionMetadata(
             adapterContext.context,
             trustedForwardedRedactionMetadata
+          );
+        }
+        const trustedRuntimeRepositoryRoot = getTrustedRuntimeRepositoryRoot(runtimeContext);
+        if (trustedRuntimeRepositoryRoot !== undefined) {
+          setTrustedRuntimeRepositoryRoot(
+            adapterContext.context,
+            trustedRuntimeRepositoryRoot,
+            {
+              fieldName: "context.repositoryRoot"
+            }
           );
         }
 

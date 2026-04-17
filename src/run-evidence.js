@@ -79,6 +79,16 @@ export const CHANGED_SURFACE_OBSERVATION_CAPTURE_MODES = Object.freeze([
   "complete",
   "not_captured"
 ]);
+export const SCOPE_OWNERSHIP_DECLARED_MODES = Object.freeze([
+  "explicit_paths",
+  "unknown"
+]);
+export const SCOPE_OWNERSHIP_STATUSES = Object.freeze([
+  "aligned",
+  "scope_violation",
+  "no_observed_changes",
+  "unknown"
+]);
 export const PROVIDER_MODEL_SELECTION_FIELDS = Object.freeze([
   "requestedProvider",
   "requestedModel",
@@ -890,6 +900,20 @@ function normalizeRepoRelativePath(value, { fieldName = "path" } = {}) {
   return canonical;
 }
 
+function normalizeRepoRelativeScopePath(value, { fieldName = "scopePath" } = {}) {
+  const raw = normalizeString(value);
+  if (raw.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+
+  const canonical = normalizeRepoRelativePath(raw, { fieldName });
+  if (/[\\/]$/u.test(raw) && !canonical.endsWith("/")) {
+    return `${canonical}/`;
+  }
+
+  return canonical;
+}
+
 function normalizeReviewFindingKind(value, { fieldName = "reviewFinding.kind" } = {}) {
   const kind = normalizeString(value);
   if (kind.length === 0) {
@@ -1633,6 +1657,136 @@ export function normalizeChangedSurfaceObservation(value, {
   }
 
   return normalized;
+}
+
+function normalizeScopeOwnershipDeclaredMode(value, {
+  fieldName = "scopeOwnership.declaredScope.mode"
+} = {}) {
+  const mode = normalizeString(value);
+  if (mode.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!SCOPE_OWNERSHIP_DECLARED_MODES.includes(mode)) {
+    throw new Error(
+      `${fieldName} must be one of: ${SCOPE_OWNERSHIP_DECLARED_MODES.join(", ")}`
+    );
+  }
+  return mode;
+}
+
+function normalizeScopeOwnershipStatus(value, {
+  fieldName = "scopeOwnership.status"
+} = {}) {
+  const status = normalizeString(value);
+  if (status.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!SCOPE_OWNERSHIP_STATUSES.includes(status)) {
+    throw new Error(
+      `${fieldName} must be one of: ${SCOPE_OWNERSHIP_STATUSES.join(", ")}`
+    );
+  }
+  return status;
+}
+
+function normalizeScopeOwnershipDeclaredScope(value, {
+  fieldName = "scopeOwnership.declaredScope"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const mode = normalizeScopeOwnershipDeclaredMode(value.mode, {
+    fieldName: `${fieldName}.mode`
+  });
+  const rawPaths = value.paths ?? [];
+  if (!Array.isArray(rawPaths)) {
+    throw new Error(`${fieldName}.paths must be an array`);
+  }
+
+  const paths = unique(rawPaths.map((pathValue, index) => (
+    normalizeRepoRelativeScopePath(pathValue, {
+      fieldName: `${fieldName}.paths[${index}]`
+    })
+  )));
+
+  if (mode === "explicit_paths" && paths.length === 0) {
+    throw new Error(`${fieldName}.paths must include at least one path when ${fieldName}.mode is explicit_paths`);
+  }
+  if (mode === "unknown" && paths.length > 0) {
+    throw new Error(`${fieldName}.paths must be empty when ${fieldName}.mode is unknown`);
+  }
+
+  return {
+    mode,
+    paths
+  };
+}
+
+function normalizeScopeOwnershipObservedChanges(value, {
+  fieldName = "scopeOwnership.observedChanges"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const rawPaths = value.paths ?? [];
+  if (!Array.isArray(rawPaths)) {
+    throw new Error(`${fieldName}.paths must be an array`);
+  }
+
+  return {
+    paths: unique(rawPaths.map((pathValue, index) => (
+      normalizeRepoRelativePath(pathValue, {
+        fieldName: `${fieldName}.paths[${index}]`
+      })
+    )))
+  };
+}
+
+export function normalizeScopeOwnership(value, {
+  fieldName = "scopeOwnership",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const declaredScope = normalizeScopeOwnershipDeclaredScope(value.declaredScope, {
+    fieldName: `${fieldName}.declaredScope`
+  });
+  const observedChanges = normalizeScopeOwnershipObservedChanges(value.observedChanges, {
+    fieldName: `${fieldName}.observedChanges`
+  });
+  const status = normalizeScopeOwnershipStatus(value.status, {
+    fieldName: `${fieldName}.status`
+  });
+
+  if (declaredScope.mode === "unknown" && status !== "unknown") {
+    throw new Error(`${fieldName}.status must be unknown when ${fieldName}.declaredScope.mode is unknown`);
+  }
+  if (status === "no_observed_changes" && observedChanges.paths.length > 0) {
+    throw new Error(`${fieldName}.observedChanges.paths must be empty when ${fieldName}.status is no_observed_changes`);
+  }
+  if (
+    (status === "aligned" || status === "scope_violation")
+    && observedChanges.paths.length === 0
+  ) {
+    throw new Error(`${fieldName}.observedChanges.paths must include at least one path when ${fieldName}.status is ${status}`);
+  }
+
+  return {
+    declaredScope,
+    observedChanges,
+    status
+  };
 }
 
 export function toArtifactReference(artifactType, artifactId) {

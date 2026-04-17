@@ -12,6 +12,7 @@ import {
   normalizePolicyDecision,
   normalizeReviewFindings,
   normalizeReviewability,
+  normalizeScopeOwnership,
   normalizeStopReasonCode,
   normalizeValidationOutcome
 } from "./run-evidence.js";
@@ -325,6 +326,21 @@ export function validateContractExecutionResult(result) {
       throw new Error(`${error.message}`);
     }
   }
+  if (Object.prototype.hasOwnProperty.call(result, "scopeOwnership")) {
+    try {
+      const normalizedScopeOwnership = normalizeScopeOwnership(result.scopeOwnership, {
+        fieldName: "contractExecutionResult.scopeOwnership",
+        allowMissing: false
+      });
+      if (normalizedScopeOwnership === null) {
+        delete result.scopeOwnership;
+      } else {
+        result.scopeOwnership = normalizedScopeOwnership;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
     result.redaction = normalizeRedactionMetadata(result.redaction, {
       fieldName: "contractExecutionResult.redaction",
@@ -418,6 +434,21 @@ export function validateRunJournalEntry(entry) {
         delete entry.policyDecision;
       } else {
         entry.policyDecision = normalizedPolicyDecision;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "scopeOwnership")) {
+    try {
+      const normalizedScopeOwnership = normalizeScopeOwnership(entry.scopeOwnership, {
+        fieldName: "runJournalEntry.scopeOwnership",
+        allowMissing: false
+      });
+      if (normalizedScopeOwnership === null) {
+        delete entry.scopeOwnership;
+      } else {
+        entry.scopeOwnership = normalizedScopeOwnership;
       }
     } catch (error) {
       throw new Error(`${error.message}`);

@@ -1,8 +1,11 @@
+import { realpathSync, statSync } from "node:fs";
+import { posix, relative, resolve, win32 } from "node:path";
 import {
   assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
   normalizeRedactionMetadata
 } from "./redaction.js";
+import { normalizeScopedPath } from "./path-scopes.js";
 
 const CONTEXT_MANIFEST_KIND = Object.freeze({
   CONTEXT_FILE: "context_file",
@@ -34,6 +37,7 @@ const CONTEXT_MANIFEST_SOURCE_SET = new Set(CONTEXT_MANIFEST_SOURCES);
 const CONTEXT_MANIFEST_REASON_SET = new Set(CONTEXT_MANIFEST_REASONS);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
 const TRUSTED_FORWARDED_REDACTION_METADATA_BY_CONTEXT = new WeakMap();
+const TRUSTED_RUNTIME_REPOSITORY_ROOT_BY_CONTEXT = new WeakMap();
 export const RUN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   maxPriorResults: 4,
   maxPriorResultEvidence: 8,
@@ -63,6 +67,126 @@ function normalizeEnumValue({ fieldName, value, allowedValues, allowedValueSet }
 function normalizeReference(fieldName, value) {
   assert(typeof value === "string" && value.trim().length > 0, `${fieldName} must be a non-empty string`);
   return value.trim();
+}
+
+function normalizeContextFileReference(fieldName, value) {
+  const normalizedReference = normalizeScopedPath(normalizeReference(fieldName, value));
+  assert(normalizedReference.length > 0, `${fieldName} must resolve to a non-empty scoped path`);
+  return normalizedReference;
+}
+
+function normalizePacketContextFileReferences(contextFiles, {
+  fieldName = "packetContextFiles"
+} = {}) {
+  if (!Array.isArray(contextFiles)) {
+    return [];
+  }
+
+  const references = [];
+  for (const [index, value] of contextFiles.entries()) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      continue;
+    }
+
+    references.push(normalizeContextFileReference(`${fieldName}[${index}]`, value));
+  }
+
+  return references;
+}
+
+function isAbsolutePathReference(pathValue) {
+  return posix.isAbsolute(pathValue) || win32.isAbsolute(pathValue);
+}
+
+function isPathWithinRepositoryRoot(pathValue, repositoryRootPath) {
+  const relativePath = relative(repositoryRootPath, pathValue);
+  return relativePath === ""
+    || (
+      !relativePath.startsWith("..")
+      && !posix.isAbsolute(relativePath)
+      && !win32.isAbsolute(relativePath)
+    );
+}
+
+function normalizeRepositoryRootPath(repositoryRoot, {
+  fieldName = "repositoryRoot"
+} = {}) {
+  assert(
+    typeof repositoryRoot === "string" && repositoryRoot.trim().length > 0,
+    `${fieldName} must be a non-empty string`
+  );
+  const resolvedRepositoryRoot = resolve(repositoryRoot.trim());
+  let repositoryRootStats;
+  try {
+    repositoryRootStats = statSync(resolvedRepositoryRoot);
+  } catch {
+    throw new Error(`${fieldName} must resolve to an existing directory`);
+  }
+  assert(repositoryRootStats.isDirectory(), `${fieldName} must resolve to an existing directory`);
+
+  let realRepositoryRootPath;
+  try {
+    realRepositoryRootPath = realpathSync(resolvedRepositoryRoot);
+  } catch {
+    throw new Error(`${fieldName} must resolve to an existing directory`);
+  }
+
+  return {
+    resolvedRepositoryRoot,
+    realRepositoryRootPath
+  };
+}
+
+function assertRuntimePacketContextFilesAdmissible({
+  packetContextFiles,
+  repositoryRoot,
+  fieldName = "context.packetContextFiles"
+} = {}) {
+  const normalizedReferences = normalizePacketContextFileReferences(packetContextFiles, {
+    fieldName
+  });
+  const repositoryRootPath = repositoryRoot?.resolvedRepositoryRoot;
+  const realRepositoryRootPath = repositoryRoot?.realRepositoryRootPath;
+  assert(
+    typeof repositoryRootPath === "string" && repositoryRootPath.length > 0,
+    "repositoryRoot.resolvedRepositoryRoot must be a non-empty string"
+  );
+  assert(
+    typeof realRepositoryRootPath === "string" && realRepositoryRootPath.length > 0,
+    "repositoryRoot.realRepositoryRootPath must be a non-empty string"
+  );
+
+  for (const [index, reference] of normalizedReferences.entries()) {
+    assert(
+      !isAbsolutePathReference(reference),
+      `${fieldName}[${index}] must be a repository-relative path`
+    );
+    const resolvedCandidatePath = resolve(repositoryRootPath, reference);
+    let candidateStats;
+    try {
+      candidateStats = statSync(resolvedCandidatePath);
+    } catch {
+      throw new Error(`${fieldName}[${index}] must reference an existing repository file: ${reference}`);
+    }
+    assert(
+      candidateStats.isFile(),
+      `${fieldName}[${index}] must reference an existing repository file: ${reference}`
+    );
+
+    let realCandidatePath;
+    try {
+      realCandidatePath = realpathSync(resolvedCandidatePath);
+    } catch {
+      throw new Error(`${fieldName}[${index}] must reference an existing repository file: ${reference}`);
+    }
+
+    assert(
+      isPathWithinRepositoryRoot(realCandidatePath, realRepositoryRootPath),
+      `${fieldName}[${index}] must resolve within the repository root: ${reference}`
+    );
+  }
+
+  return normalizedReferences;
 }
 
 function normalizeOptionalBoolean({ fieldName, value, defaultValue = false }) {
@@ -592,6 +716,42 @@ export function getTrustedForwardedRedactionMetadata(context) {
   return cloneTrustedForwardedRedactionMetadata(trustedMetadata);
 }
 
+export function setTrustedRuntimeRepositoryRoot(context, repositoryRoot, {
+  fieldName = "trustedRuntimeRepositoryRoot"
+} = {}) {
+  assert(
+    context && typeof context === "object" && !Array.isArray(context),
+    "context must be an object"
+  );
+
+  if (repositoryRoot === undefined) {
+    TRUSTED_RUNTIME_REPOSITORY_ROOT_BY_CONTEXT.delete(context);
+    return undefined;
+  }
+
+  const normalizedRepositoryRoot = normalizeRepositoryRootPath(repositoryRoot, {
+    fieldName
+  });
+  TRUSTED_RUNTIME_REPOSITORY_ROOT_BY_CONTEXT.set(
+    context,
+    normalizedRepositoryRoot.resolvedRepositoryRoot
+  );
+  return normalizedRepositoryRoot.resolvedRepositoryRoot;
+}
+
+export function getTrustedRuntimeRepositoryRoot(context) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) {
+    return undefined;
+  }
+
+  const trustedRepositoryRoot = TRUSTED_RUNTIME_REPOSITORY_ROOT_BY_CONTEXT.get(context);
+  if (typeof trustedRepositoryRoot !== "string" || trustedRepositoryRoot.length === 0) {
+    return undefined;
+  }
+
+  return trustedRepositoryRoot;
+}
+
 function normalizePriorResultReferences(priorResults, fieldName, {
   redactor,
   expectedRedactionMetadata
@@ -987,8 +1147,11 @@ export function validateRunContext({
   repositoryRoot = process.cwd(),
   fieldName = "context"
 } = {}) {
+  const normalizedRepositoryRoot = normalizeRepositoryRootPath(repositoryRoot, {
+    fieldName: `${fieldName}.repositoryRoot`
+  });
   const redactor = createBoundaryPathRedactor({
-    repositoryRoot
+    repositoryRoot: normalizedRepositoryRoot.resolvedRepositoryRoot
   });
   const expectedPriorResultRedactionMetadata = normalizeExpectedPriorResultRedactionMetadata(
     forwardedRedactionMetadata?.priorResults,
@@ -1055,7 +1218,12 @@ export function validateRunContext({
     fieldName: `${fieldName}.contextBudget`
   });
 
-  const expectedContextFileEntries = buildPacketContextManifest(packetContextFiles);
+  const normalizedPacketContextFiles = assertRuntimePacketContextFilesAdmissible({
+    packetContextFiles,
+    repositoryRoot: normalizedRepositoryRoot,
+    fieldName: `${fieldName}.packetContextFiles`
+  });
+  const expectedContextFileEntries = buildPacketContextManifest(normalizedPacketContextFiles);
   const expectedPriorResultEntries = buildPriorResultContextManifest(
     priorResultReferences.map((packetId) => ({ packetId }))
   );
@@ -1092,12 +1260,9 @@ export function validateRunContext({
 }
 
 export function buildPacketContextManifest(contextFiles = []) {
-  if (!Array.isArray(contextFiles)) {
-    return [];
-  }
-
-  const entries = contextFiles
-    .filter((value) => typeof value === "string" && value.trim().length > 0)
+  const entries = normalizePacketContextFileReferences(contextFiles, {
+    fieldName: "contextFiles"
+  })
     .map((reference) => ({
       kind: CONTEXT_MANIFEST_KIND.CONTEXT_FILE,
       source: CONTEXT_MANIFEST_SOURCE.PACKET_CONTEXT_FILES,

@@ -22,6 +22,7 @@ import {
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
   normalizeRedactionMetadata,
+  redactCoveredStringFields,
   truncateBoundaryString
 } from "./redaction.js";
 import { safeClone } from "./safe-clone.js";
@@ -38,6 +39,30 @@ const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
 const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
 const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
 const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
+const LAUNCH_EVIDENCE_LABEL_PATTERN = /^(retry_)?(launcher_path|pi_script_path|pi_package_root|pi_spawn_resolution|launch_error):\s/iu;
+const LAUNCH_DIAGNOSTIC_LABELS = new Set(["launch_error"]);
+const BOUNDARY_LAUNCH_RESULT_STRING_FIELDS = Object.freeze([
+  Object.freeze({
+    keys: Object.freeze(["launcher_path", "launcherPath"]),
+    fieldName: "result.launcherMetadata.launcher_path"
+  }),
+  Object.freeze({
+    keys: Object.freeze(["pi_script_path", "piScriptPath"]),
+    fieldName: "result.launcherMetadata.pi_script_path"
+  }),
+  Object.freeze({
+    keys: Object.freeze(["pi_package_root", "piPackageRoot"]),
+    fieldName: "result.launcherMetadata.pi_package_root"
+  }),
+  Object.freeze({
+    keys: Object.freeze(["pi_spawn_resolution", "piSpawnResolution"]),
+    fieldName: "result.launcherMetadata.pi_spawn_resolution"
+  }),
+  Object.freeze({
+    keys: Object.freeze(["launch_error", "launchError"]),
+    fieldName: "result.launchDiagnostics.launch_error"
+  })
+]);
 const PROCESS_PROVIDER_OPENAI_CODEX = PROCESS_MODEL_PROBE_DEFAULT_PROVIDER;
 const PROCESS_MODEL_FALLBACK = "gpt-5.4";
 const MODEL_SELECTION_DIRECT = "direct";
@@ -496,6 +521,55 @@ function createSuccessResult(summary, {
   });
 }
 
+function resolveLaunchEvidenceFieldName(label, { isRetry = false } = {}) {
+  const category = LAUNCH_DIAGNOSTIC_LABELS.has(label)
+    ? "launchDiagnostics"
+    : "launcherMetadata";
+  return `result.${isRetry ? "retry" : ""}${isRetry ? category[0].toUpperCase() + category.slice(1) : category}.${label}`;
+}
+
+function resolveEvidenceRedactionFieldName(entry, index) {
+  const normalizedEntry = String(entry);
+  const match = normalizedEntry.match(LAUNCH_EVIDENCE_LABEL_PATTERN);
+  if (!match) {
+    return `result.evidence[${index}]`;
+  }
+
+  const isRetry = Boolean(match[1]);
+  const label = match[2];
+  return resolveLaunchEvidenceFieldName(label, { isRetry });
+}
+
+function collectBoundaryLaunchResultStringFields(result) {
+  const fields = [];
+  for (const definition of BOUNDARY_LAUNCH_RESULT_STRING_FIELDS) {
+    const presentKey = definition.keys.find((key) => Object.prototype.hasOwnProperty.call(result, key));
+    if (!presentKey) {
+      continue;
+    }
+
+    const value = result[presentKey];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    assert(typeof value === "string", `result.${presentKey} must be a string when present`);
+
+    fields.push({
+      key: presentKey,
+      fieldName: definition.fieldName,
+      value
+    });
+  }
+  return fields;
+}
+
+function buildEvidenceCoveredStringFields(evidence) {
+  return evidence.map((entry, index) => ({
+    fieldName: resolveEvidenceRedactionFieldName(entry, index),
+    value: entry
+  }));
+}
+
 function buildWorkerResultCoveredRedactionFields(result) {
   const stringFields = [
     {
@@ -513,14 +587,21 @@ function buildWorkerResultCoveredRedactionFields(result) {
       value: result.commandsRun
     },
     {
-      fieldName: "result.evidence",
-      value: result.evidence
-    },
-    {
       fieldName: "result.openQuestions",
       value: result.openQuestions
     }
   ];
+
+  buildEvidenceCoveredStringFields(result.evidence).forEach((field) => {
+    stringFields.push(field);
+  });
+
+  collectBoundaryLaunchResultStringFields(result).forEach((field) => {
+    stringFields.push({
+      fieldName: field.fieldName,
+      value: field.value
+    });
+  });
 
   if (Array.isArray(result.commandObservations)) {
     result.commandObservations.forEach((observation, index) => {
@@ -565,11 +646,20 @@ function redactWorkerResultForBoundary(result, {
   const commandsRun = redactor.redactStringArray(result.commandsRun, {
     fieldName: "result.commandsRun"
   });
-  const evidence = redactor.redactStringArray(result.evidence, {
-    fieldName: "result.evidence"
+  const evidence = redactCoveredStringFields({
+    redactor,
+    stringFields: buildEvidenceCoveredStringFields(result.evidence)
   });
   const openQuestions = redactor.redactStringArray(result.openQuestions, {
     fieldName: "result.openQuestions"
+  });
+  const launchResultStringFields = collectBoundaryLaunchResultStringFields(result);
+  const redactedLaunchResultStringFields = redactCoveredStringFields({
+    redactor,
+    stringFields: launchResultStringFields.map(({ fieldName, value }) => ({
+      fieldName,
+      value
+    }))
   });
 
   const commandObservationRedactions = [];
@@ -626,10 +716,15 @@ function redactWorkerResultForBoundary(result, {
       commandsRun.redaction,
       evidence.redaction,
       openQuestions.redaction,
+      redactedLaunchResultStringFields.redaction,
       ...commandObservationRedactions,
       ...reviewFindingRedactions
     )
   };
+
+  launchResultStringFields.forEach((field, index) => {
+    redacted[field.key] = redactedLaunchResultStringFields.values[index];
+  });
 
   if (commandObservations !== undefined) {
     redacted.commandObservations = commandObservations;

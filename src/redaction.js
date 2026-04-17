@@ -260,6 +260,31 @@ export function recomputeRedactionMetadataFromCoveredStrings({
   return mergeRedactionMetadata(...metadataValues);
 }
 
+export function redactCoveredStringFields({
+  redactor,
+  stringFields = []
+} = {}) {
+  assertBoundaryRedactor(redactor);
+  assert(Array.isArray(stringFields), "stringFields must be an array");
+
+  const redactedValues = [];
+  const metadataValues = [];
+  for (const [index, field] of stringFields.entries()) {
+    const normalizedField = normalizeCoveredStringField(field, index, "stringFields");
+    assert(typeof normalizedField.value === "string", `stringFields[${index}].value must be a string`);
+    const redacted = redactor.redactString(normalizedField.value, {
+      fieldName: normalizedField.fieldName
+    });
+    redactedValues.push(redacted.value);
+    metadataValues.push(redacted.redaction);
+  }
+
+  return {
+    values: redactedValues,
+    redaction: mergeRedactionMetadata(...metadataValues)
+  };
+}
+
 export function assertRedactionMetadataMatchesCoveredStrings(redaction, {
   redactor,
   fieldName = "redaction",

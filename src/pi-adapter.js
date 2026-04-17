@@ -2,7 +2,9 @@ import { createWorkerResult } from "./contracts.js";
 import { resolvePiWorkerInvoker } from "./pi-runtime-diagnostics.js";
 import {
   getTrustedForwardedRedactionMetadata,
+  getTrustedRuntimeRepositoryRoot,
   normalizeContextManifest,
+  setTrustedRuntimeRepositoryRoot,
   validateRunContext
 } from "./context-manifest.js";
 
@@ -148,10 +150,20 @@ function hasStructuredRuntimeContextFields(context = {}) {
     || Object.prototype.hasOwnProperty.call(context, "contextBudget");
 }
 
+function resolveRuntimeRepositoryRoot(contextInput) {
+  const trustedRepositoryRoot = getTrustedRuntimeRepositoryRoot(contextInput?.context);
+  if (trustedRepositoryRoot !== undefined) {
+    return trustedRepositoryRoot;
+  }
+
+  return undefined;
+}
+
 function createRuntimeContext(contextInput, request) {
   const context = contextInput && typeof contextInput === "object" && !Array.isArray(contextInput)
     ? contextInput
     : {};
+  const runtimeRepositoryRoot = resolveRuntimeRepositoryRoot(context);
   const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(context.context);
   const workflowContext = clone(context.context) ?? null;
 
@@ -164,6 +176,7 @@ function createRuntimeContext(contextInput, request) {
       changedSurfaceContext: workflowContext.changedSurfaceContext ?? [],
       contextBudget: workflowContext.contextBudget,
       forwardedRedactionMetadata: trustedForwardedRedactionMetadata,
+      repositoryRoot: runtimeRepositoryRoot,
       fieldName: "context.workflowContext"
     });
 
@@ -174,6 +187,11 @@ function createRuntimeContext(contextInput, request) {
     ) {
       workflowContext.contextBudget = normalizedRunContext.contextBudget ?? workflowContext.contextBudget;
     }
+  }
+  if (workflowContext) {
+    setTrustedRuntimeRepositoryRoot(workflowContext, runtimeRepositoryRoot, {
+      fieldName: "context.workflowContext.repositoryRoot"
+    });
   }
 
   return {

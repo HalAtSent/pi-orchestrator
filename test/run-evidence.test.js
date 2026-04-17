@@ -20,6 +20,7 @@ import {
   normalizeProviderModelSelections,
   normalizeReviewFindings,
   normalizeReviewability,
+  normalizeScopeOwnership,
   normalizeSourceArtifactIds,
   normalizeStopReasonCode,
   normalizeValidationArtifacts,
@@ -888,6 +889,73 @@ test("run evidence changed-surface observation normalization allows complete/not
       fieldName: "result.changedSurfaceObservation"
     }),
     /result\.changedSurfaceObservation\.capture must be one of: complete, not_captured/u
+  );
+});
+
+test("run evidence normalizes typed scope ownership and fails closed on malformed present values", () => {
+  assert.deepEqual(
+    normalizeScopeOwnership({
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/", "src/helpers.js"]
+      },
+      observedChanges: {
+        paths: ["src\\helpers.js"]
+      },
+      status: "aligned"
+    }, {
+      fieldName: "runJournalEntry.scopeOwnership"
+    }),
+    {
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/", "src/helpers.js"]
+      },
+      observedChanges: {
+        paths: ["src/helpers.js"]
+      },
+      status: "aligned"
+    }
+  );
+
+  assert.equal(
+    normalizeScopeOwnership(undefined, {
+      fieldName: "runJournalEntry.scopeOwnership",
+      allowMissing: true
+    }),
+    null
+  );
+
+  assert.throws(
+    () => normalizeScopeOwnership({
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/helpers.js"]
+      },
+      observedChanges: {
+        paths: ["src/helpers.js"]
+      },
+      status: "not_supported"
+    }, {
+      fieldName: "runJournalEntry.scopeOwnership"
+    }),
+    /runJournalEntry\.scopeOwnership\.status must be one of: aligned, scope_violation, no_observed_changes, unknown/u
+  );
+
+  assert.throws(
+    () => normalizeScopeOwnership({
+      declaredScope: {
+        mode: "explicit_paths",
+        paths: ["src/helpers.js"]
+      },
+      observedChanges: {
+        paths: []
+      },
+      status: "aligned"
+    }, {
+      fieldName: "runJournalEntry.scopeOwnership"
+    }),
+    /runJournalEntry\.scopeOwnership\.observedChanges\.paths must include at least one path when runJournalEntry\.scopeOwnership\.status is aligned/u
   );
 });
 

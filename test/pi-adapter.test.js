@@ -1,7 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, relative } from "node:path";
 
 import { createPiAdapter } from "../src/pi-adapter.js";
+import { setTrustedRuntimeRepositoryRoot } from "../src/context-manifest.js";
+
+const TEST_CONTEXT_FILE_REFERENCE = "src/__context_root_probe__.js";
 
 function createWorkerRequest(role = "implementer", overrides = {}) {
   const writeRole = role === "implementer";
@@ -39,6 +45,21 @@ function createWorkerRequest(role = "implementer", overrides = {}) {
     },
     ...overrides
   };
+}
+
+function createPacketContextManifest(reference) {
+  return [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference,
+      reason: "explicit_request"
+    }
+  ];
+}
+
+function resolveRepositoryReference(repositoryRoot, reference) {
+  return join(repositoryRoot, ...reference.split("/"));
 }
 
 test("adapter forwards bounded worker request fields to the runtime host", async () => {
@@ -240,6 +261,305 @@ test("adapter fails closed when workflowContext payloads drift from contextManif
   assert.equal(result.status, "blocked");
   assert.match(result.summary, /runtime context assembly invalid or drifted from contextManifest\[\]/i);
   assert.equal(runtimeCallCount, 0);
+});
+
+test("adapter fails closed on missing workflowContext context_file runtime references", async () => {
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const missingReference = "docs/DOES-NOT-EXIST.md";
+  const request = createWorkerRequest("implementer", {
+    contextFiles: [missingReference],
+    contextManifest: [
+      {
+        kind: "context_file",
+        source: "packet_context_files",
+        reference: missingReference,
+        reason: "explicit_request"
+      }
+    ]
+  });
+  const result = await adapter.runWorker(request, {
+    context: {
+      contextManifest: [
+        {
+          kind: "context_file",
+          source: "packet_context_files",
+          reference: missingReference,
+          reason: "explicit_request"
+        }
+      ]
+    }
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must reference an existing repository file/i);
+  assert.equal(runtimeCallCount, 0);
+});
+
+test("adapter ignores caller-authored constructor repositoryRoot when resolving context_file admission", async () => {
+  const forgedRepositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-constructor-forged-root-"));
+  const spoofedReference = "src/__adapter_constructor_spoof_probe__.js";
+  mkdirSync(join(forgedRepositoryRoot, "src"), { recursive: true });
+  writeFileSync(
+    resolveRepositoryReference(forgedRepositoryRoot, spoofedReference),
+    "export const forged = true;\n",
+    "utf8"
+  );
+  const contextManifest = createPacketContextManifest(spoofedReference);
+
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    repositoryRoot: forgedRepositoryRoot,
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  try {
+    const request = createWorkerRequest("implementer", {
+      contextFiles: [spoofedReference],
+      contextManifest
+    });
+    const result = await adapter.runWorker(request, {
+      context: {
+        contextManifest
+      }
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must reference an existing repository file/i);
+    assert.equal(runtimeCallCount, 0);
+  } finally {
+    rmSync(forgedRepositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("adapter validates workflowContext context_file references against trusted runtime repositoryRoot metadata", async () => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-root-"));
+  mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+  writeFileSync(
+    resolveRepositoryReference(repositoryRoot, TEST_CONTEXT_FILE_REFERENCE),
+    "export const contextProbe = true;\n",
+    "utf8"
+  );
+  const contextManifest = createPacketContextManifest(TEST_CONTEXT_FILE_REFERENCE);
+
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker(request) {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: `${request.role} completed`,
+          changedFiles: [request.allowedFiles[0]],
+          commandsRun: request.commands,
+          evidence: ["runtime call accepted"],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  try {
+    const request = createWorkerRequest("implementer", {
+      contextFiles: [TEST_CONTEXT_FILE_REFERENCE],
+      contextManifest
+    });
+    const workflowContext = {
+      contextManifest
+    };
+    setTrustedRuntimeRepositoryRoot(workflowContext, repositoryRoot, {
+      fieldName: "test.workflowContext.repositoryRoot"
+    });
+    const result = await adapter.runWorker(request, {
+      context: workflowContext
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(runtimeCallCount, 1);
+  } finally {
+    rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("adapter trusted runtime repositoryRoot still fails closed on missing workflowContext context_file references", async () => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-missing-"));
+  const missingReference = "src/__missing_context_probe__.js";
+  const contextManifest = createPacketContextManifest(missingReference);
+
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  try {
+    const request = createWorkerRequest("implementer", {
+      contextFiles: [missingReference],
+      contextManifest
+    });
+    const workflowContext = {
+      contextManifest
+    };
+    setTrustedRuntimeRepositoryRoot(workflowContext, repositoryRoot, {
+      fieldName: "test.workflowContext.repositoryRoot"
+    });
+    const result = await adapter.runWorker(request, {
+      context: workflowContext
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must reference an existing repository file/i);
+    assert.equal(runtimeCallCount, 0);
+  } finally {
+    rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("adapter trusted runtime repositoryRoot still fails closed when workflowContext context_file escapes the repository root", async () => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-escape-root-"));
+  const outsideRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-escape-outside-"));
+  const outsideFile = join(outsideRoot, "__context_escape_probe__.js");
+  writeFileSync(outsideFile, "export const escaped = true;\n", "utf8");
+  const escapeReference = relative(repositoryRoot, outsideFile).replace(/\\/g, "/");
+  assert.match(escapeReference, /^\.\.\//u);
+  const contextManifest = createPacketContextManifest(escapeReference);
+
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  try {
+    const request = createWorkerRequest("implementer", {
+      contextFiles: [escapeReference],
+      contextManifest
+    });
+    const workflowContext = {
+      contextManifest
+    };
+    setTrustedRuntimeRepositoryRoot(workflowContext, repositoryRoot, {
+      fieldName: "test.workflowContext.repositoryRoot"
+    });
+    const result = await adapter.runWorker(request, {
+      context: workflowContext
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must resolve within the repository root/i);
+    assert.equal(runtimeCallCount, 0);
+  } finally {
+    rmSync(repositoryRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test("adapter ignores caller-authored plain workflowContext.repositoryRoot when trusted root metadata is present", async () => {
+  const trustedRepositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-trusted-root-"));
+  const forgedRepositoryRoot = mkdtempSync(join(tmpdir(), "pi-adapter-context-forged-root-"));
+  mkdirSync(join(forgedRepositoryRoot, "src"), { recursive: true });
+  writeFileSync(
+    resolveRepositoryReference(forgedRepositoryRoot, TEST_CONTEXT_FILE_REFERENCE),
+    "export const forged = true;\n",
+    "utf8"
+  );
+  const contextManifest = createPacketContextManifest(TEST_CONTEXT_FILE_REFERENCE);
+
+  let runtimeCallCount = 0;
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        runtimeCallCount += 1;
+        return {
+          status: "success",
+          summary: "unexpected",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  try {
+    const request = createWorkerRequest("implementer", {
+      contextFiles: [TEST_CONTEXT_FILE_REFERENCE],
+      contextManifest
+    });
+    const workflowContext = {
+      contextManifest,
+      repositoryRoot: forgedRepositoryRoot
+    };
+    setTrustedRuntimeRepositoryRoot(workflowContext, trustedRepositoryRoot, {
+      fieldName: "test.workflowContext.repositoryRoot"
+    });
+    const result = await adapter.runWorker(request, {
+      context: workflowContext
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must reference an existing repository file/i);
+    assert.equal(runtimeCallCount, 0);
+  } finally {
+    rmSync(trustedRepositoryRoot, { recursive: true, force: true });
+    rmSync(forgedRepositoryRoot, { recursive: true, force: true });
+  }
 });
 
 test("adapter fails closed on duplicate workflowContext prior-result packet ids", async () => {

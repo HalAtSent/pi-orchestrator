@@ -12,8 +12,12 @@ export const GOVERNED_SKILL_OUTPUT_SHAPES = Object.freeze([
 ]);
 
 const COMMON_ROLE_DOC_PATH = "docs/agents/COMMON.md";
+const MIRROR_SKILL_ENTRY_PATH_PREFIX = ".pi";
 const SKILL_ENTRY_OUTPUT_CONTRACT_HEADING = "Output Contract";
 const SKILL_ENTRY_OUTPUT_SHAPE_MARKER_PREFIX = "Expected Output Shape:";
+const GOVERNED_SKILL_REQUIRED_ENTRY_HEADINGS = Object.freeze([
+  SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+]);
 const ROLE_DOC_REQUIRED_COMMON_HEADINGS = Object.freeze([
   "Role Envelope Model",
   "Output Discipline"
@@ -136,6 +140,13 @@ function normalizePath(pathValue) {
 
 function resolveFromRepositoryRoot(repositoryRoot, relativePath) {
   return resolve(repositoryRoot, normalizePath(relativePath));
+}
+
+function toMirrorSkillEntryPath(entryPath) {
+  const normalizedEntryPath = normalizePath(entryPath)
+    .replace(/^\.\/+/u, "")
+    .replace(/^\/+/u, "");
+  return normalizePath(`${MIRROR_SKILL_ENTRY_PATH_PREFIX}/${normalizedEntryPath}`);
 }
 
 function escapeRegExp(value) {
@@ -810,6 +821,114 @@ function auditRequiredDocHeadings({
   }
 }
 
+function getOutputContractShapeMarker(skillEntryMarkdown) {
+  const outputContractSection = getMarkdownHeadingSection(
+    skillEntryMarkdown,
+    SKILL_ENTRY_OUTPUT_CONTRACT_HEADING
+  );
+  if (outputContractSection === null) {
+    return null;
+  }
+
+  return getOutputShapeMarkerFromOutputContractSection(outputContractSection);
+}
+
+function auditMirrorSkillParity({
+  entry,
+  skillId,
+  repositoryRoot,
+  statFn,
+  readFileFn,
+  skillEntryMarkdown,
+  errors
+}) {
+  const mirrorEntryPath = toMirrorSkillEntryPath(entry.entryPath);
+  const absoluteMirrorEntryPath = resolveFromRepositoryRoot(repositoryRoot, mirrorEntryPath);
+  const mirrorEntryPathStat = getPathStat(absoluteMirrorEntryPath, { statFn });
+  if (!mirrorEntryPathStat) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "missing_mirror_entry_path",
+      message: `mirror entryPath does not exist: ${mirrorEntryPath}`,
+      path: mirrorEntryPath
+    }));
+    return;
+  }
+
+  let mirrorSkillEntryMarkdown;
+  try {
+    mirrorSkillEntryMarkdown = readFileFn(absoluteMirrorEntryPath, "utf8");
+  } catch (error) {
+    const reason = error instanceof Error && error.message
+      ? error.message
+      : "unknown read error";
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "mirror_entry_path_unreadable",
+      message: `mirror entryPath is unreadable: ${mirrorEntryPath} (${reason})`,
+      path: mirrorEntryPath
+    }));
+    return;
+  }
+
+  for (const heading of GOVERNED_SKILL_REQUIRED_ENTRY_HEADINGS) {
+    const repoHasHeading = hasMarkdownHeading(skillEntryMarkdown, heading);
+    const mirrorHasHeading = hasMarkdownHeading(mirrorSkillEntryMarkdown, heading);
+    if (repoHasHeading && !mirrorHasHeading) {
+      errors.push(createGovernedSkillError({
+        skillId,
+        code: "missing_mirror_required_heading",
+        message: `mirror entryPath is missing required heading: ${heading}`,
+        heading,
+        path: mirrorEntryPath
+      }));
+    } else if (!repoHasHeading && mirrorHasHeading) {
+      errors.push(createGovernedSkillError({
+        skillId,
+        code: "stale_mirror_required_heading",
+        message: `mirror entryPath has stale required heading that is not present in repo entryPath: ${heading}`,
+        heading,
+        path: mirrorEntryPath
+      }));
+    }
+  }
+
+  const repoOutputShapeMarker = getOutputContractShapeMarker(skillEntryMarkdown);
+  const mirrorOutputShapeMarker = getOutputContractShapeMarker(mirrorSkillEntryMarkdown);
+  if (repoOutputShapeMarker !== mirrorOutputShapeMarker) {
+    errors.push(createGovernedSkillError({
+      skillId,
+      code: "mismatched_mirror_output_contract_shape_marker",
+      message: `mirror Output Contract shape marker mismatch: repo=${repoOutputShapeMarker ?? "missing"}, mirror=${mirrorOutputShapeMarker ?? "missing"}`,
+      heading: SKILL_ENTRY_OUTPUT_CONTRACT_HEADING,
+      path: mirrorEntryPath
+    }));
+  }
+
+  if (!Array.isArray(entry.referencedCommands)) {
+    return;
+  }
+
+  for (const commandValue of entry.referencedCommands) {
+    if (!isNonEmptyString(commandValue)) {
+      continue;
+    }
+
+    const command = commandValue.trim();
+    const repoHasCommand = hasCommandLiteral(skillEntryMarkdown, command);
+    const mirrorHasCommand = hasCommandLiteral(mirrorSkillEntryMarkdown, command);
+    if (repoHasCommand !== mirrorHasCommand) {
+      errors.push(createGovernedSkillError({
+        skillId,
+        code: "mismatched_mirror_referenced_command_literal",
+        message: `mirror referenced command literal mismatch for "${command}": repo=${repoHasCommand}, mirror=${mirrorHasCommand}`,
+        command,
+        path: mirrorEntryPath
+      }));
+    }
+  }
+}
+
 export function validateGovernedSkills({
   inventory = GOVERNED_SKILLS,
   repositoryRoot = REPOSITORY_ROOT,
@@ -881,6 +1000,16 @@ export function validateGovernedSkills({
       repositoryRoot,
       statFn,
       readFileFn,
+      errors
+    });
+
+    auditMirrorSkillParity({
+      entry,
+      skillId,
+      repositoryRoot,
+      statFn,
+      readFileFn,
+      skillEntryMarkdown,
       errors
     });
   }

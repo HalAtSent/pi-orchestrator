@@ -42,6 +42,35 @@ function createFixtureInventory(overrides = {}) {
   };
 }
 
+function createExplorerSkillMarkdown({
+  includeExplorerCommand = true,
+  includeOutputContractHeading = true,
+  outputContractShapeMarker = "structured_worker_result"
+} = {}) {
+  const commandSnippet = includeExplorerCommand
+    ? "- Prefer `rg` for fast local search.\n"
+    : "- Prefer fast local search tools.\n";
+  const outputContractSection = includeOutputContractHeading
+    ? [
+      "## Output Contract",
+      "",
+      ...(outputContractShapeMarker !== null
+        ? [`Expected Output Shape: ${outputContractShapeMarker}`]
+        : []),
+      "",
+      "Return a structured worker result.",
+      ""
+    ].join("\n")
+    : [
+      "## Delivery Contract",
+      "",
+      "Return a structured worker result.",
+      ""
+    ].join("\n");
+
+  return `# Explorer Skill\n\n${commandSnippet}\n${outputContractSection}\n`;
+}
+
 async function createFixtureRepository({
   includeEntry = true,
   includeExplorerCommand = true,
@@ -49,11 +78,16 @@ async function createFixtureRepository({
   includeRoleEnvelopeHeading = true,
   includeRoleHeading = true,
   includeOutputContractHeading = true,
-  outputContractShapeMarker = "structured_worker_result"
+  outputContractShapeMarker = "structured_worker_result",
+  includeMirrorEntry = true,
+  mirrorIncludeExplorerCommand = includeExplorerCommand,
+  mirrorIncludeOutputContractHeading = includeOutputContractHeading,
+  mirrorOutputContractShapeMarker = outputContractShapeMarker
 } = {}) {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-skill-governance-"));
   await mkdir(join(repositoryRoot, "docs", "agents"), { recursive: true });
   await mkdir(join(repositoryRoot, "skills", "explorer"), { recursive: true });
+  await mkdir(join(repositoryRoot, ".pi", "skills", "explorer"), { recursive: true });
 
   const commonHeading = includeCommonHeading
     ? "## Role Envelope Model\n\nShared role envelope.\n\n## Output Discipline"
@@ -77,29 +111,25 @@ async function createFixtureRepository({
   );
 
   if (includeEntry) {
-    const commandSnippet = includeExplorerCommand
-      ? "- Prefer `rg` for fast local search.\n"
-      : "- Prefer fast local search tools.\n";
-    const outputContractSection = includeOutputContractHeading
-      ? [
-        "## Output Contract",
-        "",
-        ...(outputContractShapeMarker !== null
-          ? [`Expected Output Shape: ${outputContractShapeMarker}`]
-          : []),
-        "",
-        "Return a structured worker result.",
-        ""
-      ].join("\n")
-      : [
-        "## Delivery Contract",
-        "",
-        "Return a structured worker result.",
-        ""
-      ].join("\n");
     await writeFile(
       join(repositoryRoot, "skills", "explorer", "SKILL.md"),
-      `# Explorer Skill\n\n${commandSnippet}\n${outputContractSection}\n`,
+      createExplorerSkillMarkdown({
+        includeExplorerCommand,
+        includeOutputContractHeading,
+        outputContractShapeMarker
+      }),
+      "utf8"
+    );
+  }
+
+  if (includeMirrorEntry) {
+    await writeFile(
+      join(repositoryRoot, ".pi", "skills", "explorer", "SKILL.md"),
+      createExplorerSkillMarkdown({
+        includeExplorerCommand: mirrorIncludeExplorerCommand,
+        includeOutputContractHeading: mirrorIncludeOutputContractHeading,
+        outputContractShapeMarker: mirrorOutputContractShapeMarker
+      }),
       "utf8"
     );
   }
@@ -114,6 +144,78 @@ test("governed skill inventory validates for the current repository", () => {
   assert.equal(report.errors.length, 0);
   assert.equal(report.checkedSkills, GOVERNED_SKILLS.length);
   assert.equal(auditGovernedSkills().ok, true);
+});
+
+test("governed mirror parity passes when repo and mirror are aligned", async () => {
+  const repositoryRoot = await createFixtureRepository();
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, true);
+    assert.equal(hasErrorCode(report, "missing_mirror_required_heading"), false);
+    assert.equal(hasErrorCode(report, "mismatched_mirror_output_contract_shape_marker"), false);
+    assert.equal(hasErrorCode(report, "mismatched_mirror_referenced_command_literal"), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("missing mirror required heading fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    mirrorIncludeOutputContractHeading: false
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "missing_mirror_required_heading"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("mismatched mirror output-contract marker fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    mirrorOutputContractShapeMarker: "verification_report"
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "mismatched_mirror_output_contract_shape_marker"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("mismatched mirror governed command literal fails", async () => {
+  const repositoryRoot = await createFixtureRepository({
+    mirrorIncludeExplorerCommand: false
+  });
+
+  try {
+    const report = validateGovernedSkills({
+      inventory: [createFixtureInventory()],
+      repositoryRoot
+    });
+
+    assert.equal(report.ok, false);
+    assert.equal(hasErrorCode(report, "mismatched_mirror_referenced_command_literal"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
 });
 
 test("missing Output Contract heading fails", async () => {
