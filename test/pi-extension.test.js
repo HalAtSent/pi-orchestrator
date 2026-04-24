@@ -1187,8 +1187,9 @@ test("pi extension auto command runs through an injected Pi-backed runner", asyn
   assert.match(execution.summary, /implementer=gpt-5\.3-codex/i);
   assert.match(notifications[0].message, /openai-codex/i);
   assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
-  assert.match(statuses[0].value, /openai-codex/i);
-  assert.match(statuses[0].value, /implementer=gpt-5\.3-codex/i);
+  assert.ok(statuses.some((event) => /auto: implementer running/u.test(event.value)));
+  assert.match(statuses.at(-1).value, /openai-codex/i);
+  assert.match(statuses.at(-1).value, /implementer=gpt-5\.3-codex/i);
 });
 
 test("pi extension build command creates a persisted build session before approval", async () => {

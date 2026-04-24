@@ -472,7 +472,8 @@ export function createProgramContractExecutor({
   executePlannedWorkflow = runPlannedWorkflow,
   approvedHighRisk = false,
   policyProfile = null,
-  maxRepairLoops = 1
+  maxRepairLoops = 1,
+  onProgress = null
 } = {}) {
   assert(runner && typeof runner.run === "function", "runner.run(packet, context) is required");
   assert(typeof compiler === "function", "compiler(contract) is required");
@@ -555,7 +556,8 @@ export function createProgramContractExecutor({
         maxRepairLoops,
         context
       }, {
-        runner
+        runner,
+        onProgress
       });
 
       return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {

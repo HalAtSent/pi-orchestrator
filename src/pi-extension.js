@@ -636,6 +636,56 @@ function resolveContractExecutorInvoker(contractExecutor) {
   throw new Error("contractExecutor(contract, context) is required");
 }
 
+function createPiProgressReporter(ctx, {
+  label = "workflow",
+  buildId = null
+} = {}) {
+  const ui = ctx?.ui;
+  const statusPrefix = buildId ? `build ${buildId}` : label;
+
+  const setStatus = (message) => {
+    if (typeof ui?.setStatus === "function") {
+      ui.setStatus("workflow", message);
+    }
+  };
+
+  const notify = (message, level = "info") => {
+    if (typeof ui?.notify === "function") {
+      ui.notify(message, level);
+    }
+  };
+
+  return async (event) => {
+    if (!event || typeof event !== "object") {
+      return;
+    }
+
+    if (event.type === "contract_start") {
+      const message = `${statusPrefix}: running contract ${event.contractId}`;
+      setStatus(message);
+      notify(message, "info");
+      return;
+    }
+
+    if (event.type === "contract_finish") {
+      setStatus(`${statusPrefix}: contract ${event.contractId} ${event.status}`);
+      return;
+    }
+
+    if (event.type === "packet_start") {
+      const iteration = Number.isInteger(event.iteration) && event.iteration > 0
+        ? ` repair ${event.iteration}`
+        : "";
+      setStatus(`${statusPrefix}: ${event.role}${iteration} running`);
+      return;
+    }
+
+    if (event.type === "packet_finish") {
+      setStatus(`${statusPrefix}: ${event.role} ${event.status}`);
+    }
+  };
+}
+
 export function createPiExtension({
   workerRunner = null,
   contractExecutor,
@@ -666,7 +716,7 @@ export function createPiExtension({
     const configuredContractExecutor = contractExecutor
       ? resolveContractExecutorInvoker(contractExecutor)
       : null;
-    const createExecutionProgramExecutor = ({ approvedHighRisk = false, policyProfile = null } = {}) => {
+    const createExecutionProgramExecutor = ({ approvedHighRisk = false, policyProfile = null, onProgress = null } = {}) => {
       const resolvedApproval = parseBooleanFlag(approvedHighRisk, {
         flagName: "approvedHighRisk",
         defaultValue: false
@@ -677,14 +727,16 @@ export function createPiExtension({
         return async (contract, context = {}) => configuredContractExecutor(contract, {
           ...(context && typeof context === "object" && !Array.isArray(context) ? context : {}),
           approvedHighRisk: resolvedApproval,
-          policyProfile: resolvedPolicyProfile
+          policyProfile: resolvedPolicyProfile,
+          onProgress
         });
       }
 
       return createProgramContractExecutor({
         runner: resolvedAutoRunner,
         approvedHighRisk: resolvedApproval,
-        policyProfile: resolvedPolicyProfile
+        policyProfile: resolvedPolicyProfile,
+        onProgress
       });
     };
 
@@ -878,12 +930,18 @@ export function createPiExtension({
             };
           });
 
+          const progressReporter = createPiProgressReporter(ctx, {
+            label: "build",
+            buildId: buildSession.buildId
+          });
           const runJournal = await runExecutionProgramFromApprovedBuildSession(lifecycle.executionProgram, {
             contractExecutor: createExecutionProgramExecutor({
-              policyProfile: buildSession.execution.policyProfile
+              policyProfile: buildSession.execution.policyProfile,
+              onProgress: progressReporter
             }),
             runStore,
-            buildId: buildSession.buildId
+            buildId: buildSession.buildId,
+            onProgress: progressReporter
           });
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
             if (!existingSession) {
@@ -1124,12 +1182,18 @@ export function createPiExtension({
             };
           });
 
+          const progressReporter = createPiProgressReporter(ctx, {
+            label: "build",
+            buildId
+          });
           const runJournal = await runExecutionProgramFromApprovedBuildSession(buildSession.lifecycle.executionProgram, {
             contractExecutor: createExecutionProgramExecutor({
-              policyProfile: buildSession.execution.policyProfile
+              policyProfile: buildSession.execution.policyProfile,
+              onProgress: progressReporter
             }),
             runStore,
-            buildId
+            buildId,
+            onProgress: progressReporter
           });
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
             if (!existingSession) {
@@ -1399,8 +1463,12 @@ export function createPiExtension({
           };
         }
 
+        const progressReporter = createPiProgressReporter(ctx, {
+          label: "auto"
+        });
         const execution = await runAutoWorkflow(input, {
-          runner: resolvedAutoRunner
+          runner: resolvedAutoRunner,
+          onProgress: progressReporter
         });
 
         const notification = execution.status === "success"
@@ -1426,9 +1494,13 @@ export function createPiExtension({
       description: "Execute an ExecutionProgram contract-by-contract with a configured contract executor.",
       handler: async (args, ctx) => {
         const { program, approvedHighRisk } = parseRunProgramArgs(args);
+        const progressReporter = createPiProgressReporter(ctx, {
+          label: "run-program"
+        });
         const runJournal = await runExecutionProgram(program, {
-          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk }),
-          runStore
+          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk, onProgress: progressReporter }),
+          runStore,
+          onProgress: progressReporter
         });
 
         ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");
@@ -1446,9 +1518,13 @@ export function createPiExtension({
       description: "Resume a persisted ExecutionProgram run from local run-state snapshots.",
       handler: async (args, ctx) => {
         const { programId, approvedHighRisk } = parseResumeProgramArgs(args);
+        const progressReporter = createPiProgressReporter(ctx, {
+          label: "resume-program"
+        });
         const runJournal = await resumeExecutionProgram(programId, {
-          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk }),
-          runStore
+          contractExecutor: createExecutionProgramExecutor({ approvedHighRisk, onProgress: progressReporter }),
+          runStore,
+          onProgress: progressReporter
         });
 
         ctx.ui.notify(`execution program ${runJournal.status}`, runJournal.status === "success" ? "info" : "warning");

@@ -49,6 +49,18 @@ function describeError(error) {
   return message.trim().length > 0 ? message : "Unknown error";
 }
 
+async function emitProgress(onProgress, event) {
+  if (typeof onProgress !== "function") {
+    return;
+  }
+
+  try {
+    await onProgress(clone(event));
+  } catch {
+    // Progress reporting is observational and must not change execution outcome.
+  }
+}
+
 function createInvalidExecutorResult(message) {
   return {
     status: "blocked",
@@ -598,7 +610,8 @@ async function runProgramFromState(program, {
   runStore,
   initialContractRuns = [],
   initialCompletedContractIds = [],
-  approvalBinding = null
+  approvalBinding = null,
+  onProgress = null
 }) {
   const topologyResult = validateProgramTopology(program);
   if (!topologyResult.ok) {
@@ -693,6 +706,14 @@ async function runProgramFromState(program, {
       return blockedJournal;
     }
 
+    await emitProgress(onProgress, {
+      type: "contract_start",
+      programId: program.id,
+      contractId: contract.id,
+      completedContractIds: [...completedContractIdSet],
+      pendingContractIds: [...pendingContractIdSet]
+    });
+
     let rawResult;
     let executionFailure = null;
     try {
@@ -756,6 +777,16 @@ async function runProgramFromState(program, {
       contractRunEntry.providerModelSelections = result.providerModelSelections;
     }
     contractRuns.push(contractRunEntry);
+
+    await emitProgress(onProgress, {
+      type: "contract_finish",
+      programId: program.id,
+      contractId: contract.id,
+      status: result.status,
+      summary: result.summary,
+      completedContractIds: [...completedContractIdSet],
+      pendingContractIds: [...pendingContractIdSet]
+    });
 
     if (result.status === "success") {
       completedContractIdSet.add(contract.id);
@@ -836,7 +867,8 @@ async function runProgramFromState(program, {
 
 export async function runExecutionProgram(programInput, {
   contractExecutor,
-  runStore
+  runStore,
+  onProgress = null
 } = {}) {
   const program = validateExecutionProgram(clone(programInput));
   const executeContract = resolveContractExecutor(contractExecutor);
@@ -846,14 +878,16 @@ export async function runExecutionProgram(programInput, {
     executeContract,
     runStore: resolvedRunStore,
     // Generic callers must not inject persisted approval lineage directly.
-    approvalBinding: null
+    approvalBinding: null,
+    onProgress
   });
 }
 
 export async function runExecutionProgramFromApprovedBuildSession(programInput, {
   contractExecutor,
   runStore,
-  buildId = null
+  buildId = null,
+  onProgress = null
 } = {}) {
   const program = validateExecutionProgram(clone(programInput));
   const executeContract = resolveContractExecutor(contractExecutor);
@@ -873,13 +907,15 @@ export async function runExecutionProgramFromApprovedBuildSession(programInput, 
   return runProgramFromState(program, {
     executeContract,
     runStore: resolvedRunStore,
-    approvalBinding: trustedApprovalBinding
+    approvalBinding: trustedApprovalBinding,
+    onProgress
   });
 }
 
 export async function resumeExecutionProgram(programIdInput, {
   contractExecutor,
-  runStore
+  runStore,
+  onProgress = null
 } = {}) {
   const programId = normalizeProgramId(programIdInput);
   const executeContract = resolveContractExecutor(contractExecutor);
@@ -936,7 +972,8 @@ export async function resumeExecutionProgram(programIdInput, {
     runStore: resolvedRunStore,
     initialContractRuns: runJournal.contractRuns,
     initialCompletedContractIds: runJournal.completedContractIds,
-    approvalBinding: runJournal.approvalBinding ?? null
+    approvalBinding: runJournal.approvalBinding ?? null,
+    onProgress
   });
 }
 

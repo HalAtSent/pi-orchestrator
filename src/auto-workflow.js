@@ -386,6 +386,18 @@ function toErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function emitProgress(onProgress, event) {
+  if (typeof onProgress !== "function") {
+    return;
+  }
+
+  try {
+    await onProgress(clone(event));
+  } catch {
+    // Progress reporting is observational and must not change execution outcome.
+  }
+}
+
 function resolveContextRepositoryRoot() {
   return process.cwd();
 }
@@ -530,8 +542,18 @@ async function executePacket({
   repairCount,
   reviewResult = null,
   iteration = 0,
-  baseContext = {}
+  baseContext = {},
+  onProgress = null
 }) {
+  await emitProgress(onProgress, {
+    type: "packet_start",
+    packetId: packet.id,
+    role: packet.role,
+    workflowId: workflow.workflowId,
+    iteration,
+    repairCount
+  });
+
   let context;
 
   try {
@@ -560,6 +582,16 @@ async function executePacket({
     };
 
     runs.push(run);
+    await emitProgress(onProgress, {
+      type: "packet_finish",
+      packetId: packet.id,
+      role: packet.role,
+      workflowId: workflow.workflowId,
+      iteration,
+      repairCount,
+      status: result.status,
+      summary: result.summary
+    });
     return run;
   }
 
@@ -614,6 +646,16 @@ async function executePacket({
   };
 
   runs.push(run);
+  await emitProgress(onProgress, {
+    type: "packet_finish",
+    packetId: packet.id,
+    role: packet.role,
+    workflowId: workflow.workflowId,
+    iteration,
+    repairCount,
+    status: result.status,
+    summary: result.summary
+  });
   return run;
 }
 
@@ -714,7 +756,7 @@ function createRepairPacket({ workflow, packet, role, repairCount }) {
   return repairPacket;
 }
 
-async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount, baseContext }) {
+async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount, baseContext, onProgress }) {
   const implementerPacket = createRepairPacket({
     workflow,
     packet: reviewerPacket,
@@ -728,7 +770,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     runs,
     repairCount,
     iteration: repairCount,
-    baseContext
+    baseContext,
+    onProgress
   });
 
   if (repairRun.result.status !== "success") {
@@ -752,7 +795,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     repairCount,
     reviewResult: repairRun.result,
     iteration: repairCount,
-    baseContext
+    baseContext,
+    onProgress
   });
 
   return {
@@ -765,7 +809,7 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
   };
 }
 
-export async function runPlannedWorkflow(input, { runner } = {}) {
+export async function runPlannedWorkflow(input, { runner, onProgress = null } = {}) {
   assertRunner(runner);
   const normalizedInput = normalizePlannedWorkflowInput(input);
   const workflow = normalizedInput.workflow;
@@ -792,7 +836,8 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
       workflow,
       runs,
       repairCount,
-      baseContext
+      baseContext,
+      onProgress
     });
 
     if (packet.role === "reviewer" && run.result.status === "repair_required") {
@@ -814,7 +859,8 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
         reviewerPacket: packet,
         runs,
         repairCount,
-        baseContext
+        baseContext,
+        onProgress
       });
 
       if (repairOutcome.status !== "success") {
@@ -853,7 +899,7 @@ export async function runPlannedWorkflow(input, { runner } = {}) {
   });
 }
 
-export async function runAutoWorkflow(input, { runner } = {}) {
+export async function runAutoWorkflow(input, { runner, onProgress = null } = {}) {
   let normalizedInput;
   let workflow;
 
@@ -896,7 +942,7 @@ export async function runAutoWorkflow(input, { runner } = {}) {
     workflow,
     approvedHighRisk: normalizedInput.approvedHighRisk,
     maxRepairLoops: normalizedInput.maxRepairLoops
-  }, { runner });
+  }, { runner, onProgress });
 }
 
 export function formatWorkflowExecution(execution) {
