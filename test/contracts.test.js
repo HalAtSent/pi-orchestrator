@@ -68,6 +68,25 @@ test("createTaskPacket rejects whitespace-only entries in forbiddenFiles and com
   );
 });
 
+test("createTaskPacket rejects absolute and escaping scope paths", () => {
+  for (const [fieldName, value] of [
+    ["allowedFiles", "/tmp/outside.txt"],
+    ["allowedFiles", "../outside.txt"],
+    ["allowedFiles", "C:outside.txt"],
+    ["forbiddenFiles", "src/../outside.txt"],
+    ["contextFiles", "docs/../../outside.txt"]
+  ]) {
+    assert.throws(
+      () => createTaskPacket(validTaskPacket({
+        [fieldName]: [value],
+        contextManifest: undefined
+      })),
+      /must be a repository-relative path|must not escape the repository root/u,
+      `${fieldName}: ${value}`
+    );
+  }
+});
+
 test("createTaskPacket rejects malformed contextManifest entries", () => {
   assert.throws(
     () => createTaskPacket(validTaskPacket({

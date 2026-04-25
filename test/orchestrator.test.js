@@ -8,6 +8,8 @@ import { validateWorkerResult } from "../src/contracts.js";
 
 test("protected paths are recognized", () => {
   assert.equal(isProtectedPath(".env"), true);
+  assert.equal(isProtectedPath(".git/config"), true);
+  assert.equal(isProtectedPath(".pi/build-sessions/build-1.json"), true);
   assert.equal(isProtectedPath("node_modules/react/index.js"), true);
   assert.equal(isProtectedPath("src/app.ts"), false);
 });
@@ -98,6 +100,47 @@ test("protected allowlist entries are rejected before packet creation", () => {
     }),
     /allowedFiles contains protected path\(s\): node_modules\/pkg\/index\.js/u
   );
+});
+
+test("git and harness state paths are high-risk, human-gated, and protected", () => {
+  for (const pathValue of [
+    ".git/config",
+    ".pi/build-sessions/build-1.json"
+  ]) {
+    assert.equal(classifyRisk({
+      goal: "Update local harness state",
+      allowedFiles: [pathValue]
+    }), "high", pathValue);
+    assert.equal(requiresHumanGate({
+      goal: "Update local harness state",
+      allowedFiles: [pathValue]
+    }), true, pathValue);
+    assert.throws(
+      () => createInitialWorkflow({
+        goal: "Update local harness state",
+        allowedFiles: [pathValue]
+      }),
+      /allowedFiles contains protected path/u,
+      pathValue
+    );
+  }
+});
+
+test("escaping allowlist paths are rejected before packet creation", () => {
+  for (const pathValue of [
+    "/tmp/outside.txt",
+    "../outside.txt",
+    "src/../outside.txt"
+  ]) {
+    assert.throws(
+      () => createInitialWorkflow({
+        goal: "Update one scoped file",
+        allowedFiles: [pathValue]
+      }),
+      /must be a repository-relative path|must not escape the repository root/u,
+      pathValue
+    );
+  }
 });
 
 test("matching allow and forbidden paths are rejected before packet creation", () => {

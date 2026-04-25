@@ -481,6 +481,7 @@ function modulesFor(projectType) {
           "src/boolean-flags.js",
           "src/helpers.js",
           "src/orchestrator.js",
+          "src/path-safety.js",
           "src/path-scopes.js",
           "src/policies.js",
           "src/policy-profiles.js",

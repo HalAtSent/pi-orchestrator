@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { AUTO_BACKEND_MODES } from "../src/auto-backend-runner.js";
-import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
+import {
+  createProcessWorkerBackend as createRawProcessWorkerBackend,
+  PROCESS_WORKER_SANDBOX_POLICIES
+} from "../src/process-worker-backend.js";
 import {
   buildProjectLifecycleArtifacts,
   createExecutionProgramPlanFingerprint,
@@ -16,6 +19,7 @@ import { createPiWorkerRunner } from "../src/pi-worker-runner.js";
 import { createScriptedWorkerRunner } from "../src/worker-runner.js";
 import { createBuildSessionStore } from "../src/build-session-store.js";
 import { createRunStore } from "../src/run-store.js";
+import { getTrustedRuntimeRepositoryRoot } from "../src/context-manifest.js";
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
@@ -30,11 +34,49 @@ async function withTempDir(prefix, callback) {
   }
 }
 
+function createProcessWorkerBackend(options = {}) {
+  return createRawProcessWorkerBackend({
+    processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.DISABLED,
+    unsandboxedProcessBackendOptIn: true,
+    ...options
+  });
+}
+
+async function withWorkingDirectory(nextCwd, operation) {
+  const currentCwd = process.cwd();
+  process.chdir(nextCwd);
+  try {
+    return await operation();
+  } finally {
+    process.chdir(currentCwd);
+  }
+}
+
 function createUiStub() {
   return {
     notify() {},
     setStatus() {}
   };
+}
+
+function getRuntimeRepositoryRootForTest(runtimeContext) {
+  return getTrustedRuntimeRepositoryRoot(runtimeContext?.context)
+    ?? getTrustedRuntimeRepositoryRoot(runtimeContext?.workflowContext)
+    ?? getTrustedRuntimeRepositoryRoot(runtimeContext);
+}
+
+async function writeObservedChangeForRequest(request, runtimeContext) {
+  if (request?.role !== "implementer") {
+    return;
+  }
+  const repositoryRoot = getRuntimeRepositoryRootForTest(runtimeContext);
+  const changedPath = Array.isArray(request.allowedFiles) ? request.allowedFiles[0] : null;
+  if (typeof repositoryRoot !== "string" || typeof changedPath !== "string" || changedPath.endsWith("/")) {
+    return;
+  }
+  const absolutePath = join(repositoryRoot, ...changedPath.split("/"));
+  await mkdir(dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, `observed change for ${request.role}\n`, "utf8");
 }
 
 function createStubBuildSession({
@@ -208,26 +250,40 @@ test("pi extension entrypoint imports without undeclared runtime dependencies", 
   assert.equal(typeof module.createPiExtension, "function");
 });
 
-test("default export routes /auto through the Pi adapter and worker runner", async () => {
-  const module = await import("../src/pi-extension.js");
-  const requestedRuns = [];
+test("pi extension wires native model probe for host.runtime.runWorker", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  let capturedModelProbe = null;
   const registeredCommands = new Map();
-
-  module.default({
-    async runWorker(request, runtimeContext) {
-      requestedRuns.push({
-        request,
-        runtimeContext
-      });
-
+  const extension = createPiExtension({
+    workerRunnerFactory({ modelProbe }) {
+      capturedModelProbe = modelProbe;
       return {
-        status: "success",
-        summary: `${request.role} completed`,
-        changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
-        commandsRun: [...request.commands],
-        evidence: [`role=${request.role}`],
-        openQuestions: []
+        async run(packet) {
+          return {
+            status: "success",
+            summary: `${packet.role} completed`,
+            changedFiles: [],
+            commandsRun: [],
+            evidence: [],
+            openQuestions: []
+          };
+        }
       };
+    }
+  });
+
+  extension({
+    runtime: {
+      async runWorker() {
+        return {
+          status: "success",
+          summary: "runtime worker completed",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
     },
     registerCommand(name, config) {
       registeredCommands.set(name, config);
@@ -235,22 +291,66 @@ test("default export routes /auto through the Pi adapter and worker runner", asy
     registerTool() {}
   });
 
-  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
-    goal: "Rename a helper in one file",
-    allowedFiles: ["src/helpers.js"],
-    maxRepairLoops: 1
-  }), {
-    ui: {
-      notify() {},
-      setStatus() {}
-    }
-  });
+  assert.equal(typeof capturedModelProbe, "function");
+  assert.equal(registeredCommands.has("auto"), true);
+});
 
-  assert.equal(execution.status, "success");
-  assert.deepEqual(requestedRuns.map((entry) => entry.request.role), ["implementer", "verifier"]);
-  assert.equal(requestedRuns[0].request.controls.noRecursiveDelegation, true);
-  assert.equal(requestedRuns[0].request.controls.writePolicy, "allowlist_only");
-  assert.equal(requestedRuns[1].request.controls.writePolicy, "read_only");
+test("default export routes /auto through the Pi adapter and worker runner", async () => {
+  await withTempDir("pi-orchestrator-extension-auto-", async (repositoryRoot) => {
+    await withWorkingDirectory(repositoryRoot, async () => {
+      const targetPath = join(repositoryRoot, "src/helpers.js");
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, "initial helper\n", "utf8");
+
+      const module = await import("../src/pi-extension.js");
+      const requestedRuns = [];
+      const registeredCommands = new Map();
+
+      module.default({
+        supportedModels: ["gpt-5.5"],
+        async runWorker(request, runtimeContext) {
+          requestedRuns.push({
+            request,
+            runtimeContext
+          });
+          await writeObservedChangeForRequest(request, runtimeContext);
+          if (request.role === "implementer") {
+            await writeFile(targetPath, "observed extension change\n", "utf8");
+          }
+
+          return {
+            status: "success",
+            summary: `${request.role} completed`,
+            changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
+            commandsRun: [...request.commands],
+            evidence: [`role=${request.role}`],
+            openQuestions: []
+          };
+        },
+        registerCommand(name, config) {
+          registeredCommands.set(name, config);
+        },
+        registerTool() {}
+      });
+
+      const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+        goal: "Rename a helper in one file",
+        allowedFiles: ["src/helpers.js"],
+        maxRepairLoops: 1
+      }), {
+        ui: {
+          notify() {},
+          setStatus() {}
+        }
+      });
+
+      assert.equal(execution.status, "success");
+      assert.deepEqual(requestedRuns.map((entry) => entry.request.role), ["implementer", "verifier"]);
+      assert.equal(requestedRuns[0].request.controls.noRecursiveDelegation, true);
+      assert.equal(requestedRuns[0].request.controls.writePolicy, "allowlist_only");
+      assert.equal(requestedRuns[1].request.controls.writePolicy, "read_only");
+    });
+  });
 });
 
 test("default export blocks /auto when the allowlist is empty", async () => {
@@ -259,11 +359,13 @@ test("default export blocks /auto when the allowlist is empty", async () => {
   const registeredCommands = new Map();
 
   module.default({
+    supportedModels: ["gpt-5.5"],
     async runWorker(request, runtimeContext) {
       requestedRuns.push({
         request,
         runtimeContext
       });
+      await writeObservedChangeForRequest(request, runtimeContext);
 
       return {
         status: "success",
@@ -298,49 +400,62 @@ test("default export blocks /auto when the allowlist is empty", async () => {
 });
 
 test("default export routes approved high-risk /auto runs through all worker roles", async () => {
-  const module = await import("../src/pi-extension.js");
-  const requestedRuns = [];
-  const registeredCommands = new Map();
+  await withTempDir("pi-orchestrator-extension-high-risk-", async (repositoryRoot) => {
+    await withWorkingDirectory(repositoryRoot, async () => {
+      const targetPath = join(repositoryRoot, "platform/contracts/ingest/artifact.json");
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, "{\"changed\":false}\n", "utf8");
 
-  module.default({
-    async runWorker(request, runtimeContext) {
-      requestedRuns.push({
-        request,
-        runtimeContext
+      const module = await import("../src/pi-extension.js");
+      const requestedRuns = [];
+      const registeredCommands = new Map();
+
+      module.default({
+        supportedModels: ["gpt-5.5"],
+        async runWorker(request, runtimeContext) {
+          requestedRuns.push({
+            request,
+            runtimeContext
+          });
+          await writeObservedChangeForRequest(request, runtimeContext);
+          if (request.role === "implementer") {
+            await writeFile(targetPath, "{\"changed\":true}\n", "utf8");
+          }
+
+          return {
+            status: "success",
+            summary: `${request.role} completed`,
+            changedFiles: request.role === "implementer" ? ["platform/contracts/ingest/artifact.json"] : [],
+            commandsRun: [...request.commands],
+            evidence: [`role=${request.role}`],
+            openQuestions: []
+          };
+        },
+        registerCommand(name, config) {
+          registeredCommands.set(name, config);
+        },
+        registerTool() {}
       });
 
-      return {
-        status: "success",
-        summary: `${request.role} completed`,
-        changedFiles: request.role === "implementer" ? ["platform/contracts/ingest/artifact.json"] : [],
-        commandsRun: [...request.commands],
-        evidence: [`role=${request.role}`],
-        openQuestions: []
-      };
-    },
-    registerCommand(name, config) {
-      registeredCommands.set(name, config);
-    },
-    registerTool() {}
-  });
+      const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+        goal: "Apply a schema migration for billing events",
+        allowedFiles: ["platform/contracts/ingest/artifact.json"],
+        approvedHighRisk: "true",
+        maxRepairLoops: 1
+      }), {
+        ui: {
+          notify() {},
+          setStatus() {}
+        }
+      });
 
-  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
-    goal: "Apply a schema migration for billing events",
-    allowedFiles: ["platform/contracts/ingest/artifact.json"],
-    approvedHighRisk: "true",
-    maxRepairLoops: 1
-  }), {
-    ui: {
-      notify() {},
-      setStatus() {}
-    }
+      assert.equal(execution.status, "success");
+      assert.deepEqual(
+        requestedRuns.map((entry) => entry.request.role),
+        ["explorer", "implementer", "reviewer", "verifier"]
+      );
+    });
   });
-
-  assert.equal(execution.status, "success");
-  assert.deepEqual(
-    requestedRuns.map((entry) => entry.request.role),
-    ["explorer", "implementer", "reviewer", "verifier"]
-  );
 });
 
 test("default export keeps high-risk /auto gated when approvedHighRisk is string false", async () => {
@@ -453,6 +568,117 @@ test("pi extension can route low-risk /auto implementer and verifier work throug
     assert.equal(processBackend.getCalls()[0].packet.role, "implementer");
     assert.equal(processBackend.getCalls()[1].packet.role, "verifier");
   });
+});
+
+test("pi extension process-backend progress heartbeats are visible in operator status", async () => {
+  await withTempDir("pi-orchestrator-process-heartbeat-", async (repositoryRoot) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const processBackend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ packet, targetAbsolutePath }) => {
+        await new Promise((resolve) => {
+          setTimeout(resolve, 30);
+        });
+
+        if (packet.role === "implementer") {
+          await mkdir(dirname(targetAbsolutePath), { recursive: true });
+          await writeFile(targetAbsolutePath, "process backend updated this file\n", "utf8");
+          return createFakeProcessLaunchResult("implementer completed");
+        }
+
+        return createFakeProcessLaunchResult(JSON.stringify({
+          status: "success",
+          summary: "Verification checks passed.",
+          evidence: ["Verification evidence collected."],
+          openQuestions: []
+        }));
+      }
+    });
+
+    const registeredCommands = new Map();
+    const uiEvents = [];
+    const extension = createPiExtension({
+      processWorkerBackend: processBackend,
+      autoBackendMode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER,
+      processHeartbeatIntervalMs: 10
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool() {}
+    });
+
+    const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+      goal: "Rename a helper in one file",
+      allowedFiles: ["src/helpers.js"],
+      maxRepairLoops: 1
+    }), {
+      ui: {
+        notify(message, level) {
+          uiEvents.push({ message, level });
+        },
+        setStatus(scope, value) {
+          uiEvents.push({ scope, value });
+        }
+      }
+    });
+
+    assert.equal(execution.status, "success");
+    assert.equal(
+      uiEvents.some((event) => typeof event.value === "string" &&
+        /run .* implementer via process_backend active elapsed .* budget unknown/u.test(event.value)),
+      true
+    );
+    assert.equal(
+      uiEvents.some((event) => typeof event.message === "string" &&
+        /implementer via process_backend active elapsed/u.test(event.message)),
+      true
+    );
+  });
+});
+
+test("pi extension tiny-edit blocks protected allowlist paths before worker execution", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const requestedRuns = [];
+
+  const extension = createPiExtension({
+    workerRunner: {
+      async run(packet, context) {
+        requestedRuns.push({ packet, context });
+        return {
+          status: "success",
+          summary: "should not run",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  assert.equal(registeredCommands.has("tiny-edit"), true);
+
+  const result = await registeredCommands.get("tiny-edit").handler(JSON.stringify({
+    goal: "Update local docs",
+    allowedFiles: [".env"]
+  }), {
+    ui: createUiStub()
+  });
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.stopReason, /protected path/i);
+  assert.equal(requestedRuns.length, 0);
 });
 
 test("pi extension can route approved high-risk /auto work through process subagents when explicitly configured", async () => {
@@ -599,9 +825,9 @@ test("pi extension exposes worker runtime diagnostics and blocked auto includes 
   });
 
   assert.equal(execution.status, "blocked");
-  assert.match(execution.stopReason, /does not expose runWorker/i);
+  assert.match(execution.stopReason, /does not expose runWorker|repository snapshot path must not be a symlink/i);
   assert.equal(
-    uiEvents.some((event) => event.message && /does not expose runWorker/i.test(event.message)),
+    uiEvents.some((event) => event.message && /does not expose runWorker|repository snapshot path must not be a symlink/i.test(event.message)),
     true
   );
 });
@@ -1123,73 +1349,82 @@ test("pi extension run-program executes a declared high-risk contract when appro
 });
 
 test("pi extension auto command runs through an injected Pi-backed runner", async () => {
-  const { createPiExtension } = await import("../src/pi-extension.js");
-  const requestedRoles = [];
-  const notifications = [];
-  const statuses = [];
-  const runner = createPiWorkerRunner({
-    adapter: {
-      async runWorker(request) {
-        requestedRoles.push(request.role);
-        return {
-          status: "success",
-          summary: `${request.role} completed`,
-          changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
-          commandsRun: [...request.commands],
-          evidence: request.role === "implementer"
-            ? [
-              `role=${request.role}`,
-              "selected_provider: openai-codex",
-              "selected_model: gpt-5.3-codex"
-            ]
-            : [
-              `role=${request.role}`,
-              "selected_provider: openai-codex",
-              "selected_model: gpt-5.4-mini"
-            ],
-          openQuestions: []
-        };
-      }
-    }
-  });
-  const registeredCommands = new Map();
+  await withTempDir("pi-orchestrator-extension-injected-auto-", async (repositoryRoot) => {
+    await withWorkingDirectory(repositoryRoot, async () => {
+      const targetPath = join(repositoryRoot, "src/helpers.js");
+      await mkdir(dirname(targetPath), { recursive: true });
+      await writeFile(targetPath, "initial helper\n", "utf8");
 
-  const extension = createPiExtension({
-    workerRunner: runner
-  });
+      const { createPiExtension } = await import("../src/pi-extension.js");
+      const requestedRoles = [];
+      const notifications = [];
+      const statuses = [];
+      const runner = createPiWorkerRunner({
+        adapter: {
+          async runWorker(request, runtimeContext) {
+            requestedRoles.push(request.role);
+            await writeObservedChangeForRequest(request, runtimeContext);
+            return {
+              status: "success",
+              summary: `${request.role} completed`,
+              changedFiles: request.role === "implementer" ? ["src/helpers.js"] : [],
+              commandsRun: [...request.commands],
+              evidence: request.role === "implementer"
+                ? [
+                  `role=${request.role}`,
+                  "selected_provider: openai-codex",
+                  "selected_model: gpt-5.3-codex"
+                ]
+                : [
+                  `role=${request.role}`,
+                  "selected_provider: openai-codex",
+                  "selected_model: gpt-5.4-mini"
+                ],
+              openQuestions: []
+            };
+          }
+        }
+      });
+      const registeredCommands = new Map();
 
-  extension({
-    registerCommand(name, config) {
-      registeredCommands.set(name, config);
-    },
-    registerTool() {}
-  });
+      const extension = createPiExtension({
+        workerRunner: runner
+      });
 
-  const execution = await registeredCommands.get("auto").handler(JSON.stringify({
-    goal: "Rename a helper in one file",
-    allowedFiles: ["src/helpers.js"],
-    maxRepairLoops: 1
-  }), {
-    ui: {
-      notify(message, tone) {
-        notifications.push({ message, tone });
-      },
-      setStatus(key, value) {
-        statuses.push({ key, value });
-      }
-    }
-  });
+      extension({
+        registerCommand(name, config) {
+          registeredCommands.set(name, config);
+        },
+        registerTool() {}
+      });
 
-  assert.equal(execution.status, "success");
-  assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
-  assert.equal(execution.runs.length, 2);
-  assert.match(execution.summary, /openai-codex/i);
-  assert.match(execution.summary, /implementer=gpt-5\.3-codex/i);
-  assert.match(notifications[0].message, /openai-codex/i);
-  assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
-  assert.ok(statuses.some((event) => /auto: implementer running/u.test(event.value)));
-  assert.match(statuses.at(-1).value, /openai-codex/i);
-  assert.match(statuses.at(-1).value, /implementer=gpt-5\.3-codex/i);
+      const execution = await registeredCommands.get("auto").handler(JSON.stringify({
+        goal: "Rename a helper in one file",
+        allowedFiles: ["src/helpers.js"],
+        maxRepairLoops: 1
+      }), {
+        ui: {
+          notify(message, tone) {
+            notifications.push({ message, tone });
+          },
+          setStatus(key, value) {
+            statuses.push({ key, value });
+          }
+        }
+      });
+
+      assert.equal(execution.status, "success");
+      assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
+      assert.equal(execution.runs.length, 2);
+      assert.match(execution.summary, /openai-codex/i);
+      assert.match(execution.summary, /implementer=gpt-5\.3-codex/i);
+      assert.match(notifications[0].message, /openai-codex/i);
+      assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
+      assert.ok(statuses.some((event) => /auto: implementer running/u.test(event.value)));
+      assert.match(statuses.at(-1).value, /openai-codex/i);
+      assert.match(statuses.at(-1).value, /implementer=gpt-5\.3-codex/i);
+    });
+  });
 });
 
 test("pi extension build command creates a persisted build session before approval", async () => {

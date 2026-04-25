@@ -473,7 +473,8 @@ export function createProgramContractExecutor({
   approvedHighRisk = false,
   policyProfile = null,
   maxRepairLoops = 1,
-  onProgress = null
+  onProgress = null,
+  heartbeatIntervalMs = null
 } = {}) {
   assert(runner && typeof runner.run === "function", "runner.run(packet, context) is required");
   assert(typeof compiler === "function", "compiler(contract) is required");
@@ -557,7 +558,8 @@ export function createProgramContractExecutor({
         context
       }, {
         runner,
-        onProgress
+        onProgress,
+        ...(Number.isInteger(heartbeatIntervalMs) && heartbeatIntervalMs > 0 ? { heartbeatIntervalMs } : {})
       });
 
       return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {

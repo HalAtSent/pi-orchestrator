@@ -1,5 +1,11 @@
+import { createHash } from "node:crypto";
+import { lstat, readFile, readdir, readlink, realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+
 import { createWorkerResult, validateTaskPacket } from "./contracts.js";
+import { assertExistingPathHasNoSymlinkSegments, assertWithinRoot } from "./path-safety.js";
 import { isPathWithinScope, normalizeScopedPath, scopesOverlap } from "./path-scopes.js";
+import { findProtectedPacketPaths } from "./policies.js";
 import { safeClone } from "./safe-clone.js";
 import {
   getTrustedForwardedRedactionMetadata,
@@ -12,29 +18,40 @@ import {
 
 const READ_ONLY_ACCESS = "read_only";
 const WRITE_ACCESS = "write";
+const DEFAULT_PI_PROVIDER = "openai-codex";
+const DEFAULT_PI_MODEL_FALLBACKS = Object.freeze(["gpt-5.4", "gpt-5.3-codex"]);
+const SNAPSHOT_DIRECTORY_BATCH_SIZE = 64;
 
 export const DEFAULT_PI_ROLE_PROFILES = Object.freeze({
   explorer: Object.freeze({
+    provider: DEFAULT_PI_PROVIDER,
     access: READ_ONLY_ACCESS,
-    model: "gpt-5.4",
+    model: "gpt-5.5",
+    thinking: "high",
     reasoningEffort: "high",
     objective: "Map code and constraints without editing files."
   }),
   implementer: Object.freeze({
+    provider: DEFAULT_PI_PROVIDER,
     access: WRITE_ACCESS,
-    model: "gpt-5.3-codex-spark",
+    model: "gpt-5.5",
+    thinking: "medium",
     reasoningEffort: "medium",
     objective: "Deliver scoped code changes within the file allowlist."
   }),
   reviewer: Object.freeze({
+    provider: DEFAULT_PI_PROVIDER,
     access: READ_ONLY_ACCESS,
-    model: "gpt-5.4",
+    model: "gpt-5.5",
+    thinking: "high",
     reasoningEffort: "high",
     objective: "Provide independent read-only review findings."
   }),
   verifier: Object.freeze({
+    provider: DEFAULT_PI_PROVIDER,
     access: READ_ONLY_ACCESS,
-    model: "gpt-5.4-mini",
+    model: "gpt-5.5",
+    thinking: "medium",
     reasoningEffort: "medium",
     objective: "Collect targeted verification evidence only."
   })
@@ -56,6 +73,12 @@ function unique(values) {
 
 function normalizeFileList(files = []) {
   return unique(files.map((path) => normalizeScopedPath(path)));
+}
+
+async function visitDirectoryEntriesInBatches(entries, visitEntry) {
+  for (let index = 0; index < entries.length; index += SNAPSHOT_DIRECTORY_BATCH_SIZE) {
+    await Promise.all(entries.slice(index, index + SNAPSHOT_DIRECTORY_BATCH_SIZE).map(visitEntry));
+  }
 }
 
 function normalizePacket(packet) {
@@ -161,25 +184,339 @@ function createFailedResult({ role, summary, evidence = [], openQuestions = [] }
   });
 }
 
-function normalizeRoleProfiles(roleProfiles) {
+function normalizeRoleProfiles(roleProfiles, {
+  allowFallbacks = false
+} = {}) {
   assert(roleProfiles && typeof roleProfiles === "object", "roleProfiles must be an object");
 
   const normalized = {};
   for (const [role, profile] of Object.entries(roleProfiles)) {
     assert(profile && typeof profile === "object", `role profile for ${role} must be an object`);
 
-    const access = profile.access === WRITE_ACCESS ? WRITE_ACCESS : READ_ONLY_ACCESS;
+    const access = profile.access === WRITE_ACCESS
+      ? WRITE_ACCESS
+      : profile.access === READ_ONLY_ACCESS
+        ? READ_ONLY_ACCESS
+        : allowFallbacks
+          ? READ_ONLY_ACCESS
+          : null;
+    const provider = typeof profile.provider === "string" && profile.provider.trim().length > 0
+      ? profile.provider.trim()
+      : allowFallbacks
+        ? DEFAULT_PI_PROVIDER
+        : null;
+    const model = typeof profile.model === "string" && profile.model.trim().length > 0
+      ? profile.model.trim()
+      : null;
+    const thinking = typeof profile.thinking === "string" && profile.thinking.trim().length > 0
+      ? profile.thinking.trim()
+      : typeof profile.reasoningEffort === "string" && profile.reasoningEffort.trim().length > 0
+        ? profile.reasoningEffort.trim()
+        : allowFallbacks
+          ? "medium"
+          : null;
+
+    assert(access, `role profile for ${role} must include access`);
+    assert(provider, `role profile for ${role} must include provider`);
+    assert(model, `role profile for ${role} must include model`);
+    assert(thinking, `role profile for ${role} must include thinking or reasoningEffort`);
+
     normalized[role] = Object.freeze({
       ...clone(profile),
-      access
+      access,
+      provider,
+      model,
+      thinking,
+      reasoningEffort: typeof profile.reasoningEffort === "string" && profile.reasoningEffort.trim().length > 0
+        ? profile.reasoningEffort.trim()
+        : thinking
     });
   }
 
   return Object.freeze(normalized);
 }
 
+function normalizeModelFallbacks(modelFallbacks) {
+  assert(Array.isArray(modelFallbacks), "modelFallbacks must be an array");
+  return unique(
+    modelFallbacks
+      .map((model) => String(model).trim())
+      .filter((model) => model.length > 0)
+  );
+}
+
+function extractSupportedModels(probeResult) {
+  return Array.isArray(probeResult?.supportedModels)
+    ? unique(
+      probeResult.supportedModels
+        .map((model) => String(model).trim())
+        .filter((model) => model.length > 0)
+    )
+    : [];
+}
+
+async function resolveRoleProfileModel({
+  role,
+  roleProfile,
+  modelProbe,
+  modelFallbacks,
+  context
+}) {
+  const requestedProvider = roleProfile.provider;
+  const requestedModel = roleProfile.model;
+
+  if (typeof modelProbe !== "function") {
+    return {
+      ok: true,
+      roleProfile,
+      evidence: [
+        `requested_provider: ${requestedProvider}`,
+        `requested_model: ${requestedModel}`,
+        `selected_provider: ${requestedProvider}`,
+        `selected_model: ${requestedModel}`,
+        "model_selection_mode: unprobed",
+        "model_selection_reason: native_pi_model_probe_not_configured"
+      ]
+    };
+  }
+
+  const candidateModels = unique([requestedModel, ...modelFallbacks]);
+  const probeResult = await modelProbe({
+    providerId: requestedProvider,
+    candidateModels,
+    role,
+    roleProfile: clone(roleProfile),
+    context: clone(context)
+  });
+  const supportedModels = extractSupportedModels(probeResult);
+  const supportedModelSet = new Set(supportedModels);
+  const selectedModel = supportedModelSet.has(requestedModel)
+    ? requestedModel
+    : modelFallbacks.find((fallbackModel) => supportedModelSet.has(fallbackModel)) ?? null;
+
+  const baseEvidence = [
+    `requested_provider: ${requestedProvider}`,
+    `requested_model: ${requestedModel}`,
+    `supported_provider_models: ${supportedModels.length === 0 ? "none" : supportedModels.join(", ")}`
+  ];
+
+  if (selectedModel) {
+    return {
+      ok: true,
+      roleProfile: Object.freeze({
+        ...clone(roleProfile),
+        model: selectedModel
+      }),
+      evidence: [
+        ...baseEvidence,
+        `selected_provider: ${requestedProvider}`,
+        `selected_model: ${selectedModel}`,
+        `model_selection_mode: ${selectedModel === requestedModel ? "direct" : "fallback"}`,
+        `model_selection_reason: ${selectedModel === requestedModel ? "preferred_model_supported" : "preferred_model_unavailable"}`
+      ]
+    };
+  }
+
+  return {
+    ok: false,
+    reason: probeResult?.blockedReason
+      ? `model probe failed: ${probeResult.blockedReason}`
+      : `provider ${requestedProvider} does not support requested model ${requestedModel} or configured fallbacks`,
+    evidence: [
+      ...baseEvidence,
+      "selected_provider: none",
+      "selected_model: none",
+      "model_selection_mode: blocked",
+      "model_selection_reason: preferred_and_fallback_models_unavailable"
+    ]
+  };
+}
+
 function isWriteRole(roleProfile) {
   return roleProfile.access === WRITE_ACCESS;
+}
+
+async function snapshotScopedFiles(repositoryRoot, scopedPaths) {
+  const root = resolve(repositoryRoot);
+  const snapshot = new Map();
+
+  async function visit(relativePath) {
+    const normalizedRelativePath = normalizeScopedPath(relativePath);
+    const absolutePath = resolve(root, normalizedRelativePath);
+    let stats;
+    try {
+      stats = await lstat(absolutePath);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        snapshot.set(normalizedRelativePath, "missing");
+        return;
+      }
+      throw error;
+    }
+
+    if (stats.isSymbolicLink()) {
+      const target = await readlink(absolutePath);
+      snapshot.set(
+        normalizedRelativePath,
+        `symlink:${stats.size}:${stats.mode}:${stats.uid}:${stats.gid}:${stats.mtimeMs}:${stats.ctimeMs}:${target}`
+      );
+      return;
+    }
+
+    if (stats.isDirectory()) {
+      snapshot.set(normalizedRelativePath.endsWith("/") ? normalizedRelativePath : `${normalizedRelativePath}/`, "directory");
+      const entries = await readdir(absolutePath, { withFileTypes: true });
+      await visitDirectoryEntriesInBatches(entries, async (entry) => {
+        await visit(`${normalizedRelativePath.replace(/\/$/u, "")}/${entry.name}`);
+      });
+      return;
+    }
+
+    if (!stats.isFile()) {
+      snapshot.set(normalizedRelativePath, `special:${stats.size}:${stats.mtimeMs}`);
+      return;
+    }
+
+    const content = await readFile(absolutePath);
+    const digest = createHash("sha256").update(content).digest("hex");
+    snapshot.set(normalizedRelativePath, `file:${stats.size}:${digest}`);
+  }
+
+  for (const scopedPath of normalizeFileList(scopedPaths)) {
+    await visit(scopedPath);
+  }
+
+  return snapshot;
+}
+
+async function snapshotRepositoryFiles(repositoryRoot) {
+  const root = resolve(repositoryRoot);
+  const rootRealPath = await realpath(root);
+  const snapshot = new Map();
+
+  async function assertSymlinkTargetWithinRepository(absolutePath, normalizedRelativePath) {
+    let targetRealPath;
+    try {
+      targetRealPath = await realpath(absolutePath);
+    } catch (error) {
+      throw new Error(`repository symlink ${normalizedRelativePath} target must resolve within the repository root (${error.message})`);
+    }
+
+    try {
+      assertWithinRoot(rootRealPath, targetRealPath, `repository symlink ${normalizedRelativePath} target`);
+    } catch (error) {
+      throw new Error(`repository symlink ${normalizedRelativePath} target resolves outside the repository root`);
+    }
+  }
+
+  async function visit(relativePath) {
+    const normalizedRelativePath = normalizeScopedPath(relativePath);
+    const absolutePath = resolve(root, normalizedRelativePath);
+    let stats;
+    try {
+      stats = await lstat(absolutePath);
+    } catch (error) {
+      if (error && error.code === "ENOENT") {
+        snapshot.set(normalizedRelativePath, "missing");
+        return;
+      }
+      throw error;
+    }
+
+    if (stats.isSymbolicLink()) {
+      const target = await readlink(absolutePath);
+      await assertSymlinkTargetWithinRepository(absolutePath, normalizedRelativePath);
+      snapshot.set(
+        normalizedRelativePath,
+        `symlink:${stats.size}:${stats.mode}:${stats.uid}:${stats.gid}:${stats.mtimeMs}:${stats.ctimeMs}:${target}`
+      );
+      return;
+    }
+
+    if (stats.isDirectory()) {
+      snapshot.set(normalizedRelativePath.endsWith("/") || normalizedRelativePath.length === 0
+        ? normalizedRelativePath
+        : `${normalizedRelativePath}/`, "directory");
+      const entries = await readdir(absolutePath, { withFileTypes: true });
+      await visitDirectoryEntriesInBatches(entries, async (entry) => {
+        const childRelativePath = normalizedRelativePath.length === 0
+          ? entry.name
+          : `${normalizedRelativePath.replace(/\/$/u, "")}/${entry.name}`;
+        await visit(childRelativePath);
+      });
+      return;
+    }
+
+    if (!stats.isFile()) {
+      snapshot.set(normalizedRelativePath, `special:${stats.size}:${stats.mtimeMs}`);
+      return;
+    }
+
+    const content = await readFile(absolutePath);
+    const digest = createHash("sha256").update(content).digest("hex");
+    snapshot.set(normalizedRelativePath, `file:${stats.size}:${digest}`);
+  }
+
+  await visit("");
+  return snapshot;
+}
+
+function diffScopedSnapshots(beforeSnapshot, afterSnapshot) {
+  const changed = [];
+  const paths = unique([...beforeSnapshot.keys(), ...afterSnapshot.keys()]).sort();
+  for (const path of paths) {
+    if (beforeSnapshot.get(path) !== afterSnapshot.get(path)) {
+      changed.push(path);
+    }
+  }
+  return changed;
+}
+
+function assertObservedWritePolicy({ packet, roleProfile, observedChangedFiles }) {
+  if (observedChangedFiles.length === 0) {
+    return;
+  }
+
+  if (!isWriteRole(roleProfile)) {
+    throw new Error(`${packet.role} is read-only and modified repository file(s): ${observedChangedFiles.join(", ")}`);
+  }
+
+  const outsideAllowedScope = [];
+  const forbiddenScopeChanges = [];
+  for (const changedFile of observedChangedFiles) {
+    const withinAllowedScope = packet.allowedFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    const withinForbiddenScope = packet.forbiddenFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    if (!withinAllowedScope) {
+      outsideAllowedScope.push(changedFile);
+    }
+    if (withinForbiddenScope) {
+      forbiddenScopeChanges.push(changedFile);
+    }
+  }
+
+  if (outsideAllowedScope.length > 0) {
+    throw new Error(`${packet.role} modified file(s) outside its allowlist: ${outsideAllowedScope.join(", ")}`);
+  }
+
+  if (forbiddenScopeChanges.length > 0) {
+    throw new Error(`${packet.role} modified forbidden file(s): ${forbiddenScopeChanges.join(", ")}`);
+  }
+}
+
+function assertReportedChangedFilesWithinPolicy({ packet, roleProfile, reportedChangedFiles }) {
+  const normalizedChangedFiles = normalizeFileList(reportedChangedFiles);
+  if (!isWriteRole(roleProfile) || normalizedChangedFiles.length === 0) {
+    return normalizedChangedFiles;
+  }
+
+  for (const changedFile of normalizedChangedFiles) {
+    const withinAllowedScope = packet.allowedFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    const withinForbiddenScope = packet.forbiddenFiles.some((scopeEntry) => isPathWithinScope(changedFile, scopeEntry));
+    assert(withinAllowedScope, `${packet.role} reported a file outside its allowlist: ${changedFile}`);
+    assert(!withinForbiddenScope, `${packet.role} reported a forbidden file: ${changedFile}`);
+  }
+
+  return normalizedChangedFiles;
 }
 
 function validateResultWritePolicy({ packet, roleProfile, workerResult }) {
@@ -245,6 +582,22 @@ function assertNoRecursiveDelegation(adapterResponse) {
     || (Number.isInteger(adapterResponse.spawnedWorkers) && adapterResponse.spawnedWorkers > 0);
 
   assert(!delegated, "worker attempted recursive delegation");
+}
+
+async function assertPacketExecutionPathsHaveNoSymlinks({ repositoryRoot, packet }) {
+  const scopedPaths = normalizeFileList([
+    ...packet.allowedFiles,
+    ...packet.forbiddenFiles,
+    ...packet.contextFiles
+  ]);
+
+  await Promise.all(scopedPaths.map(async (scopedPath) => {
+    await assertExistingPathHasNoSymlinkSegments(
+      repositoryRoot,
+      resolve(repositoryRoot, scopedPath),
+      `packet path ${scopedPath}`
+    );
+  }));
 }
 
 export function createFileClaimRegistry() {
@@ -332,19 +685,56 @@ export function createFileClaimRegistry() {
 export function createPiWorkerRunner({
   adapter,
   claimRegistry = createFileClaimRegistry(),
-  roleProfiles = DEFAULT_PI_ROLE_PROFILES
+  roleProfiles = DEFAULT_PI_ROLE_PROFILES,
+  allowRoleProfileFallbacks = false,
+  modelProbe = null,
+  modelFallbacks = DEFAULT_PI_MODEL_FALLBACKS
 } = {}) {
   assert(adapter && typeof adapter.runWorker === "function", "adapter.runWorker(request, context) is required");
   assert(claimRegistry && typeof claimRegistry.claimMany === "function", "claimRegistry.claimMany(files, owner) is required");
   assert(typeof claimRegistry.release === "function", "claimRegistry.release(owner) is required");
 
-  const normalizedRoleProfiles = normalizeRoleProfiles(roleProfiles);
+  const normalizedRoleProfiles = normalizeRoleProfiles(roleProfiles, {
+    allowFallbacks: allowRoleProfileFallbacks
+  });
+  const normalizedModelFallbacks = normalizeModelFallbacks(modelFallbacks);
   const calls = [];
   let runCounter = 0;
 
   return {
     async run(packetInput, context = {}) {
-      const packet = normalizePacket(packetInput);
+      let packet;
+      try {
+        packet = normalizePacket(packetInput);
+      } catch (error) {
+        const role = typeof packetInput?.role === "string" && packetInput.role.trim().length > 0
+          ? packetInput.role.trim()
+          : "unknown";
+        return createBlockedResult({
+          role,
+          summary: `invalid task packet (${error.message})`,
+          evidence: ["packet validation failed before worker launch"],
+          openQuestions: [
+            "Provide a valid task packet before launching a Pi worker."
+          ]
+        });
+      }
+
+      const protectedPacketPaths = findProtectedPacketPaths(packet);
+      if (protectedPacketPaths.length > 0) {
+        return createBlockedResult({
+          role: packet.role,
+          summary: `packet references protected path(s): ${protectedPacketPaths.join(", ")}`,
+          evidence: [
+            "protected packet paths are blocked before worker launch",
+            `protected paths: ${protectedPacketPaths.join(", ")}`
+          ],
+          openQuestions: [
+            "Narrow the packet scope to repository files outside protected harness, dependency, build, coverage, and secret paths."
+          ]
+        });
+      }
+
       const roleProfile = normalizedRoleProfiles[packet.role];
 
       if (!roleProfile) {
@@ -394,10 +784,51 @@ export function createPiWorkerRunner({
         }
       }
 
+      let resolvedModelProfile;
+      try {
+        resolvedModelProfile = await resolveRoleProfileModel({
+          role: packet.role,
+          roleProfile,
+          modelProbe,
+          modelFallbacks: normalizedModelFallbacks,
+          context: runtimeContext
+        });
+      } catch (error) {
+        if (claimOwner) {
+          claimRegistry.release(claimOwner);
+        }
+        return createBlockedResult({
+          role: packet.role,
+          summary: `model availability probe failed (${error.message})`,
+          evidence: [
+            `requested_provider: ${roleProfile.provider}`,
+            `requested_model: ${roleProfile.model}`,
+            "model_selection_mode: blocked"
+          ],
+          openQuestions: [
+            "Configure an available native Pi model or update the model probe before re-running."
+          ]
+        });
+      }
+
+      if (!resolvedModelProfile.ok) {
+        if (claimOwner) {
+          claimRegistry.release(claimOwner);
+        }
+        return createBlockedResult({
+          role: packet.role,
+          summary: resolvedModelProfile.reason,
+          evidence: resolvedModelProfile.evidence,
+          openQuestions: [
+            "Configure an available native Pi model or explicit fallback before re-running."
+          ]
+        });
+      }
+
       const request = buildWorkerRequest({
         packet,
         context: runtimeContext,
-        roleProfile,
+        roleProfile: resolvedModelProfile.roleProfile,
         runId
       });
 
@@ -411,7 +842,7 @@ export function createPiWorkerRunner({
         const adapterContext = {
           packet: clone(packet),
           context: clone(runtimeContext),
-          roleProfile: clone(roleProfile)
+          roleProfile: clone(resolvedModelProfile.roleProfile)
         };
         const trustedForwardedRedactionMetadata = getTrustedForwardedRedactionMetadata(runtimeContext);
         if (trustedForwardedRedactionMetadata !== undefined) {
@@ -431,13 +862,59 @@ export function createPiWorkerRunner({
           );
         }
 
+        const trustedRunRepositoryRoot = getTrustedRuntimeRepositoryRoot(runtimeContext);
+        const repositoryRoot = trustedRunRepositoryRoot ?? process.cwd();
+        let beforeSnapshot;
+        try {
+          await assertPacketExecutionPathsHaveNoSymlinks({
+            repositoryRoot,
+            packet
+          });
+          beforeSnapshot = await snapshotRepositoryFiles(repositoryRoot);
+        } catch (error) {
+          return createBlockedResult({
+            role: packet.role,
+            summary: error.message,
+            openQuestions: [
+              "Remove repository symlinks from native Pi execution surfaces before re-running."
+            ]
+          });
+        }
         const adapterResponse = await adapter.runWorker(clone(request), adapterContext);
+        const afterSnapshot = await snapshotRepositoryFiles(repositoryRoot);
+        const observedChangedFiles = diffScopedSnapshots(beforeSnapshot, afterSnapshot);
+        assertObservedWritePolicy({
+          packet,
+          roleProfile: resolvedModelProfile.roleProfile,
+          observedChangedFiles
+        });
         assertNoRecursiveDelegation(adapterResponse);
         const rawWorkerResult = extractWorkerResult(adapterResponse);
-        const workerResult = createWorkerResult(rawWorkerResult);
+        assertReportedChangedFilesWithinPolicy({
+          packet,
+          roleProfile: resolvedModelProfile.roleProfile,
+          reportedChangedFiles: rawWorkerResult?.changedFiles ?? []
+        });
+        if (
+          isWriteRole(resolvedModelProfile.roleProfile)
+          && rawWorkerResult?.status === "success"
+          && observedChangedFiles.length === 0
+        ) {
+          throw new Error(`${packet.role} success is unproven: no repository changes were observed`);
+        }
+        const workerResult = createWorkerResult({
+          ...rawWorkerResult,
+          changedFiles: isWriteRole(resolvedModelProfile.roleProfile)
+            ? observedChangedFiles
+            : rawWorkerResult?.changedFiles,
+          evidence: unique([
+            ...(Array.isArray(rawWorkerResult?.evidence) ? rawWorkerResult.evidence : []),
+            ...resolvedModelProfile.evidence
+          ])
+        });
         return validateResultWritePolicy({
           packet,
-          roleProfile,
+          roleProfile: resolvedModelProfile.roleProfile,
           workerResult
         });
       } catch (error) {

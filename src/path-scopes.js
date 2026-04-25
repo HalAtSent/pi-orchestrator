@@ -9,11 +9,11 @@ function normalizeSlashes(pathValue) {
   return pathValue.replace(/\\/g, "/");
 }
 
-const WINDOWS_CASE_INSENSITIVE_PATHS = process.platform === "win32";
+const CASE_INSENSITIVE_PATHS_BY_DEFAULT = process.platform === "win32" || process.platform === "darwin";
 
 function toComparableScopedPath(pathValue) {
   const normalizedPath = normalizeScopedPath(pathValue);
-  return WINDOWS_CASE_INSENSITIVE_PATHS ? normalizedPath.toLowerCase() : normalizedPath;
+  return CASE_INSENSITIVE_PATHS_BY_DEFAULT ? normalizedPath.toLowerCase() : normalizedPath;
 }
 
 export function normalizeScopedPath(pathValue) {
@@ -47,6 +47,29 @@ export function normalizeScopedPath(pathValue) {
 
   if (hasTrailingSlash && normalizedPath.length > 0 && !normalizedPath.endsWith("/")) {
     normalizedPath = `${normalizedPath}/`;
+  }
+
+  return normalizedPath;
+}
+
+export function normalizeRelativeScopePath(pathValue, {
+  fieldName = "scope path"
+} = {}) {
+  const normalizedPath = normalizeScopedPath(pathValue);
+  const rawPath = normalizeSlashes(pathValue);
+  const rawSegments = rawPath.split("/");
+  const segments = normalizedPath.split("/");
+
+  if (normalizedPath.length === 0 || rawPath.trim().length === 0) {
+    throw new Error(`${fieldName} must not be empty`);
+  }
+
+  if (rawPath.startsWith("/") || /^[A-Za-z]:/u.test(rawPath)) {
+    throw new Error(`${fieldName} must be a repository-relative path`);
+  }
+
+  if (rawSegments.some((segment) => segment === "..") || segments.some((segment) => segment === "..")) {
+    throw new Error(`${fieldName} must not escape the repository root`);
   }
 
   return normalizedPath;

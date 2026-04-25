@@ -55,6 +55,42 @@ test("process model probe launches candidate checks with explicit provider/model
   assert.equal(probe.blockedReason, null);
 });
 
+test("process model probe records command output buffer truncation", async () => {
+  const probe = await probeProcessModels({
+    providerId: "openai-codex",
+    candidateModels: ["gpt-5.4"],
+    prompt: "Reply with OK and stop.",
+    workspaceRoot: "/tmp/work",
+    spawnCommandResolver: async () => ({
+      command: "node",
+      argsPrefix: ["/tmp/pi/dist/pi.js"],
+      launcher: "pi_script_via_node",
+      launcherPath: "node",
+      piScriptPath: "/tmp/pi/dist/pi.js",
+      piPackageRoot: "/tmp/pi",
+      resolutionMessage: "resolved"
+    }),
+    runCommandFn: async ({ command, args, cwd }) => ({
+      command,
+      args,
+      cwd,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "OK",
+      stderr: "warning",
+      stdoutTruncated: true,
+      stderrTruncated: true,
+      error: null,
+      durationMs: 5
+    })
+  });
+
+  assert.equal(probe.probes.length, 1);
+  assert.equal(probe.probes[0].stdoutTruncated, true);
+  assert.equal(probe.probes[0].stderrTruncated, true);
+});
+
 test("process model probe fails closed when Pi script resolution is unavailable", async () => {
   const probe = await probeProcessModels({
     providerId: "openai-codex",

@@ -4,12 +4,13 @@ import { getPiSpawnCommand } from "./pi-spawn.js";
 
 export const PROCESS_MODEL_PROBE_DEFAULT_PROVIDER = "openai-codex";
 export const PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES = Object.freeze([
+  "gpt-5.5",
   "gpt-5.4",
-  "gpt-5.4-mini",
   "gpt-5.3-codex"
 ]);
 export const PROCESS_MODEL_PROBE_DEFAULT_PROMPT = "Reply with OK and stop.";
 export const PROCESS_MODEL_PROBE_DEFAULT_TIMEOUT_MS = 30_000;
+export const PROCESS_MODEL_PROBE_DEFAULT_OUTPUT_BUFFER_MAX_CHARS = 1_000_000;
 
 function assert(condition, message) {
   if (!condition) {
@@ -46,11 +47,44 @@ function formatCommand(command, args = []) {
   return [command, ...args].map((part) => quoteCommandPart(part)).join(" ");
 }
 
-async function runCommand({ command, args, cwd, timeoutMs }) {
+function appendBoundedOutput(currentValue, chunk, {
+  maxChars
+}) {
+  if (currentValue.length >= maxChars) {
+    return {
+      value: currentValue,
+      truncated: true
+    };
+  }
+
+  const nextChunk = chunk.toString();
+  const remainingChars = maxChars - currentValue.length;
+  if (nextChunk.length <= remainingChars) {
+    return {
+      value: currentValue + nextChunk,
+      truncated: false
+    };
+  }
+
+  return {
+    value: currentValue + nextChunk.slice(0, remainingChars),
+    truncated: true
+  };
+}
+
+async function runCommand({
+  command,
+  args,
+  cwd,
+  timeoutMs,
+  outputBufferMaxChars = PROCESS_MODEL_PROBE_DEFAULT_OUTPUT_BUFFER_MAX_CHARS
+}) {
   return new Promise((resolveResult) => {
     const startedAt = Date.now();
     let stdout = "";
     let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
     let timedOut = false;
 
@@ -71,6 +105,8 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut: false,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
         error,
         durationMs: Date.now() - startedAt
       });
@@ -96,10 +132,18 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
     }
 
     childProcess.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const nextOutput = appendBoundedOutput(stdout, chunk, {
+        maxChars: outputBufferMaxChars
+      });
+      stdout = nextOutput.value;
+      stdoutTruncated = stdoutTruncated || nextOutput.truncated;
     });
     childProcess.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
+      const nextOutput = appendBoundedOutput(stderr, chunk, {
+        maxChars: outputBufferMaxChars
+      });
+      stderr = nextOutput.value;
+      stderrTruncated = stderrTruncated || nextOutput.truncated;
     });
 
     childProcess.on("error", (error) => {
@@ -112,6 +156,8 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
         error
       });
     });
@@ -126,6 +172,8 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
         error: null
       });
     });
@@ -267,6 +315,8 @@ export async function probeProcessModels({
         timedOut: false,
         stdout: "",
         stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
         error,
         durationMs: 0
       };
@@ -294,7 +344,9 @@ export async function probeProcessModels({
       timedOut: commandResult.timedOut === true,
       durationMs: Number.isInteger(commandResult.durationMs) ? commandResult.durationMs : 0,
       stdout: commandResult.stdout ?? "",
-      stderr: commandResult.stderr ?? ""
+      stderr: commandResult.stderr ?? "",
+      stdoutTruncated: commandResult.stdoutTruncated === true,
+      stderrTruncated: commandResult.stderrTruncated === true
     });
   }
 

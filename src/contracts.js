@@ -5,6 +5,7 @@ import {
   normalizeReviewFindings
 } from "./run-evidence.js";
 import { resolvePacketContextManifest } from "./context-manifest.js";
+import { normalizeRelativeScopePath } from "./path-scopes.js";
 import { normalizeRedactionMetadata } from "./redaction.js";
 
 export const ROLE_TYPES = Object.freeze([
@@ -51,6 +52,21 @@ function assertOptionalStringArray(name, value) {
   assertStringArray(name, value);
 }
 
+function normalizeScopePathArray(name, values) {
+  assertStringArray(name, values);
+  return values.map((value, index) => normalizeRelativeScopePath(value, {
+    fieldName: `${name}[${index}]`
+  }));
+}
+
+function normalizeOptionalScopePathArray(name, values) {
+  if (values === undefined) {
+    return undefined;
+  }
+
+  return normalizeScopePathArray(name, values);
+}
+
 export function validateTaskPacket(packet) {
   assert(packet && typeof packet === "object", "task packet must be an object");
   assertString("packet.id", packet.id);
@@ -58,10 +74,11 @@ export function validateTaskPacket(packet) {
   assert(RISK_LEVELS.includes(packet.risk), `packet.risk must be one of: ${RISK_LEVELS.join(", ")}`);
   assertString("packet.goal", packet.goal);
   assertStringArray("packet.nonGoals", packet.nonGoals);
-  assertStringArray("packet.allowedFiles", packet.allowedFiles);
-  assertStringArray("packet.forbiddenFiles", packet.forbiddenFiles);
+  packet.allowedFiles = normalizeScopePathArray("packet.allowedFiles", packet.allowedFiles);
+  packet.forbiddenFiles = normalizeScopePathArray("packet.forbiddenFiles", packet.forbiddenFiles);
   assertStringArray("packet.acceptanceChecks", packet.acceptanceChecks);
   assertStringArray("packet.stopConditions", packet.stopConditions);
+  packet.contextFiles = normalizeOptionalScopePathArray("packet.contextFiles", packet.contextFiles);
   assertOptionalStringArray("packet.contextFiles", packet.contextFiles);
   packet.contextManifest = resolvePacketContextManifest({
     contextFiles: packet.contextFiles ?? [],

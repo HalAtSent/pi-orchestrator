@@ -1,5 +1,5 @@
 import { createTaskPacket } from "./contracts.js";
-import { scopesOverlap } from "./path-scopes.js";
+import { normalizeRelativeScopePath, scopesOverlap } from "./path-scopes.js";
 import {
   classifyRisk,
   defaultAcceptanceChecks,
@@ -18,7 +18,9 @@ function slugify(value) {
 }
 
 function normalizeFiles(files = []) {
-  return files.map((path) => path.replace(/\\/g, "/"));
+  return files.map((path, index) => normalizeRelativeScopePath(path, {
+    fieldName: `files[${index}]`
+  }));
 }
 
 function unique(values) {

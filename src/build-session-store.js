@@ -1,4 +1,4 @@
-﻿import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+﻿import { readFile, rename, unlink, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import {
@@ -23,6 +23,12 @@ import {
   normalizeValidationOutcome,
   toArtifactReference
 } from "./run-evidence.js";
+import {
+  assertExistingPathHasNoSymlinkSegments,
+  assertPathIsNotSymlink,
+  assertStoreDirectorySafe,
+  getPathLstat
+} from "./path-safety.js";
 
 export const BUILD_SESSION_STORE_FORMAT_VERSION = 1;
 export const BUILD_SESSION_STATUSES = Object.freeze([
@@ -43,6 +49,10 @@ const TERMINAL_BUILD_SESSION_STATUSES = new Set([
 
 const DEFAULT_BUILD_SESSION_DIRECTORY = ".pi/build-sessions";
 const BUILD_SESSION_ARTIFACT_TYPE = "build_session";
+const BUILD_SESSION_UPDATE_LOCK_RETRY_DELAY_MS = 25;
+const BUILD_SESSION_UPDATE_LOCK_TIMEOUT_MS = 5000;
+const BUILD_SESSION_UPDATE_LOCK_STALE_MS = 30000;
+const BUILD_SESSION_UPDATE_LOCK_HEARTBEAT_INTERVAL_MS = Math.floor(BUILD_SESSION_UPDATE_LOCK_STALE_MS / 3);
 
 function assert(condition, message) {
   if (!condition) {
@@ -82,6 +92,35 @@ function normalizeFormatVersion(name, value, expected) {
 
 function clone(value) {
   return structuredClone(value);
+}
+
+function wait(ms) {
+  return new Promise((resolvePromise) => {
+    setTimeout(resolvePromise, ms);
+  });
+}
+
+function parseBuildSessionUpdateLockPayload(rawLockPayload) {
+  try {
+    const parsed = JSON.parse(rawLockPayload);
+    if (!parsed || typeof parsed !== "object") {
+      return null;
+    }
+
+    const lockId = typeof parsed.lockId === "string" && parsed.lockId.trim().length > 0
+      ? parsed.lockId.trim()
+      : null;
+    if (!lockId) {
+      return null;
+    }
+
+    return {
+      ...parsed,
+      lockId
+    };
+  } catch {
+    return null;
+  }
 }
 
 function normalizeBuildId(buildId) {
@@ -423,13 +462,33 @@ export function createBuildSessionId() {
 
 export function createBuildSessionStore({
   rootDir = process.cwd(),
-  buildSessionsDirectory = DEFAULT_BUILD_SESSION_DIRECTORY
+  buildSessionsDirectory = DEFAULT_BUILD_SESSION_DIRECTORY,
+  buildSessionUpdateLockRetryDelayMs = BUILD_SESSION_UPDATE_LOCK_RETRY_DELAY_MS,
+  buildSessionUpdateLockTimeoutMs = BUILD_SESSION_UPDATE_LOCK_TIMEOUT_MS,
+  buildSessionUpdateLockStaleMs = BUILD_SESSION_UPDATE_LOCK_STALE_MS,
+  buildSessionUpdateLockHeartbeatIntervalMs = BUILD_SESSION_UPDATE_LOCK_HEARTBEAT_INTERVAL_MS
 } = {}) {
   const normalizedRootDir = resolve(rootDir);
   const resolvedBuildSessionsDirectory = resolve(normalizedRootDir, buildSessionsDirectory);
+  const lockRetryDelayMs = buildSessionUpdateLockRetryDelayMs;
+  const lockTimeoutMs = buildSessionUpdateLockTimeoutMs;
+  const lockStaleMs = buildSessionUpdateLockStaleMs;
+  const lockHeartbeatIntervalMs = buildSessionUpdateLockHeartbeatIntervalMs;
+
+  assert(Number.isFinite(lockRetryDelayMs) && lockRetryDelayMs > 0, "buildSessionUpdateLockRetryDelayMs must be > 0");
+  assert(Number.isFinite(lockTimeoutMs) && lockTimeoutMs > 0, "buildSessionUpdateLockTimeoutMs must be > 0");
+  assert(Number.isFinite(lockStaleMs) && lockStaleMs > 0, "buildSessionUpdateLockStaleMs must be > 0");
+  assert(
+    Number.isFinite(lockHeartbeatIntervalMs) && lockHeartbeatIntervalMs > 0,
+    "buildSessionUpdateLockHeartbeatIntervalMs must be > 0"
+  );
+  assert(
+    lockHeartbeatIntervalMs < lockStaleMs,
+    "buildSessionUpdateLockHeartbeatIntervalMs must be less than buildSessionUpdateLockStaleMs"
+  );
 
   async function ensureBuildSessionsDirectory() {
-    await mkdir(resolvedBuildSessionsDirectory, { recursive: true });
+    await assertStoreDirectorySafe(normalizedRootDir, resolvedBuildSessionsDirectory, "build session store directory");
   }
 
   function resolveBuildSessionPath(buildId) {
@@ -437,12 +496,123 @@ export function createBuildSessionStore({
     return join(resolvedBuildSessionsDirectory, `${encodeURIComponent(normalizedBuildId)}.json`);
   }
 
+  function resolveBuildSessionLockPath(buildId) {
+    return `${resolveBuildSessionPath(buildId)}.lock`;
+  }
+
+  async function acquireBuildSessionUpdateLock(buildId) {
+    const normalizedBuildId = normalizeBuildId(buildId);
+    const lockPath = resolveBuildSessionLockPath(normalizedBuildId);
+    const startedAt = Date.now();
+    await ensureBuildSessionsDirectory();
+
+    while (true) {
+      const lockId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const lockPayload = `${JSON.stringify({ pid: process.pid, lockId, acquiredAt: new Date().toISOString() })}\n`;
+      try {
+        await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "build session update lock");
+        await assertPathIsNotSymlink(lockPath, "build session update lock");
+        await writeFile(lockPath, lockPayload, {
+          encoding: "utf8",
+          flag: "wx"
+        });
+        const heartbeatTimer = setInterval(() => {
+          const now = new Date();
+          void utimes(lockPath, now, now).catch((heartbeatError) => {
+            if (heartbeatError && heartbeatError.code === "ENOENT") {
+              return;
+            }
+          });
+        }, lockHeartbeatIntervalMs);
+        if (typeof heartbeatTimer.unref === "function") {
+          heartbeatTimer.unref();
+        }
+        let released = false;
+        return async () => {
+          if (released) {
+            return;
+          }
+          released = true;
+          clearInterval(heartbeatTimer);
+          try {
+            await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "build session update lock");
+            await assertPathIsNotSymlink(lockPath, "build session update lock");
+            const rawLock = await readFile(lockPath, "utf8");
+            const parsedLock = parseBuildSessionUpdateLockPayload(rawLock);
+            if (!parsedLock || parsedLock.lockId !== lockId) {
+              return;
+            }
+            await assertPathIsNotSymlink(lockPath, "build session update lock");
+            await unlink(lockPath);
+          } catch (error) {
+            if (error && error.code === "ENOENT") {
+              return;
+            }
+            throw error;
+          }
+        };
+      } catch (error) {
+        if (!error || error.code !== "EEXIST") {
+          throw error;
+        }
+      }
+
+      let staleLockRemoved = false;
+      try {
+        await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "build session update lock");
+        await assertPathIsNotSymlink(lockPath, "build session update lock");
+        const lockStats = await getPathLstat(lockPath);
+        if (!lockStats) {
+          staleLockRemoved = true;
+        } else if (Date.now() - lockStats.mtimeMs > lockStaleMs) {
+          const observedRawLock = await readFile(lockPath, "utf8");
+          const observedLockId = parseBuildSessionUpdateLockPayload(observedRawLock)?.lockId ?? null;
+          if (observedLockId) {
+            await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "build session update lock");
+            await assertPathIsNotSymlink(lockPath, "build session update lock");
+            const currentRawLock = await readFile(lockPath, "utf8");
+            const currentLockId = parseBuildSessionUpdateLockPayload(currentRawLock)?.lockId ?? null;
+            if (currentLockId === observedLockId) {
+              await assertPathIsNotSymlink(lockPath, "build session update lock");
+              await unlink(lockPath);
+              staleLockRemoved = true;
+            }
+          }
+        }
+      } catch (error) {
+        if (error && error.code === "ENOENT") {
+          staleLockRemoved = true;
+        } else {
+          throw error;
+        }
+      }
+
+      if (staleLockRemoved) {
+        continue;
+      }
+
+      if (Date.now() - startedAt >= lockTimeoutMs) {
+        throw new Error(`Timed out acquiring build session update lock for buildId: ${normalizedBuildId}`);
+      }
+
+      await wait(lockRetryDelayMs);
+    }
+  }
+
   async function writeRecord(record) {
     const recordPath = resolveBuildSessionPath(record.buildId);
     const tempPath = `${recordPath}.${process.pid}.${Date.now()}.tmp`;
     await ensureBuildSessionsDirectory();
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, recordPath, "persisted build session file");
+    await assertPathIsNotSymlink(recordPath, "persisted build session file");
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, tempPath, "persisted build session temp file");
+    await assertPathIsNotSymlink(tempPath, "persisted build session temp file");
     await writeFile(tempPath, formatPersistedRecord(record), "utf8");
+    await assertPathIsNotSymlink(tempPath, "persisted build session temp file");
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, recordPath, "persisted build session file");
+    await assertPathIsNotSymlink(recordPath, "persisted build session file");
     await rename(tempPath, recordPath);
+    await assertPathIsNotSymlink(recordPath, "persisted build session file");
   }
 
   return {
@@ -481,6 +651,9 @@ export function createBuildSessionStore({
     async loadBuildSession(buildId) {
       const normalizedBuildId = normalizeBuildId(buildId);
       const buildSessionPath = resolveBuildSessionPath(normalizedBuildId);
+      await ensureBuildSessionsDirectory();
+      await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, buildSessionPath, "persisted build session file");
+      await assertPathIsNotSymlink(buildSessionPath, "persisted build session file");
 
       let raw;
       try {
@@ -510,32 +683,37 @@ export function createBuildSessionStore({
       const normalizedBuildId = normalizeBuildId(buildId);
       assert(typeof updater === "function", "updateBuildSession(buildId, updater) requires an updater function");
 
-      const existing = await this.loadBuildSession(normalizedBuildId);
-      const nextValue = await updater(clone(existing));
-      assertPlainObject("updateBuildSession result", nextValue);
+      const releaseLock = await acquireBuildSessionUpdateLock(normalizedBuildId);
+      try {
+        const existing = await this.loadBuildSession(normalizedBuildId);
+        const nextValue = await updater(clone(existing));
+        assertPlainObject("updateBuildSession result", nextValue);
 
-      const {
-        formatVersion: _ignoredFormatVersion,
-        artifactType: _ignoredArtifactType,
-        repositoryRoot: _ignoredRepositoryRoot,
-        programId: _ignoredProgramId,
-        planFingerprint: _ignoredPlanFingerprint,
-        sourceArtifactIds: _ignoredSourceArtifactIds,
-        lineageDepth: _ignoredLineageDepth,
-        ...nextRecordInput
-      } = nextValue;
+        const {
+          formatVersion: _ignoredFormatVersion,
+          artifactType: _ignoredArtifactType,
+          repositoryRoot: _ignoredRepositoryRoot,
+          programId: _ignoredProgramId,
+          planFingerprint: _ignoredPlanFingerprint,
+          sourceArtifactIds: _ignoredSourceArtifactIds,
+          lineageDepth: _ignoredLineageDepth,
+          ...nextRecordInput
+        } = nextValue;
 
-      const record = normalizePersistedBuildSessionRecord({
-        ...nextRecordInput,
-        buildId: normalizedBuildId,
-        updatedAt: new Date().toISOString()
-      }, {
-        existingCreatedAt: existing?.createdAt,
-        repositoryRoot: normalizedRootDir
-      });
+        const record = normalizePersistedBuildSessionRecord({
+          ...nextRecordInput,
+          buildId: normalizedBuildId,
+          updatedAt: new Date().toISOString()
+        }, {
+          existingCreatedAt: existing?.createdAt,
+          repositoryRoot: normalizedRootDir
+        });
 
-      await writeRecord(record);
-      return clone(record);
+        await writeRecord(record);
+        return clone(record);
+      } finally {
+        await releaseLock();
+      }
     }
   };
 }

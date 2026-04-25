@@ -1,7 +1,7 @@
 ﻿import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -24,6 +24,12 @@ async function withTempDir(prefix, callback) {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function createLifecycleForTests() {
@@ -129,6 +135,31 @@ test("build session store creates and loads a persisted build session", async ()
   });
 });
 
+test("build session store rejects symlinked .pi build-session store paths before persistence", {
+  skip: process.platform === "win32"
+}, async () => {
+  const outsideRoot = await mkdtemp(join(tmpdir(), "pi-orchestrator-build-session-store-outside-"));
+  try {
+    await withTempDir("pi-orchestrator-build-session-store-symlink-", async (rootDir) => {
+      await mkdir(join(rootDir, ".pi"), { recursive: true });
+      await mkdir(join(outsideRoot, "build-sessions"), { recursive: true });
+      await symlink(join(outsideRoot, "build-sessions"), join(rootDir, ".pi", "build-sessions"), "dir");
+
+      const buildSessionStore = createBuildSessionStore({ rootDir });
+      await assert.rejects(
+        () => buildSessionStore.createBuildSession({
+          intake: createOperatorIntake("Build a launch dashboard for product operators"),
+          lifecycle: createLifecycleForTests(),
+          approvalRequested: false
+        }),
+        /build session store directory must not contain symlinks/u
+      );
+    });
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
 test("build session store update can record approval and execution summary", async () => {
   await withTempDir("pi-orchestrator-build-session-store-", async (rootDir) => {
     const buildSessionStore = createBuildSessionStore({ rootDir });
@@ -207,6 +238,72 @@ test("build session store update can record approval and execution summary", asy
       reasons: []
     });
     assert.equal(loaded.execution.programId, lifecycle.executionProgram.id);
+  });
+});
+
+test("build session store serializes overlapping updates so fields are not clobbered", async () => {
+  await withTempDir("pi-orchestrator-build-session-store-lock-", async (rootDir) => {
+    const buildSessionStore = createBuildSessionStore({
+      rootDir,
+      buildSessionUpdateLockRetryDelayMs: 5,
+      buildSessionUpdateLockTimeoutMs: 2000,
+      buildSessionUpdateLockStaleMs: 5000,
+      buildSessionUpdateLockHeartbeatIntervalMs: 1000
+    });
+    const intake = createOperatorIntake("Build a launch dashboard for product operators");
+    const lifecycle = createLifecycleForTests();
+
+    const created = await buildSessionStore.createBuildSession({
+      intake,
+      lifecycle,
+      approvalRequested: false
+    });
+
+    let firstUpdaterEntered;
+    const firstUpdaterStarted = new Promise((resolve) => {
+      firstUpdaterEntered = resolve;
+    });
+    let releaseFirstUpdater;
+    const firstUpdaterRelease = new Promise((resolve) => {
+      releaseFirstUpdater = resolve;
+    });
+    let secondUpdaterSawApproval = false;
+
+    const firstUpdate = buildSessionStore.updateBuildSession(created.buildId, async (existingSession) => {
+      firstUpdaterEntered();
+      await firstUpdaterRelease;
+      return {
+        ...existingSession,
+        approval: {
+          ...existingSession.approval,
+          approved: true,
+          approvedAt: new Date().toISOString()
+        }
+      };
+    });
+
+    await firstUpdaterStarted;
+
+    const secondUpdate = buildSessionStore.updateBuildSession(created.buildId, async (existingSession) => {
+      secondUpdaterSawApproval = existingSession.approval.approved;
+      return {
+        ...existingSession,
+        execution: {
+          ...existingSession.execution,
+          status: "approved",
+          updatedAt: new Date().toISOString()
+        }
+      };
+    });
+
+    await wait(25);
+    releaseFirstUpdater();
+    await Promise.all([firstUpdate, secondUpdate]);
+
+    const loaded = await buildSessionStore.loadBuildSession(created.buildId);
+    assert.equal(secondUpdaterSawApproval, true);
+    assert.equal(loaded.approval.approved, true);
+    assert.equal(loaded.execution.status, "approved");
   });
 });
 

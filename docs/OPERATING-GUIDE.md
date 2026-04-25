@@ -267,10 +267,22 @@ Important limits on that claim:
 Current process-backend provider/model selection:
 
 - provider: `openai-codex`
-- explorer: `gpt-5.4`
-- implementer: `gpt-5.3-codex`
-- reviewer: `gpt-5.4`
-- verifier: `gpt-5.4-mini`
+- explorer: `gpt-5.5`
+- implementer: `gpt-5.5`
+- reviewer: `gpt-5.5`
+- verifier: `gpt-5.5`
+
+The process backend selects these explicitly, probes availability, and records requested/selected provider and model evidence. Missing provider, preferred-model, or thinking fields in process role profiles block unless an explicit fallback-compatibility mode is requested. If `gpt-5.5` is unavailable and no configured fallback can be selected, the run blocks with model-selection evidence.
+
+An implementer process launcher exiting 0 is not enough to prove success. If no files changed and no explicit validation evidence was captured, the run is reported as blocked/unproven instead of complete.
+
+Process backend sandbox policy is explicit:
+
+- `processSandbox: "required"` is the normal execution-boundary setting. The backend blocks before spawning the worker when no supported OS sandbox provider is available.
+- The built-in provider path is platform-specific: macOS uses `sandbox-exec` when available; Linux and Windows block unless a real namespace/seccomp/bubblewrap/firejail-style or restricted-token/job-object/AppContainer provider is configured.
+- `processSandbox: "disabled"` is an explicit development/compatibility opt-in and must also set `unsandboxedProcessBackendOptIn: true`.
+- Unsandboxed process mode is observation-only, not a security boundary. Its evidence says `process_backend_os_sandbox: false`, `process_backend_trust_boundary: observation_only`, and `unsandboxed_process_backend_opt_in: true`.
+- Unsandboxed results may be trusted for observed repository changed-surface evidence after allowlist and apply checks. They must not be trusted for runtime confinement claims such as no external side effects, no local secret reads, no network access, or no descendant process activity.
 
 ## Recommended Operating Loop
 
@@ -286,8 +298,10 @@ For package design or ambiguous project work:
 For a well-scoped implementation task:
 
 1. Run `audit` only if the task is risky or touches a larger milestone
-2. Run `auto`
+2. Run `tiny-edit` for a small README-style or single-file edit with explicit `allowedFiles`, or `auto` for a normal bounded workflow
 3. Review the evidence and stop reason
+
+`/tiny-edit` uses the same scope, approval, protected-path, and evidence enforcement as bounded workflow execution, but it skips `/build` session creation, lifecycle planning, and `/build-approve`. It blocks when `allowedFiles` is empty or points at protected paths.
 
 For zero-to-project work:
 
@@ -314,6 +328,7 @@ Available commands inside Pi:
 - `/bootstrap`
 - `/audit`
 - `/auto`
+- `/tiny-edit`
 - `/run-program`
 - `/resume-program`
 - `/worker-runtime-status`

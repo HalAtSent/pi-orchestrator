@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -120,6 +120,39 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
     assert.equal(persistedOnDisk.runJournal.artifactType, "run_journal");
     assert.equal(Object.prototype.hasOwnProperty.call(persistedOnDisk.runJournal, "approvalBinding"), false);
   });
+});
+
+test("run store rejects symlinked .pi runs store paths before persistence", {
+  skip: process.platform === "win32"
+}, async () => {
+  const outsideRoot = await mkdtemp(join(tmpdir(), "pi-orchestrator-run-store-outside-"));
+  try {
+    await withTempDir("pi-orchestrator-run-store-symlink-", async (rootDir) => {
+      await mkdir(join(rootDir, ".pi"), { recursive: true });
+      await mkdir(join(outsideRoot, "runs"), { recursive: true });
+      await symlink(join(outsideRoot, "runs"), join(rootDir, ".pi", "runs"), "dir");
+
+      const program = buildProgram();
+      const runStore = createRunStore({ rootDir });
+      await assert.rejects(
+        () => runStore.saveRun({
+          programId: program.id,
+          program,
+          runJournal: {
+            programId: program.id,
+            status: "running",
+            stopReason: null,
+            contractRuns: [],
+            completedContractIds: [],
+            pendingContractIds: program.contracts.map((contract) => contract.id)
+          }
+        }),
+        /run store directory must not contain symlinks/u
+      );
+    });
+  } finally {
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
 });
 
 test("run store updates a persisted run journal and preserves createdAt", async () => {

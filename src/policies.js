@@ -19,6 +19,8 @@ const HIGH_RISK_KEYWORDS = [
 ];
 
 const HUMAN_GATE_PATH_PATTERNS = [
+  /^\.git(?:\/|$)/i,
+  /^\.pi(?:\/|$)/i,
   /^infra\//i,
   /^platform\/contracts\//i,
   /^docs\/agents\//i,
@@ -31,6 +33,8 @@ const HUMAN_GATE_PATH_PATTERNS = [
 ];
 
 const PROTECTED_PATH_PATTERNS = [
+  /^\.git(?:\/|$)/i,
+  /^\.pi(?:\/|$)/i,
   /^node_modules\//i,
   /^dist\//i,
   /^build\//i,
@@ -52,8 +56,23 @@ export function isProtectedPath(path) {
   return PROTECTED_PATH_PATTERNS.some((pattern) => pattern.test(normalized));
 }
 
+export function findProtectedPaths(paths = []) {
+  return paths
+    .filter((path) => typeof path === "string")
+    .map(normalizePath)
+    .filter((path) => path.length > 0 && isProtectedPath(path));
+}
+
+export function findProtectedPacketPaths(packet = {}) {
+  return findProtectedPaths([
+    ...(Array.isArray(packet?.allowedFiles) ? packet.allowedFiles : []),
+    ...(Array.isArray(packet?.forbiddenFiles) ? packet.forbiddenFiles : []),
+    ...(Array.isArray(packet?.contextFiles) ? packet.contextFiles : [])
+  ]);
+}
+
 export function classifyRisk({ goal, allowedFiles = [] }) {
-  const normalizedGoal = goal.toLowerCase();
+  const normalizedGoal = typeof goal === "string" ? goal.toLowerCase() : "";
   const normalizedFiles = allowedFiles.map(normalizePath);
 
   if (normalizedFiles.some((path) => HUMAN_GATE_PATH_PATTERNS.some((pattern) => pattern.test(path)))) {

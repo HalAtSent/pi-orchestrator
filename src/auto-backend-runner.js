@@ -1,11 +1,14 @@
 import { safeClone } from "./safe-clone.js";
-import { RISK_LEVELS } from "./contracts.js";
+import { createWorkerResult, RISK_LEVELS } from "./contracts.js";
+import { classifyRisk, findProtectedPacketPaths } from "./policies.js";
+import { getTrustedProcessWorkerBackendRunProvenance } from "./process-worker-backend.js";
 
 const AUTO_BACKEND_MODE_PI_RUNTIME = "pi_runtime";
 const AUTO_BACKEND_MODE_LOW_RISK_PROCESS_IMPLEMENTER = "low_risk_process_implementer";
 const AUTO_BACKEND_MODE_PROCESS_SUBAGENTS = "process_subagents";
 const TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS = new WeakSet();
 const TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS = new WeakSet();
+const TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS = new WeakSet();
 
 export const AUTO_BACKEND_MODES = Object.freeze({
   PI_RUNTIME: AUTO_BACKEND_MODE_PI_RUNTIME,
@@ -23,13 +26,23 @@ function isObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function markTrustedChangedSurfaceObservationResult(workerResult) {
+function markTrustedProcessBackendResult(workerResult, provenance) {
   if (!isObject(workerResult)) {
     return workerResult;
   }
 
-  TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.add(workerResult);
-  TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS.add(workerResult);
+  if (workerResult?.changedSurfaceObservation?.capture === "complete") {
+    TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS.add(workerResult);
+  }
+
+  if (isObject(workerResult?.providerModelSelection)) {
+    TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS.add(workerResult);
+  }
+
+  if (provenance?.osSandbox === true && provenance?.trustBoundary === "os_sandbox") {
+    TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS.add(workerResult);
+  }
+
   return workerResult;
 }
 
@@ -47,6 +60,14 @@ export function isTrustedProviderModelSelectionResult(workerResult) {
   }
 
   return TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS.has(workerResult);
+}
+
+export function isTrustedExternalSideEffectConfinementResult(workerResult) {
+  if (!isObject(workerResult)) {
+    return false;
+  }
+
+  return TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS.has(workerResult);
 }
 
 function clone(value) {
@@ -76,12 +97,30 @@ function isValidRiskLevel(value) {
 }
 
 function effectiveRisk(packet, context) {
-  if (isValidRiskLevel(packet?.risk)) {
-    return packet.risk;
+  const declaredRisk = isValidRiskLevel(packet?.risk)
+    ? packet.risk
+    : isValidRiskLevel(context?.risk)
+      ? context.risk
+      : null;
+  const heuristicRisk = classifyRisk({
+    goal: typeof packet?.goal === "string"
+      ? packet.goal
+      : typeof context?.goal === "string"
+        ? context.goal
+        : "",
+    allowedFiles: Array.isArray(packet?.allowedFiles) ? packet.allowedFiles : []
+  });
+
+  if (declaredRisk === "high" || heuristicRisk === "high") {
+    return "high";
   }
 
-  if (isValidRiskLevel(context?.risk)) {
-    return context.risk;
+  if (declaredRisk === "medium" || heuristicRisk === "medium") {
+    return "medium";
+  }
+
+  if (declaredRisk === "low") {
+    return "low";
   }
 
   return null;
@@ -97,6 +136,25 @@ function shouldUseProcessBackend({ mode, packet, context }) {
   }
 
   return effectiveRisk(packet, context) === "low" && (packet?.role === "implementer" || packet?.role === "verifier");
+}
+
+function createProtectedPathBlockedResult(packet, protectedPaths) {
+  const role = typeof packet?.role === "string" && packet.role.trim().length > 0
+    ? packet.role.trim()
+    : "unknown";
+  return createWorkerResult({
+    status: "blocked",
+    summary: `${role} worker blocked: packet references protected path(s): ${protectedPaths.join(", ")}`,
+    changedFiles: [],
+    commandsRun: [],
+    evidence: [
+      "protected packet paths are blocked before backend selection",
+      `protected paths: ${protectedPaths.join(", ")}`
+    ],
+    openQuestions: [
+      "Narrow the packet scope to repository files outside protected harness, dependency, build, coverage, and secret paths."
+    ]
+  });
 }
 
 export function inferWorkflowProcessBackendRequirement({
@@ -157,14 +215,24 @@ export function createAutoBackendRunner({
 
   const calls = [];
 
+  const getSelectedBackend = (packet, context = {}) => {
+    const useProcessBackend = shouldUseProcessBackend({
+      mode: normalizedMode,
+      packet,
+      context
+    });
+    return useProcessBackend ? "process_backend" : "default_runner";
+  };
+
   return {
     async run(packet, context = {}) {
-      const useProcessBackend = shouldUseProcessBackend({
-        mode: normalizedMode,
-        packet,
-        context
-      });
-      const selectedBackend = useProcessBackend ? "process_backend" : "default_runner";
+      const protectedPacketPaths = findProtectedPacketPaths(packet);
+      if (protectedPacketPaths.length > 0) {
+        return createProtectedPathBlockedResult(packet, protectedPacketPaths);
+      }
+
+      const selectedBackend = getSelectedBackend(packet, context);
+      const useProcessBackend = selectedBackend === "process_backend";
 
       calls.push({
         packet: clone(packet),
@@ -174,7 +242,10 @@ export function createAutoBackendRunner({
 
       if (useProcessBackend) {
         const result = await processBackend.run(packet, context);
-        return markTrustedChangedSurfaceObservationResult(result);
+        const trustedProvenance = getTrustedProcessWorkerBackendRunProvenance(result);
+        return trustedProvenance
+          ? markTrustedProcessBackendResult(result, trustedProvenance)
+          : result;
       }
 
       return defaultRunner.run(packet, context);
@@ -186,6 +257,20 @@ export function createAutoBackendRunner({
 
     getExecutionBackendMode() {
       return normalizedMode;
+    },
+
+    getSelectedBackend,
+
+    getTimeoutBudgetMs(packet, context = {}) {
+      if (getSelectedBackend(packet, context) !== "process_backend") {
+        return null;
+      }
+
+      if (typeof processBackend?.getTimeoutBudgetMs !== "function") {
+        return null;
+      }
+
+      return processBackend.getTimeoutBudgetMs();
     },
 
     requiresProcessBackendForWorkflow(workflow) {

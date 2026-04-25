@@ -23,6 +23,20 @@ function loadFixture(name) {
   return JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 }
 
+function createTrustedScriptedProcessBackend(script) {
+  const backend = createScriptedWorkerRunner(script);
+  return {
+    ...backend,
+    getTrustedBackendProvenance() {
+      return {
+        identity: "test/process-backend",
+        source: "test-harness",
+        evidenceKind: "observed_workspace_diff"
+      };
+    }
+  };
+}
+
 function buildRuntimeContextFixture() {
   const packetContextFiles = ["README.md"];
   const priorResults = [
@@ -137,6 +151,12 @@ function normalizeRepairLoopFixtureForExistingPaths(fixture) {
   ];
   fixture.script[1].result.changedFiles = ["src/auto-workflow.js"];
   fixture.script[3].result.changedFiles = ["src/auto-workflow.js"];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 test("auto workflow executes a low-risk plan straight through the runner", async () => {
@@ -1085,6 +1105,143 @@ test("auto workflow runs one repair loop after an independent review finding", a
   assert.equal(runner.getPendingStepCount(), 0);
 });
 
+test("repair packets preserve original guard rails and context files", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Repair guard preservation check",
+    allowedFiles: [
+      "src/helpers.js",
+      "src/orchestrator.js",
+      "src/contracts.js",
+      "src/auto-workflow.js",
+      "src/pi-worker-runner.js",
+      "src/pi-adapter.js",
+      "README.md"
+    ],
+    contextFiles: ["README.md"]
+  });
+  const implementerPacket = workflow.packets.find((packet) => packet.role === "implementer");
+  const reviewerPacket = workflow.packets.find((packet) => packet.role === "reviewer");
+  implementerPacket.nonGoals = ["Preserve original non-goal."];
+  implementerPacket.acceptanceChecks = ["Original acceptance check must survive repair."];
+  implementerPacket.stopConditions = ["Original stop condition must survive repair."];
+  implementerPacket.contextFiles = ["README.md", "docs/OPERATING-GUIDE.md"];
+  implementerPacket.contextManifest = [
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "README.md",
+      reason: "explicit_request"
+    },
+    {
+      kind: "context_file",
+      source: "packet_context_files",
+      reference: "docs/OPERATING-GUIDE.md",
+      reason: "explicit_request"
+    }
+  ];
+  reviewerPacket.acceptanceChecks = ["Reviewer-specific acceptance check must survive repair."];
+
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "explorer",
+      result: {
+        status: "success",
+        summary: "Mapped scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files"],
+        evidence: ["Scope mapped."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Initial implementation complete.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Initial check passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "reviewer",
+      result: {
+        status: "repair_required",
+        summary: "Repair required.",
+        changedFiles: [],
+        commandsRun: ["git diff -- src/helpers.js"],
+        evidence: ["Review found a gap."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Repair complete.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Repair check passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "reviewer",
+      result: {
+        status: "success",
+        summary: "Repair review passed.",
+        changedFiles: [],
+        commandsRun: ["git diff -- src/helpers.js"],
+        evidence: ["Review passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["Verification passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow,
+    maxRepairLoops: 1
+  }, { runner });
+  const repairImplementerPacket = runner.getCalls()[3].packet;
+  const repairReviewerPacket = runner.getCalls()[4].packet;
+
+  assert.equal(execution.status, "success");
+  assert.equal(repairImplementerPacket.nonGoals.includes("Preserve original non-goal."), true);
+  assert.equal(
+    repairImplementerPacket.acceptanceChecks.includes("Original acceptance check must survive repair."),
+    true
+  );
+  assert.equal(
+    repairImplementerPacket.acceptanceChecks.includes("Reviewer-specific acceptance check must survive repair."),
+    true
+  );
+  assert.equal(
+    repairImplementerPacket.stopConditions.includes("Original stop condition must survive repair."),
+    true
+  );
+  assert.equal(repairImplementerPacket.contextFiles.includes("docs/OPERATING-GUIDE.md"), true);
+  assert.equal(
+    repairImplementerPacket.contextManifest.some((entry) => entry.reference === "docs/OPERATING-GUIDE.md"),
+    true
+  );
+  assert.equal(
+    repairReviewerPacket.acceptanceChecks.includes("Original acceptance check must survive repair."),
+    true
+  );
+});
+
 test("runPlannedWorkflow keeps legacy packets without contextManifest compatible", async () => {
   const workflow = createInitialWorkflow({
     goal: "Rename one helper in a local file",
@@ -1285,14 +1442,14 @@ test("runAutoWorkflow reports explicit review-result truncation in contextBudget
   });
 });
 
-test("runAutoWorkflow reports explicit changed-surface truncation in contextBudget", async () => {
+test("runAutoWorkflow ignores self-attested changed-surface truncation in contextBudget", async () => {
   const oversizedChangedSurfacePaths = Array.from(
     {
       length: RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths + 4
     },
     (_, index) => `src/helpers-${index}.js`
   );
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -1335,22 +1492,15 @@ test("runAutoWorkflow reports explicit changed-surface truncation in contextBudg
 
   assert.equal(execution.status, "success");
   assert.equal(calls.length, 2);
-  assert.equal(verifierContext.changedSurfaceContext.length, 1);
-  assert.equal(
-    verifierContext.changedSurfaceContext[0].paths.length,
-    RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths
-  );
-  assert.equal(verifierContext.contextBudget.changedSurfaceTruncated, true);
-  assert.equal(
-    verifierContext.contextBudget.truncationCount.changedSurfacePaths,
-    oversizedChangedSurfacePaths.length - RUN_CONTEXT_BUDGET_LIMITS.maxChangedSurfacePaths
-  );
-  assert.ok(verifierContext.contextManifest.some((entry) => {
+  assert.equal(verifierContext.changedSurfaceContext.length, 0);
+  assert.equal(verifierContext.contextBudget.changedSurfaceTruncated, false);
+  assert.equal(verifierContext.contextBudget.truncationCount.changedSurfacePaths, 0);
+  assert.equal(verifierContext.contextManifest.some((entry) => {
     return entry.kind === "changed_surface"
       && entry.source === "trusted_changed_surface"
       && entry.reason === "changed_scope_carry_forward"
       && entry.reference === `${calls[0].packet.id}:implementer`;
-  }));
+  }), false);
   assert.doesNotThrow(() => {
     validateRunContext({
       packetContextFiles: calls[1].packet.contextFiles,
@@ -1376,8 +1526,8 @@ test("runAutoWorkflow reports explicit changed-surface truncation in contextBudg
   });
 });
 
-test("auto workflow carries trusted changed-surface references into contextManifest", async () => {
-  const processBackend = createScriptedWorkerRunner([
+test("auto workflow does not carry self-attested changed-surface references into contextManifest", async () => {
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -1419,19 +1569,13 @@ test("auto workflow carries trusted changed-surface references into contextManif
 
   assert.equal(execution.status, "success");
   assert.equal(calls.length, 2);
-  assert.deepEqual(calls[1].context.changedSurfaceContext, [
-    {
-      packetId: calls[0].packet.id,
-      role: "implementer",
-      paths: ["src/helpers.js"]
-    }
-  ]);
-  assert.ok(calls[1].context.contextManifest.some((entry) => {
+  assert.deepEqual(calls[1].context.changedSurfaceContext, []);
+  assert.equal(calls[1].context.contextManifest.some((entry) => {
     return entry.kind === "changed_surface"
       && entry.source === "trusted_changed_surface"
       && entry.reason === "changed_scope_carry_forward"
       && entry.reference === `${calls[0].packet.id}:implementer`;
-  }));
+  }), false);
 });
 
 test("formatWorkflowExecution includes run evidence and commands", () => {
@@ -1896,6 +2040,116 @@ test("auto workflow blocks planner failures when allowlist includes protected pa
   assert.equal(runner.getCalls().length, 0);
   assert.match(execution.stopReason, /allowedFiles contains protected path/i);
   assert.match(execution.stopReason, /node_modules\/pkg\/index\.js/i);
+});
+
+test("process-backed workflow emits heartbeats with run context and stops them after completion", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"]
+  });
+  workflow.packets = [workflow.packets[0]];
+  workflow.roleSequence = ["implementer"];
+
+  const events = [];
+  const runner = {
+    getSelectedBackend() {
+      return "process_backend";
+    },
+    getTimeoutBudgetMs() {
+      return 120;
+    },
+    async run() {
+      await sleep(35);
+      return {
+        status: "success",
+        summary: "Patched the helper.",
+        changedFiles: ["web/src/utils/format.js"],
+        commandsRun: [],
+        evidence: ["Implemented the requested change."],
+        openQuestions: []
+      };
+    }
+  };
+
+  const execution = await runPlannedWorkflow({
+    workflow,
+    approvedHighRisk: false,
+    maxRepairLoops: 0,
+    context: {
+      programId: "program-heartbeat",
+      contractId: "contract-heartbeat"
+    }
+  }, {
+    runner,
+    heartbeatIntervalMs: 10,
+    onProgress: (event) => {
+      events.push(event);
+    }
+  });
+
+  assert.equal(execution.status, "success");
+  const heartbeatEvents = events.filter((event) => event.type === "packet_heartbeat");
+  assert.equal(heartbeatEvents.length >= 2, true);
+  assert.equal(heartbeatEvents.every((event) => event.programId === "program-heartbeat"), true);
+  assert.equal(heartbeatEvents.every((event) => event.contractId === "contract-heartbeat"), true);
+  assert.equal(heartbeatEvents.every((event) => event.role === "implementer"), true);
+  assert.equal(heartbeatEvents.every((event) => event.selectedBackend === "process_backend"), true);
+  assert.equal(heartbeatEvents.every((event) => event.timeoutBudgetMs === 120), true);
+
+  const heartbeatCountAtCompletion = heartbeatEvents.length;
+  await sleep(30);
+  assert.equal(
+    events.filter((event) => event.type === "packet_heartbeat").length,
+    heartbeatCountAtCompletion
+  );
+});
+
+test("process-backed workflow clears heartbeat intervals when runner fails", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"]
+  });
+  workflow.packets = [workflow.packets[0]];
+  workflow.roleSequence = ["implementer"];
+
+  const events = [];
+  const runner = {
+    getSelectedBackend() {
+      return "process_backend";
+    },
+    getTimeoutBudgetMs() {
+      return 120;
+    },
+    async run() {
+      await sleep(25);
+      throw new Error("launcher unavailable");
+    }
+  };
+
+  const execution = await runPlannedWorkflow({
+    workflow,
+    approvedHighRisk: false,
+    maxRepairLoops: 0,
+    context: {
+      programId: "program-failed-heartbeat",
+      contractId: "contract-failed-heartbeat"
+    }
+  }, {
+    runner,
+    heartbeatIntervalMs: 10,
+    onProgress: (event) => {
+      events.push(event);
+    }
+  });
+
+  assert.equal(execution.status, "failed");
+  assert.equal(events.some((event) => event.type === "packet_heartbeat"), true);
+  const heartbeatCountAtFailure = events.filter((event) => event.type === "packet_heartbeat").length;
+  await sleep(30);
+  assert.equal(
+    events.filter((event) => event.type === "packet_heartbeat").length,
+    heartbeatCountAtFailure
+  );
 });
 
 test("auto workflow returns a structured stop when a read-only role reports file changes", async () => {

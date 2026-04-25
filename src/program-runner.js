@@ -3,6 +3,8 @@ import {
   createRunJournal,
   validateExecutionProgram
 } from "./project-contracts.js";
+import { createExecutionProgramPlanFingerprint } from "./project-workflows.js";
+import { findProtectedPaths } from "./policies.js";
 import {
   normalizeApprovalBinding,
   normalizeReviewability,
@@ -371,6 +373,64 @@ function createBlockedRunJournal(programId, stopReason, { approvalBinding = null
   return createRunJournal(journal);
 }
 
+async function persistBlockedJournal(runStore, program, stopReason) {
+  const journal = createBlockedRunJournal(program.id, stopReason);
+  try {
+    await persistJournal(runStore, program, journal);
+  } catch {
+    // Admission failures must remain blocked even if optional persistence fails.
+  }
+  return journal;
+}
+
+function findProtectedExecutionProgramPaths(program) {
+  return findProtectedPaths(program.contracts.flatMap((contract) => (
+    Array.isArray(contract.scopePaths) ? contract.scopePaths : []
+  )));
+}
+
+async function validateApprovedBuildSessionBinding({
+  program,
+  buildId,
+  buildSessionStore
+}) {
+  const normalizedBuildId = typeof buildId === "string" && buildId.trim().length > 0
+    ? buildId.trim()
+    : null;
+  assert(normalizedBuildId, "buildId is required for approved build-session execution");
+  assert(
+    buildSessionStore && typeof buildSessionStore.loadBuildSession === "function",
+    "buildSessionStore.loadBuildSession(buildId) is required for approved build-session execution"
+  );
+
+  const buildSession = await buildSessionStore.loadBuildSession(normalizedBuildId);
+  assert(buildSession, `No approved build session found for buildId: ${normalizedBuildId}`);
+  assert(buildSession.approval?.approved === true, `Build session ${normalizedBuildId} is not approved`);
+  assert(
+    buildSession.approval?.programId === program.id,
+    `Build session ${normalizedBuildId} approval does not match execution program ${program.id}`
+  );
+
+  const programFingerprint = createExecutionProgramPlanFingerprint(program);
+  assert(
+    buildSession.planFingerprint === programFingerprint,
+    `Build session ${normalizedBuildId} plan fingerprint does not match execution program content`
+  );
+  assert(
+    buildSession.approval?.planFingerprint === programFingerprint,
+    `Build session ${normalizedBuildId} approval fingerprint does not match execution program content`
+  );
+
+  return normalizeApprovalBinding({
+    status: "approved",
+    source: "build_session",
+    buildId: normalizedBuildId
+  }, {
+    fieldName: "runExecutionProgramFromApprovedBuildSession.approvalBinding",
+    allowMissing: false
+  });
+}
+
 function createTerminalResumeRejectedJournal(program, runJournal) {
   const priorStopReason = runJournal.stopReason
     ? ` Previous stop reason: ${runJournal.stopReason}`
@@ -719,6 +779,8 @@ async function runProgramFromState(program, {
     try {
       rawResult = await executeContract(clone(contract), {
         programId: program.id,
+        contractId: contract.id,
+        currentContractId: contract.id,
         completedContractIds: [...completedContractIdSet],
         pendingContractIds: [...pendingContractIdSet],
         contractRuns: clone(contractRuns)
@@ -873,6 +935,14 @@ export async function runExecutionProgram(programInput, {
   const program = validateExecutionProgram(clone(programInput));
   const executeContract = resolveContractExecutor(contractExecutor);
   const resolvedRunStore = resolveRunStore(runStore);
+  const protectedPaths = findProtectedExecutionProgramPaths(program);
+  if (protectedPaths.length > 0) {
+    return persistBlockedJournal(
+      resolvedRunStore,
+      program,
+      `Execution program references protected path(s): ${protectedPaths.join(", ")}`
+    );
+  }
 
   return runProgramFromState(program, {
     executeContract,
@@ -886,23 +956,36 @@ export async function runExecutionProgram(programInput, {
 export async function runExecutionProgramFromApprovedBuildSession(programInput, {
   contractExecutor,
   runStore,
+  buildSessionStore = null,
   buildId = null,
   onProgress = null
 } = {}) {
   const program = validateExecutionProgram(clone(programInput));
   const executeContract = resolveContractExecutor(contractExecutor);
   const resolvedRunStore = resolveRunStore(runStore);
-  const normalizedBuildId = typeof buildId === "string" && buildId.trim().length > 0
-    ? buildId.trim()
-    : null;
-  const trustedApprovalBinding = normalizeApprovalBinding({
-    status: "approved",
-    source: "build_session",
-    ...(normalizedBuildId ? { buildId: normalizedBuildId } : {})
-  }, {
-    fieldName: "runExecutionProgramFromApprovedBuildSession.approvalBinding",
-    allowMissing: false
-  });
+  const protectedPaths = findProtectedExecutionProgramPaths(program);
+  if (protectedPaths.length > 0) {
+    return persistBlockedJournal(
+      resolvedRunStore,
+      program,
+      `Execution program references protected path(s): ${protectedPaths.join(", ")}`
+    );
+  }
+
+  let trustedApprovalBinding;
+  try {
+    trustedApprovalBinding = await validateApprovedBuildSessionBinding({
+      program,
+      buildId,
+      buildSessionStore
+    });
+  } catch (error) {
+    return persistBlockedJournal(
+      resolvedRunStore,
+      program,
+      `Approved build-session execution rejected: ${error.message}`
+    );
+  }
 
   return runProgramFromState(program, {
     executeContract,

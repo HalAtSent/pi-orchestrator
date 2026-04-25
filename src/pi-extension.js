@@ -18,6 +18,7 @@ import {
   formatPiWorkerRuntimeStatus,
   inspectPiWorkerRuntime
 } from "./pi-runtime-diagnostics.js";
+import { createCachedProcessModelProbe } from "./process-model-probe.js";
 import { createProgramContractExecutor } from "./program-contract-executor.js";
 import { createPiWorkerRunner } from "./pi-worker-runner.js";
 import {
@@ -288,6 +289,18 @@ function appendLaunchSelectionSummary(baseText, execution) {
   return launchSelectionSummary
     ? `${baseText} (${launchSelectionSummary})`
     : baseText;
+}
+
+function formatDurationMs(value) {
+  if (!Number.isInteger(value) || value < 0) {
+    return "unknown";
+  }
+
+  if (value < 1000) {
+    return `${value}ms`;
+  }
+
+  return `${Math.round(value / 1000)}s`;
 }
 
 function summarizeAutoCommandResult(execution) {
@@ -682,6 +695,25 @@ function createPiProgressReporter(ctx, {
 
     if (event.type === "packet_finish") {
       setStatus(`${statusPrefix}: ${event.role} ${event.status}`);
+      return;
+    }
+
+    if (event.type === "packet_heartbeat") {
+      const runId = typeof event.programId === "string" && event.programId.length > 0
+        ? event.programId
+        : event.workflowId;
+      const contractPart = typeof event.contractId === "string" && event.contractId.length > 0
+        ? ` contract ${event.contractId}`
+        : "";
+      const backendPart = typeof event.selectedBackend === "string" && event.selectedBackend.length > 0
+        ? ` via ${event.selectedBackend}`
+        : "";
+      const timeoutPart = Number.isInteger(event.timeoutBudgetMs)
+        ? ` budget ${formatDurationMs(event.timeoutBudgetMs)}`
+        : " budget unknown";
+      const message = `${statusPrefix}: run ${runId}${contractPart} ${event.role}${backendPart} active elapsed ${formatDurationMs(event.elapsedMs)}${timeoutPart}`;
+      setStatus(message);
+      notify(message, "info");
     }
   };
 }
@@ -697,15 +729,27 @@ export function createPiExtension({
   adapterSupportedRoles = PI_ADAPTER_DEFAULT_SUPPORTED_ROLES,
   adapterFactory = createPiAdapter,
   workerRunnerFactory = createPiWorkerRunner,
-  autoRunnerFactory = createAutoBackendRunner
+  autoRunnerFactory = createAutoBackendRunner,
+  processHeartbeatIntervalMs = null
 } = {}) {
   return function registerPiExtension(pi) {
     const resolvedWorkerAdapter = workerAdapter ?? adapterFactory({
       host: pi,
       supportedRoles: adapterSupportedRoles
     });
+    const nativeModelProbe = Array.isArray(pi?.supportedModels)
+      ? async ({ providerId, candidateModels }) => ({
+        providerId,
+        candidateModels,
+        supportedModels: candidateModels.filter((model) => pi.supportedModels.includes(model)),
+        blockedReason: null
+      })
+      : typeof pi?.runWorker === "function" || typeof pi?.runtime?.runWorker === "function"
+        ? createCachedProcessModelProbe()
+        : null;
     const resolvedWorkerRunner = workerRunner ?? workerRunnerFactory({
-      adapter: resolvedWorkerAdapter
+      adapter: resolvedWorkerAdapter,
+      modelProbe: nativeModelProbe
     });
     const resolvedAutoRunner = autoRunnerFactory({
       defaultRunner: resolvedWorkerRunner,
@@ -736,7 +780,10 @@ export function createPiExtension({
         runner: resolvedAutoRunner,
         approvedHighRisk: resolvedApproval,
         policyProfile: resolvedPolicyProfile,
-        onProgress
+        onProgress,
+        ...(Number.isInteger(processHeartbeatIntervalMs) && processHeartbeatIntervalMs > 0
+          ? { heartbeatIntervalMs: processHeartbeatIntervalMs }
+          : {})
       });
     };
 
@@ -940,6 +987,7 @@ export function createPiExtension({
               onProgress: progressReporter
             }),
             runStore,
+            buildSessionStore: resolvedBuildSessionStore,
             buildId: buildSession.buildId,
             onProgress: progressReporter
           });
@@ -1192,6 +1240,7 @@ export function createPiExtension({
               onProgress: progressReporter
             }),
             runStore,
+            buildSessionStore: resolvedBuildSessionStore,
             buildId,
             onProgress: progressReporter
           });
@@ -1468,13 +1517,84 @@ export function createPiExtension({
         });
         const execution = await runAutoWorkflow(input, {
           runner: resolvedAutoRunner,
-          onProgress: progressReporter
+          onProgress: progressReporter,
+          ...(Number.isInteger(processHeartbeatIntervalMs) && processHeartbeatIntervalMs > 0
+            ? { heartbeatIntervalMs: processHeartbeatIntervalMs }
+            : {})
         });
 
         const notification = execution.status === "success"
           ? appendLaunchSelectionSummary("auto workflow success", execution)
           : `auto workflow ${execution.status}: ${execution.stopReason ?? "no stop reason reported"}`;
 
+        ctx.ui.notify(notification, execution.status === "success" ? "info" : "warning");
+        ctx.ui.setStatus(
+          "workflow",
+          appendLaunchSelectionSummary(`${execution.status}: ${execution.workflow.workflowId}`, execution)
+        );
+
+        return {
+          ...execution,
+          summary: summarizeAutoCommandResult(execution),
+          text: formatWorkflowExecution(execution),
+          details: execution
+        };
+      }
+    });
+
+    pi.registerCommand("tiny-edit", {
+      description: "Run a small scoped file edit directly without creating a /build lifecycle session.",
+      handler: async (args, ctx) => {
+        let input;
+        try {
+          input = parseAutoArgs(args);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          ctx.ui.notify(`tiny edit blocked: ${message}`, "warning");
+          ctx.ui.setStatus("workflow", "tiny edit blocked");
+          return {
+            status: "blocked",
+            summary: "Tiny edit could not parse the request.",
+            stopReason: message,
+            text: formatOperatorBlockedMessage({ message }),
+            details: {
+              stopReason: message
+            }
+          };
+        }
+
+        if (input.allowedFiles.length === 0) {
+          const message = "allowedFiles must contain at least one explicit file path for /tiny-edit";
+          ctx.ui.notify(`tiny edit blocked: ${message}`, "warning");
+          ctx.ui.setStatus("workflow", "tiny edit blocked");
+          return {
+            status: "blocked",
+            summary: "Tiny edit requires an explicit file allowlist.",
+            stopReason: message,
+            text: formatOperatorBlockedMessage({ message }),
+            details: {
+              stopReason: message
+            }
+          };
+        }
+
+        const progressReporter = createPiProgressReporter(ctx, {
+          label: "tiny-edit"
+        });
+        const execution = await runAutoWorkflow({
+          ...input,
+          maxRepairLoops: input.maxRepairLoops ?? 0
+        }, {
+          runner: resolvedAutoRunner,
+          onProgress: progressReporter,
+          ...(Number.isInteger(processHeartbeatIntervalMs) && processHeartbeatIntervalMs > 0
+            ? { heartbeatIntervalMs: processHeartbeatIntervalMs }
+            : {})
+        });
+
+        const notification = execution.status === "success"
+          ? appendLaunchSelectionSummary("tiny edit success", execution)
+          : `tiny edit ${execution.status}: ${execution.stopReason ?? "no stop reason reported"}`;
         ctx.ui.notify(notification, execution.status === "success" ? "info" : "warning");
         ctx.ui.setStatus(
           "workflow",

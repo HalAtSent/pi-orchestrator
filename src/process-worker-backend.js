@@ -1,12 +1,20 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { copyFile, cp, mkdir, mkdtemp, readdir, rename, rm, readFile, stat } from "node:fs/promises";
+import { access, copyFile, cp, mkdtemp, readdir, rename, rm, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { createTaskPacket, createWorkerResult, RESULT_STATUSES } from "./contracts.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import {
+  assertExistingPathHasNoSymlinkSegments,
+  assertExistingPathRealpathWithinRoot,
+  assertPathIsNotSymlink,
+  assertWithinRoot,
+  ensureDirectoryNoSymlinkSegments,
+  getPathLstat
+} from "./path-safety.js";
 import {
   deriveCommandObservationsFromCommands,
   normalizeReviewFindings
@@ -32,6 +40,8 @@ const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const DEFAULT_TEMP_PREFIX = "pi-orchestrator-process-worker-";
 const DEFAULT_APPLY_TEMP_PREFIX = ".pi-orchestrator-apply-";
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
+const DEFAULT_TIMEOUT_KILL_GRACE_MS = 2_000;
+const DEFAULT_COMMAND_OUTPUT_BUFFER_MAX_CHARS = 1_000_000;
 const READ_ONLY_RETRY_STDOUT_SNIPPET_MAX_CHARS = 600;
 const LAUNCHER_STDOUT_SURFACE_MAX_CHARS = 1200;
 const LAUNCHER_STDERR_SURFACE_MAX_CHARS = 1200;
@@ -39,6 +49,12 @@ const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
 const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
 const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
 const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
+const TRUSTED_PROCESS_WORKER_BACKENDS = new WeakSet();
+const TRUSTED_PROCESS_WORKER_LAUNCHERS = new WeakSet();
+const PROCESS_SANDBOX_CAPABLE_LAUNCHERS = new WeakSet();
+const TRUSTED_OS_SANDBOX_PROVIDERS = new WeakSet();
+const TRUSTED_PROCESS_WORKER_BACKEND_PROVENANCE = new WeakMap();
+const TRUSTED_PROCESS_WORKER_BACKEND_RUN_PROVENANCE = new WeakMap();
 const LAUNCH_EVIDENCE_LABEL_PATTERN = /^(retry_)?(launcher_path|pi_script_path|pi_package_root|pi_spawn_resolution|launch_error):\s/iu;
 const LAUNCH_DIAGNOSTIC_LABELS = new Set(["launch_error"]);
 const BOUNDARY_LAUNCH_RESULT_STRING_FIELDS = Object.freeze([
@@ -68,6 +84,16 @@ const PROCESS_MODEL_FALLBACK = "gpt-5.4";
 const MODEL_SELECTION_DIRECT = "direct";
 const MODEL_SELECTION_FALLBACK = "fallback";
 const MODEL_SELECTION_BLOCKED = "blocked";
+const VALIDATION_EVIDENCE_KEYS = Object.freeze([
+  "validationEvidence",
+  "validation_evidence"
+]);
+const PROCESS_SANDBOX_REQUIRED = "required";
+const PROCESS_SANDBOX_DISABLED = "disabled";
+const PROCESS_SANDBOX_POLICIES = Object.freeze([
+  PROCESS_SANDBOX_REQUIRED,
+  PROCESS_SANDBOX_DISABLED
+]);
 const ROLE_CONTRACT_DOCS = Object.freeze({
   common: Object.freeze({
     label: "docs/agents/COMMON.md",
@@ -155,22 +181,22 @@ const FALLBACK_ROLE_GUIDANCE = Object.freeze({
 const PROCESS_ROLE_PROFILES = Object.freeze({
   explorer: Object.freeze({
     provider: PROCESS_PROVIDER_OPENAI_CODEX,
-    preferredModel: "gpt-5.4",
+    preferredModel: "gpt-5.5",
     thinking: "high"
   }),
   implementer: Object.freeze({
     provider: PROCESS_PROVIDER_OPENAI_CODEX,
-    preferredModel: "gpt-5.3-codex",
+    preferredModel: "gpt-5.5",
     thinking: "medium"
   }),
   reviewer: Object.freeze({
     provider: PROCESS_PROVIDER_OPENAI_CODEX,
-    preferredModel: "gpt-5.4",
+    preferredModel: "gpt-5.5",
     thinking: "high"
   }),
   verifier: Object.freeze({
     provider: PROCESS_PROVIDER_OPENAI_CODEX,
-    preferredModel: "gpt-5.4-mini",
+    preferredModel: "gpt-5.5",
     thinking: "medium"
   })
 });
@@ -179,6 +205,78 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message);
   }
+}
+
+export function isTrustedProcessWorkerBackend(backend) {
+  return Boolean(backend) && typeof backend === "object" && TRUSTED_PROCESS_WORKER_BACKENDS.has(backend);
+}
+
+export function getTrustedProcessWorkerBackendProvenance(backend) {
+  if (!isTrustedProcessWorkerBackend(backend)) {
+    return null;
+  }
+
+  return TRUSTED_PROCESS_WORKER_BACKEND_PROVENANCE.get(backend) ?? null;
+}
+
+export function getTrustedProcessWorkerBackendRunProvenance(workerResult) {
+  if (!workerResult || typeof workerResult !== "object") {
+    return null;
+  }
+
+  return TRUSTED_PROCESS_WORKER_BACKEND_RUN_PROVENANCE.get(workerResult) ?? null;
+}
+
+function isTrustedProcessWorkerLauncher(launcher) {
+  return typeof launcher === "function" && TRUSTED_PROCESS_WORKER_LAUNCHERS.has(launcher);
+}
+
+function isProcessSandboxCapableLauncher(launcher) {
+  return typeof launcher === "function" && PROCESS_SANDBOX_CAPABLE_LAUNCHERS.has(launcher);
+}
+
+function createFrozenTrustedOsSandboxProvider(provider, fieldName = "provider") {
+  assertValidSandboxProvider(provider, fieldName);
+  assert(provider.osSandbox === true, `${fieldName}.osSandbox must be true`);
+  assert(typeof provider.isAvailable === "function", `${fieldName}.isAvailable() must be a function`);
+
+  return Object.freeze({
+    id: provider.id.trim(),
+    osSandbox: true,
+    guarantees: Object.freeze(
+      Array.isArray(provider.guarantees)
+        ? provider.guarantees.map((value) => String(value))
+        : []
+    ),
+    isAvailable: provider.isAvailable,
+    prepareSpawn: provider.prepareSpawn
+  });
+}
+
+function trustOsSandboxProvider(provider) {
+  const trustedProvider = createFrozenTrustedOsSandboxProvider(provider);
+  TRUSTED_OS_SANDBOX_PROVIDERS.add(trustedProvider);
+  return trustedProvider;
+}
+
+function markTrustedProcessWorkerBackendRunResult(workerResult, provenance) {
+  if (!workerResult || typeof workerResult !== "object" || !provenance) {
+    return workerResult;
+  }
+
+  TRUSTED_PROCESS_WORKER_BACKEND_RUN_PROVENANCE.set(workerResult, Object.freeze({
+    ...provenance
+  }));
+  return workerResult;
+}
+
+function isTrustedOsSandboxProvider(provider) {
+  return Boolean(
+    provider
+      && typeof provider === "object"
+      && provider.osSandbox === true
+      && TRUSTED_OS_SANDBOX_PROVIDERS.has(provider)
+  );
 }
 
 function clone(value) {
@@ -191,6 +289,303 @@ function unique(values) {
 
 function escapeRegExp(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+}
+
+function normalizeProcessSandboxPolicy(policy) {
+  if (typeof policy !== "string") {
+    return PROCESS_SANDBOX_REQUIRED;
+  }
+
+  const normalized = policy.trim();
+  return normalized.length === 0 ? PROCESS_SANDBOX_REQUIRED : normalized;
+}
+
+function validateProcessSandboxPolicy(policy) {
+  assert(
+    PROCESS_SANDBOX_POLICIES.includes(policy),
+    `processSandbox must be one of: ${PROCESS_SANDBOX_POLICIES.join(", ")}`
+  );
+}
+
+function createPlainSpawnOptions(cwd) {
+  return {
+    cwd,
+    detached: process.platform !== "win32",
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"]
+  };
+}
+
+function normalizeProviderAvailability(value) {
+  if (value === true) {
+    return { available: true, reason: null };
+  }
+
+  if (value === false || value === undefined || value === null) {
+    return { available: false, reason: "sandbox provider unavailable" };
+  }
+
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return {
+      available: value.available === true,
+      reason: typeof value.reason === "string" && value.reason.trim().length > 0
+        ? value.reason.trim()
+        : value.available === true
+          ? null
+          : "sandbox provider unavailable"
+    };
+  }
+
+  return { available: false, reason: "sandbox provider returned invalid availability" };
+}
+
+async function getSandboxProviderAvailability(provider) {
+  const trustedOsSandboxProvider = isTrustedOsSandboxProvider(provider);
+  if (typeof provider?.isAvailable !== "function") {
+    return {
+      available: trustedOsSandboxProvider,
+      reason: trustedOsSandboxProvider ? null : "sandbox provider is not an internally trusted OS sandbox provider"
+    };
+  }
+
+  const availability = normalizeProviderAvailability(await provider.isAvailable());
+  if (availability.available === true && !trustedOsSandboxProvider) {
+    return {
+      available: false,
+      reason: "sandbox provider is not an internally trusted OS sandbox provider"
+    };
+  }
+
+  return availability;
+}
+
+function assertValidSandboxProvider(provider, fieldName = "sandboxProvider") {
+  assert(provider && typeof provider === "object", `${fieldName} must be an object`);
+  assert(typeof provider.id === "string" && provider.id.trim().length > 0, `${fieldName}.id must be a non-empty string`);
+  assert(typeof provider.prepareSpawn === "function", `${fieldName}.prepareSpawn(request) must be a function`);
+}
+
+function createUnavailableProcessSandboxProvider({ id, reason }) {
+  const providerId = typeof id === "string" && id.trim().length > 0
+    ? id.trim()
+    : "unavailable-process-sandbox";
+  const unavailableReason = typeof reason === "string" && reason.trim().length > 0
+    ? reason.trim()
+    : "no supported process sandbox provider is available";
+
+  return {
+    id: providerId,
+    osSandbox: false,
+    guarantees: [],
+    async isAvailable() {
+      return {
+        available: false,
+        reason: unavailableReason
+      };
+    },
+    async prepareSpawn() {
+      throw new Error(unavailableReason);
+    }
+  };
+}
+
+export function createUnsandboxedProcessSpawnProvider() {
+  return {
+    id: "unsandboxed-process-spawn",
+    osSandbox: false,
+    guarantees: [
+      "ordinary child process; cwd isolation and post-run repository diff observation only",
+      "does not confine reads, network, descendant spawning, or absolute-path writes while the worker runs"
+    ],
+    async isAvailable() {
+      return { available: true, reason: null };
+    },
+    async prepareSpawn({ command, args, cwd }) {
+      return {
+        command,
+        args: Array.isArray(args) ? args.map((value) => String(value)) : [],
+        spawnOptions: createPlainSpawnOptions(cwd),
+        evidence: [
+          "unsandboxed_process_backend_opt_in: true"
+        ]
+      };
+    }
+  };
+}
+
+function sandboxProfileString(value) {
+  return JSON.stringify(String(value));
+}
+
+function uniqueExistingStringPaths(paths) {
+  return unique(
+    paths
+      .filter((pathValue) => typeof pathValue === "string" && pathValue.trim().length > 0)
+      .map((pathValue) => resolve(pathValue))
+  );
+}
+
+function buildMacOSSandboxProfile({
+  workspaceRoot,
+  extraReadRoots = []
+}) {
+  const readRoots = uniqueExistingStringPaths([
+    workspaceRoot,
+    ...extraReadRoots,
+    "/bin",
+    "/sbin",
+    "/usr",
+    "/System",
+    "/Library"
+  ]);
+  const writeRoots = uniqueExistingStringPaths([workspaceRoot]);
+
+  return [
+    "(version 1)",
+    "(deny default)",
+    "(allow process*)",
+    "(allow signal (target self))",
+    "(allow sysctl-read)",
+    "(allow mach-lookup)",
+    "(allow file-read-metadata)",
+    ...readRoots.map((pathValue) => `(allow file-read* (subpath ${sandboxProfileString(pathValue)}))`),
+    ...writeRoots.map((pathValue) => `(allow file-write* (subpath ${sandboxProfileString(pathValue)}))`),
+    "(deny network*)",
+    ""
+  ].join("\n");
+}
+
+export function createMacOSSandboxExecProvider({
+  sandboxExecPath = "/usr/bin/sandbox-exec"
+} = {}) {
+  const implementation = Object.freeze({
+    sandboxExecPath: String(sandboxExecPath)
+  });
+
+  const isAvailable = async () => {
+    if (process.platform !== "darwin") {
+      return {
+        available: false,
+        reason: `macos sandbox-exec provider is unavailable on ${process.platform}`
+      };
+    }
+
+    try {
+      await access(implementation.sandboxExecPath);
+      return { available: true, reason: null };
+    } catch {
+      return {
+        available: false,
+        reason: `${implementation.sandboxExecPath} is not available`
+      };
+    }
+  };
+
+  const prepareSpawn = async ({
+    command,
+    args,
+    cwd,
+    workspaceRoot,
+    extraReadRoots = []
+  }) => {
+    const availability = await isAvailable();
+    if (availability.available !== true) {
+      throw new Error(availability.reason ?? "macos sandbox-exec provider is unavailable");
+    }
+
+    const profilePath = join(
+      workspaceRoot,
+      `.pi-orchestrator-sandbox-${process.pid}-${Date.now()}.sb`
+    );
+    await writeFile(profilePath, buildMacOSSandboxProfile({
+      workspaceRoot,
+      extraReadRoots
+    }), "utf8");
+
+    return {
+      command: implementation.sandboxExecPath,
+      args: ["-f", profilePath, command, ...args.map((value) => String(value))],
+      spawnOptions: createPlainSpawnOptions(cwd),
+      evidence: [
+        `process_sandbox_profile: ${profilePath}`
+      ]
+    };
+  };
+
+  return trustOsSandboxProvider({
+    id: "macos-sandbox-exec",
+    osSandbox: true,
+    guarantees: [
+      "sandbox-exec profile denies network access",
+      "sandbox-exec profile denies default filesystem access and permits worker writes only under the temp workspace",
+      "timeout cleanup signals the sandboxed process group"
+    ],
+    isAvailable,
+    prepareSpawn
+  });
+}
+
+export function createDefaultProcessSandboxProvider({
+  platform = process.platform
+} = {}) {
+  if (platform === "darwin") {
+    return createMacOSSandboxExecProvider();
+  }
+
+  if (platform === "linux") {
+    return createUnavailableProcessSandboxProvider({
+      id: "linux-process-sandbox-unavailable",
+      reason: "linux process backend requires a configured namespace/seccomp/bubblewrap/firejail-style provider"
+    });
+  }
+
+  if (platform === "win32") {
+    return createUnavailableProcessSandboxProvider({
+      id: "windows-process-sandbox-unavailable",
+      reason: "windows process backend requires a configured restricted-token/job-object/AppContainer provider"
+    });
+  }
+
+  return createUnavailableProcessSandboxProvider({
+    id: `${platform}-process-sandbox-unavailable`,
+    reason: `no process sandbox provider is configured for ${platform}`
+  });
+}
+
+function createProcessSandboxConfig({
+  processSandbox,
+  sandboxProvider,
+  unsandboxedProcessBackendOptIn
+} = {}) {
+  const policy = normalizeProcessSandboxPolicy(processSandbox);
+  validateProcessSandboxPolicy(policy);
+
+  if (policy === PROCESS_SANDBOX_DISABLED) {
+    assert(
+      unsandboxedProcessBackendOptIn === true,
+      "processSandbox disabled requires unsandboxedProcessBackendOptIn: true"
+    );
+    const provider = sandboxProvider ?? createUnsandboxedProcessSpawnProvider();
+    assertValidSandboxProvider(provider);
+    return {
+      policy,
+      provider,
+      osSandbox: false,
+      trustBoundary: "observation_only",
+      unsandboxedProcessBackendOptIn: true
+    };
+  }
+
+  const provider = sandboxProvider ?? createDefaultProcessSandboxProvider();
+  assertValidSandboxProvider(provider);
+  const trustedOsSandboxProvider = isTrustedOsSandboxProvider(provider);
+  return {
+    policy,
+    provider,
+    osSandbox: trustedOsSandboxProvider,
+    trustBoundary: trustedOsSandboxProvider ? "os_sandbox" : "unavailable",
+    unsandboxedProcessBackendOptIn: false
+  };
 }
 
 function stripMarkdownFormatting(value) {
@@ -449,7 +844,8 @@ function createBlockedResult(summary, {
   commandsRun = [],
   observedCommandsRun,
   evidence = [],
-  openQuestions = []
+  openQuestions = [],
+  providerModelSelection = null
 } = {}) {
   const normalizedCommandsRun = normalizeStringArray(commandsRun);
   const commandObservationCommands = resolveObservedCommandsForTypedObservations({
@@ -464,7 +860,8 @@ function createBlockedResult(summary, {
     commandsRun: normalizedCommandsRun,
     ...(commandObservations.length > 0 ? { commandObservations } : {}),
     evidence: normalizeStringArray(evidence),
-    openQuestions: normalizeStringArray(openQuestions)
+    openQuestions: normalizeStringArray(openQuestions),
+    providerModelSelection
   });
 }
 
@@ -788,12 +1185,6 @@ function normalizeRelativeFilePath(pathValue, fieldName) {
   return normalized;
 }
 
-function assertWithinRoot(rootPath, absolutePath, label) {
-  const relativePath = normalizePath(relative(rootPath, absolutePath));
-  const outsideRoot = relativePath === ".." || relativePath.startsWith("../");
-  assert(!outsideRoot, `${label} resolves outside the expected root`);
-}
-
 async function getPathStats(pathValue) {
   try {
     return await stat(pathValue);
@@ -803,6 +1194,76 @@ async function getPathStats(pathValue) {
     }
 
     throw error;
+  }
+}
+
+function assertNoUnsafeHardlinks(pathStats, label) {
+  if (!pathStats || !Number.isInteger(pathStats.nlink)) {
+    return;
+  }
+
+  if (pathStats.nlink > 1) {
+    throw new Error(`${label} must not be hardlinked to multiple directory entries`);
+  }
+}
+
+async function assertWorkspaceChangedFileSourceSafe(rootPath, pathValue, changedFile) {
+  await assertExistingPathHasNoSymlinkSegments(rootPath, pathValue, "workspace changed file");
+  const pathStats = await getPathLstat(pathValue);
+  if (!pathStats) {
+    return null;
+  }
+
+  if (pathStats.isSymbolicLink()) {
+    throw new Error(`workspace changed file must not be a symlink: ${changedFile}`);
+  }
+
+  if (!pathStats.isFile()) {
+    throw new Error(`changed file source must be a regular file: ${changedFile}`);
+  }
+
+  assertNoUnsafeHardlinks(pathStats, "workspace changed file");
+  return pathStats;
+}
+
+async function removeRollbackDestinationIfPresent(rootPath, pathValue, label) {
+  await assertExistingPathHasNoSymlinkSegments(rootPath, dirname(pathValue), label);
+  const pathStats = await getPathLstat(pathValue);
+  if (!pathStats) {
+    return;
+  }
+
+  if (pathStats.isDirectory()) {
+    throw new Error(`${label} rollback destination must not be a directory`);
+  }
+
+  await rm(pathValue, { force: true });
+}
+
+async function assertExistingTreeHasNoSymlinks(pathValue, label) {
+  const pathStats = await getPathLstat(pathValue);
+  if (!pathStats) {
+    return;
+  }
+
+  if (pathStats.isSymbolicLink()) {
+    throw new Error(`${label} must not be a symlink`);
+  }
+
+  if (!pathStats.isDirectory()) {
+    return;
+  }
+
+  const entries = await readdir(pathValue, { withFileTypes: true });
+  for (const entry of entries) {
+    const childPath = join(pathValue, entry.name);
+    if (entry.isSymbolicLink()) {
+      throw new Error(`${label} must not contain symlinks`);
+    }
+
+    if (entry.isDirectory()) {
+      await assertExistingTreeHasNoSymlinks(childPath, label);
+    }
   }
 }
 
@@ -827,9 +1288,13 @@ async function applyChangedFilesToRepository({
       const changedFile = normalizeRelativeFilePath(changedFileInput, "changedFiles");
       const sourcePath = resolve(normalizedWorkspaceRoot, changedFile);
       assertWithinRoot(normalizedWorkspaceRoot, sourcePath, "workspace changed file");
+      await assertExistingPathHasNoSymlinkSegments(normalizedWorkspaceRoot, dirname(sourcePath), "workspace changed file");
+      await assertExistingPathRealpathWithinRoot(normalizedWorkspaceRoot, sourcePath, "workspace changed file");
 
       const destinationPath = resolve(normalizedRepositoryRoot, changedFile);
       assertWithinRoot(normalizedRepositoryRoot, destinationPath, "repository changed file");
+      await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, dirname(destinationPath), "repository changed file");
+      await assertPathIsNotSymlink(destinationPath, "repository changed file");
 
       const sourceStats = await getPathStats(sourcePath);
       if (sourceStats && !sourceStats.isFile()) {
@@ -848,8 +1313,13 @@ async function applyChangedFilesToRepository({
       assertWithinRoot(backupRoot, backupPath, "backup changed file");
 
       if (sourceStats) {
-        await mkdir(dirname(stagedPath), { recursive: true });
+        const safeSourceStats = await assertWorkspaceChangedFileSourceSafe(normalizedWorkspaceRoot, sourcePath, changedFile);
+        assert(safeSourceStats, `changed file source disappeared before staging: ${changedFile}`);
+        await ensureDirectoryNoSymlinkSegments(stagedRoot, dirname(stagedPath), "staged changed file");
         await copyFile(sourcePath, stagedPath);
+        const stagedStats = await getPathLstat(stagedPath);
+        assert(stagedStats?.isFile(), `staged changed file must be a regular file: ${changedFile}`);
+        assertNoUnsafeHardlinks(stagedStats, "staged changed file");
       }
 
       operations.push({
@@ -867,14 +1337,20 @@ async function applyChangedFilesToRepository({
     commitStarted = true;
     for (const operation of operations) {
       if (operation.destinationExisted) {
-        await mkdir(dirname(operation.backupPath), { recursive: true });
+        await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, dirname(operation.destinationPath), "repository changed file");
+        await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
+        await ensureDirectoryNoSymlinkSegments(backupRoot, dirname(operation.backupPath), "backup changed file");
         await moveFileFn(operation.destinationPath, operation.backupPath);
+        await assertPathIsNotSymlink(operation.backupPath, "backup changed file");
         operation.backupCreated = true;
       }
 
       if (operation.sourceExists) {
-        await mkdir(dirname(operation.destinationPath), { recursive: true });
+        await assertWorkspaceChangedFileSourceSafe(stagedRoot, operation.stagedPath, operation.changedFile);
+        await ensureDirectoryNoSymlinkSegments(normalizedRepositoryRoot, dirname(operation.destinationPath), "repository changed file");
+        await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
         await moveFileFn(operation.stagedPath, operation.destinationPath);
+        await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
         operation.destinationApplied = true;
       }
     }
@@ -884,13 +1360,24 @@ async function applyChangedFilesToRepository({
       for (const operation of [...operations].reverse()) {
         try {
           if (operation.destinationApplied) {
-            await rm(operation.destinationPath, { force: true });
+            await removeRollbackDestinationIfPresent(
+              normalizedRepositoryRoot,
+              operation.destinationPath,
+              "repository changed file"
+            );
             operation.destinationApplied = false;
           }
 
           if (operation.backupCreated) {
-            await mkdir(dirname(operation.destinationPath), { recursive: true });
+            await assertWorkspaceChangedFileSourceSafe(backupRoot, operation.backupPath, operation.changedFile);
+            await removeRollbackDestinationIfPresent(
+              normalizedRepositoryRoot,
+              operation.destinationPath,
+              "repository changed file"
+            );
+            await ensureDirectoryNoSymlinkSegments(normalizedRepositoryRoot, dirname(operation.destinationPath), "repository changed file");
             await moveFileFn(operation.backupPath, operation.destinationPath);
+            await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
             operation.backupCreated = false;
           }
         } catch (rollbackFailure) {
@@ -1137,21 +1624,109 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuid
   return lines.join("\n");
 }
 
-async function runCommand({ command, args, cwd, timeoutMs }) {
+function appendBoundedOutput(currentValue, chunk, {
+  maxChars
+}) {
+  if (currentValue.length >= maxChars) {
+    return {
+      value: currentValue,
+      truncated: true
+    };
+  }
+
+  const nextChunk = chunk.toString();
+  const remainingChars = maxChars - currentValue.length;
+  if (nextChunk.length <= remainingChars) {
+    return {
+      value: currentValue + nextChunk,
+      truncated: false
+    };
+  }
+
+  return {
+    value: currentValue + nextChunk.slice(0, remainingChars),
+    truncated: true
+  };
+}
+
+function buildSandboxAttestation(provider, evidence = []) {
+  const osSandbox = isTrustedOsSandboxProvider(provider);
+  return {
+    provider: provider.id,
+    osSandbox,
+    trustBoundary: osSandbox ? "os_sandbox" : "observation_only",
+    guarantees: Array.isArray(provider.guarantees) ? provider.guarantees.map((value) => String(value)) : [],
+    evidence: Array.isArray(evidence) ? evidence.map((value) => String(value)) : []
+  };
+}
+
+async function runCommand({
+  command,
+  args,
+  cwd,
+  timeoutMs,
+  timeoutKillGraceMs = DEFAULT_TIMEOUT_KILL_GRACE_MS,
+  outputBufferMaxChars = DEFAULT_COMMAND_OUTPUT_BUFFER_MAX_CHARS,
+  sandboxProvider = createUnsandboxedProcessSpawnProvider(),
+  sandboxContext = {}
+}) {
+  const startedAt = Date.now();
+  let spawnPlan;
+  try {
+    assertValidSandboxProvider(sandboxProvider, "sandboxProvider");
+    spawnPlan = await sandboxProvider.prepareSpawn({
+      command,
+      args: Array.isArray(args) ? args.map((value) => String(value)) : [],
+      cwd,
+      ...sandboxContext
+    });
+  } catch (error) {
+    return {
+      command,
+      args,
+      cwd,
+      exitCode: null,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      stdoutTruncated: false,
+      stderrTruncated: false,
+      timeoutSignal: null,
+      forcedKillSignal: null,
+      forcedKillAttempted: false,
+      processGroupCleanup: false,
+      timeoutBudgetMs: timeoutMs,
+      error,
+      durationMs: Date.now() - startedAt,
+      sandbox: buildSandboxAttestation(sandboxProvider)
+    };
+  }
+
+  const spawnCommand = typeof spawnPlan?.command === "string" ? spawnPlan.command : command;
+  const spawnArgs = Array.isArray(spawnPlan?.args) ? spawnPlan.args.map((value) => String(value)) : [];
+  const spawnOptions = spawnPlan?.spawnOptions && typeof spawnPlan.spawnOptions === "object"
+    ? spawnPlan.spawnOptions
+    : createPlainSpawnOptions(cwd);
+  const sandboxAttestation = buildSandboxAttestation(sandboxProvider, spawnPlan?.evidence);
+
   return new Promise((resolveResult) => {
-    const startedAt = Date.now();
     let stdout = "";
     let stderr = "";
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
     let timedOut = false;
+    let timeoutSignal = null;
+    let forcedKillSignal = null;
+    let forcedKillAttempted = false;
+    let processGroupCleanup = false;
+    let forcedKillHandle = null;
 
     let childProcess;
     try {
-      childProcess = spawn(command, args, {
-        cwd,
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
+      childProcess = spawn(spawnCommand, spawnArgs, spawnOptions);
+      processGroupCleanup = process.platform !== "win32" && Number.isInteger(childProcess.pid);
     } catch (error) {
       resolveResult({
         command,
@@ -1162,15 +1737,57 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut: false,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
+        timeoutSignal,
+        forcedKillSignal,
+        forcedKillAttempted,
+        processGroupCleanup,
+        timeoutBudgetMs: timeoutMs,
+        sandbox: sandboxAttestation,
         error,
         durationMs: Date.now() - startedAt
       });
       return;
     }
 
+    function signalChild(signal) {
+      if (processGroupCleanup) {
+        try {
+          process.kill(-childProcess.pid, signal);
+          return true;
+        } catch (error) {
+          if (error && error.code !== "ESRCH") {
+            // Fall through to direct child signaling for platforms or launches
+            // where process-group signaling is unavailable despite detached spawn.
+          } else {
+            return false;
+          }
+        }
+      }
+
+      try {
+        return childProcess.kill(signal);
+      } catch {
+        return false;
+      }
+    }
+
     const timeoutHandle = setTimeout(() => {
       timedOut = true;
-      childProcess.kill();
+      timeoutSignal = "SIGTERM";
+      signalChild(timeoutSignal);
+      forcedKillHandle = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        forcedKillAttempted = true;
+        forcedKillSignal = "SIGKILL";
+        signalChild(forcedKillSignal);
+      }, timeoutKillGraceMs);
+      if (typeof forcedKillHandle.unref === "function") {
+        forcedKillHandle.unref();
+      }
     }, timeoutMs);
 
     function finalize(result) {
@@ -1180,17 +1797,34 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
 
       settled = true;
       clearTimeout(timeoutHandle);
+      if (forcedKillHandle) {
+        clearTimeout(forcedKillHandle);
+      }
       resolveResult({
         ...result,
+        timeoutSignal,
+        forcedKillSignal,
+        forcedKillAttempted,
+        processGroupCleanup,
+        timeoutBudgetMs: timeoutMs,
+        sandbox: sandboxAttestation,
         durationMs: Date.now() - startedAt
       });
     }
 
     childProcess.stdout?.on("data", (chunk) => {
-      stdout += chunk.toString();
+      const nextOutput = appendBoundedOutput(stdout, chunk, {
+        maxChars: outputBufferMaxChars
+      });
+      stdout = nextOutput.value;
+      stdoutTruncated = stdoutTruncated || nextOutput.truncated;
     });
     childProcess.stderr?.on("data", (chunk) => {
-      stderr += chunk.toString();
+      const nextOutput = appendBoundedOutput(stderr, chunk, {
+        maxChars: outputBufferMaxChars
+      });
+      stderr = nextOutput.value;
+      stderrTruncated = stderrTruncated || nextOutput.truncated;
     });
 
     childProcess.on("error", (error) => {
@@ -1203,6 +1837,8 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
         error
       });
     });
@@ -1217,6 +1853,8 @@ async function runCommand({ command, args, cwd, timeoutMs }) {
         timedOut,
         stdout,
         stderr,
+        stdoutTruncated,
+        stderrTruncated,
         error: null
       });
     });
@@ -1260,7 +1898,9 @@ function inferObservedCommandsRun(launchResult) {
   return [];
 }
 
-function normalizeProcessRoleProfiles(roleProfilesInput) {
+function normalizeProcessRoleProfiles(roleProfilesInput, {
+  allowFallbacks = false
+} = {}) {
   assert(roleProfilesInput && typeof roleProfilesInput === "object", "roleProfiles must be an object");
   const normalized = {};
 
@@ -1270,13 +1910,23 @@ function normalizeProcessRoleProfiles(roleProfilesInput) {
 
     const provider = typeof profile.provider === "string" && profile.provider.trim().length > 0
       ? profile.provider.trim()
-      : PROCESS_PROVIDER_OPENAI_CODEX;
+      : allowFallbacks
+        ? PROCESS_PROVIDER_OPENAI_CODEX
+        : null;
     const preferredModel = typeof profile.preferredModel === "string" && profile.preferredModel.trim().length > 0
       ? profile.preferredModel.trim()
-      : PROCESS_MODEL_FALLBACK;
+      : allowFallbacks
+        ? PROCESS_MODEL_FALLBACK
+        : null;
     const thinking = typeof profile.thinking === "string" && profile.thinking.trim().length > 0
       ? profile.thinking.trim()
-      : "off";
+      : allowFallbacks
+        ? "off"
+        : null;
+
+    assert(provider, `role profile for ${role} must include provider`);
+    assert(preferredModel, `role profile for ${role} must include preferredModel`);
+    assert(thinking, `role profile for ${role} must include thinking`);
 
     normalized[role] = Object.freeze({
       provider,
@@ -1445,13 +2095,16 @@ function resolveRoleLaunchSelection({
 export function createProcessRoleArgsBuilder({
   roleProfiles = PROCESS_ROLE_PROFILES,
   fallbackModel = PROCESS_MODEL_FALLBACK,
+  allowRoleProfileFallbacks = false,
   modelProbe = createCachedProcessModelProbe({
     providerId: PROCESS_PROVIDER_OPENAI_CODEX,
     candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
   })
 } = {}) {
   assert(typeof modelProbe === "function", "modelProbe(options) must be a function");
-  const normalizedRoleProfiles = normalizeProcessRoleProfiles(roleProfiles);
+  const normalizedRoleProfiles = normalizeProcessRoleProfiles(roleProfiles, {
+    allowFallbacks: allowRoleProfileFallbacks
+  });
   const normalizedFallbackModel = typeof fallbackModel === "string" && fallbackModel.trim().length > 0
     ? fallbackModel.trim()
     : PROCESS_MODEL_FALLBACK;
@@ -1574,6 +2227,55 @@ function prefixEvidenceEntries(entries, prefix) {
   return normalizeStringArray(entries).map((entry) => `${prefix}${entry}`);
 }
 
+function buildProcessSandboxEvidence({
+  sandboxConfig,
+  launchResult = null,
+  availability = null
+} = {}) {
+  const launchSandbox = launchResult?.sandbox && typeof launchResult.sandbox === "object"
+    ? launchResult.sandbox
+    : null;
+  const providerId = launchSandbox?.provider ?? sandboxConfig?.provider?.id ?? "unknown";
+  const osSandbox = availability?.available === false
+    ? false
+    : sandboxConfig?.osSandbox === true;
+  const trustBoundary = availability?.available === false
+    ? "unavailable"
+    : sandboxConfig?.trustBoundary
+    ?? (osSandbox ? "os_sandbox" : "observation_only");
+  const guarantees = Array.isArray(launchSandbox?.guarantees)
+    ? launchSandbox.guarantees
+    : Array.isArray(sandboxConfig?.provider?.guarantees)
+      ? sandboxConfig.provider.guarantees
+      : [];
+  const evidence = [
+    `process_sandbox_policy: ${sandboxConfig?.policy ?? "unknown"}`,
+    `process_backend_os_sandbox: ${osSandbox}`,
+    `process_backend_trust_boundary: ${trustBoundary}`,
+    `process_sandbox_provider: ${providerId}`,
+    `process_sandbox_available: ${availability?.available === false ? "false" : "true"}`
+  ];
+
+  if (sandboxConfig?.policy === PROCESS_SANDBOX_DISABLED || sandboxConfig?.unsandboxedProcessBackendOptIn === true) {
+    evidence.push("unsandboxed_process_backend_opt_in: true");
+    evidence.push("process_backend_boundary: workspace copy plus allowlist apply checks; not an OS sandbox");
+  }
+
+  if (availability?.available === false && availability.reason) {
+    evidence.push(`process_sandbox_unavailable_reason: ${availability.reason}`);
+  }
+
+  for (const guarantee of guarantees) {
+    evidence.push(`process_sandbox_guarantee: ${guarantee}`);
+  }
+
+  if (Array.isArray(launchSandbox?.evidence)) {
+    evidence.push(...launchSandbox.evidence);
+  }
+
+  return evidence.map((line) => String(line));
+}
+
 function buildEvidence({
   launchResult,
   repositoryRoot,
@@ -1582,12 +2284,18 @@ function buildEvidence({
   contextFiles,
   copiedSeedFiles,
   missingSeedFiles,
-  changedFiles
+  changedFiles,
+  sandboxConfig
 }) {
   const launchProfile = describeLaunchProfile(launchResult?.args);
   const evidence = [
     `repository_root: ${repositoryRoot}`,
     `workspace: ${workspaceRoot}`,
+    ...buildProcessSandboxEvidence({
+      sandboxConfig,
+      launchResult
+    }),
+    "changed_surface_observation_basis: launcher workspace file diff",
     `allowed_files: ${allowedFiles.join(", ")}`,
     `context_files: ${contextFiles.length === 0 ? "none" : contextFiles.join(", ")}`,
     `copied_seed_files: ${copiedSeedFiles.length === 0 ? "none" : copiedSeedFiles.join(", ")}`,
@@ -1647,6 +2355,10 @@ function buildEvidence({
     evidence.push(`duration_ms: ${launchResult.durationMs}`);
   }
 
+  if (Number.isInteger(launchResult?.timeoutBudgetMs)) {
+    evidence.push(`timeout_budget_ms: ${launchResult.timeoutBudgetMs}`);
+  }
+
   if (launchResult && launchResult.exitCode !== null && launchResult.exitCode !== undefined) {
     evidence.push(`exit_code: ${launchResult.exitCode}`);
   }
@@ -1659,11 +2371,31 @@ function buildEvidence({
     evidence.push("timed_out: true");
   }
 
+  if (launchResult?.timeoutSignal) {
+    evidence.push(`timeout_signal: ${launchResult.timeoutSignal}`);
+  }
+
+  if (launchResult?.forcedKillAttempted) {
+    evidence.push("timeout_forced_termination_attempted: true");
+  }
+
+  if (launchResult?.forcedKillSignal) {
+    evidence.push(`timeout_forced_signal: ${launchResult.forcedKillSignal}`);
+  }
+
+  if (typeof launchResult?.processGroupCleanup === "boolean") {
+    evidence.push(`timeout_process_group_cleanup: ${launchResult.processGroupCleanup}`);
+  }
+
   if (launchResult?.stdout) {
     evidence.push(`stdout: ${truncateBoundaryString(launchResult.stdout, {
       maxLength: LAUNCHER_STDOUT_SURFACE_MAX_CHARS,
       fieldName: "launchResult.stdout"
     })}`);
+  }
+
+  if (launchResult?.stdoutTruncated) {
+    evidence.push("stdout_buffer_truncated: true");
   }
 
   if (launchResult?.stderr) {
@@ -1673,6 +2405,10 @@ function buildEvidence({
     })}`);
   }
 
+  if (launchResult?.stderrTruncated) {
+    evidence.push("stderr_buffer_truncated: true");
+  }
+
   if (launchResult?.error) {
     evidence.push(`launch_error: ${errorMessage(launchResult.error)}`);
   }
@@ -1680,20 +2416,53 @@ function buildEvidence({
   return evidence.map((line) => String(line));
 }
 
-export function createProcessPiCliLauncher({
-  timeoutMs = DEFAULT_LAUNCH_TIMEOUT_MS,
-  argsBuilder,
-  roleProfiles = PROCESS_ROLE_PROFILES,
-  fallbackModel = PROCESS_MODEL_FALLBACK,
-  roleContractGuidanceLoader = getRoleContractGuidance,
-  modelProbe = createCachedProcessModelProbe({
-    providerId: PROCESS_PROVIDER_OPENAI_CODEX,
-    candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
-  }),
-  spawnCommandResolver = getPiSpawnCommand,
-  runCommandFn = runCommand
+function extractValidationEvidence(launchResult) {
+  for (const key of VALIDATION_EVIDENCE_KEYS) {
+    if (!Array.isArray(launchResult?.[key])) {
+      continue;
+    }
+
+    return normalizeStringArray(launchResult[key])
+      .filter((entry) => entry.trim().length > 0);
+  }
+
+  return [];
+}
+
+function implementerHasReviewableCompletionEvidence({
+  changedFiles
 } = {}) {
+  return Array.isArray(changedFiles) && changedFiles.length > 0;
+}
+
+export function createProcessPiCliLauncher(options = {}) {
+  const {
+    timeoutMs = DEFAULT_LAUNCH_TIMEOUT_MS,
+    timeoutKillGraceMs = DEFAULT_TIMEOUT_KILL_GRACE_MS,
+    argsBuilder,
+    roleProfiles = PROCESS_ROLE_PROFILES,
+    fallbackModel = PROCESS_MODEL_FALLBACK,
+    allowRoleProfileFallbacks = false,
+    roleContractGuidanceLoader = getRoleContractGuidance,
+    modelProbe = createCachedProcessModelProbe({
+      providerId: PROCESS_PROVIDER_OPENAI_CODEX,
+      candidateModels: PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES
+    }),
+    spawnCommandResolver = getPiSpawnCommand,
+    runCommandFn = runCommand
+  } = options;
+  const usesTrustedDefaultLaunchPipeline = !Object.prototype.hasOwnProperty.call(options, "argsBuilder")
+    && !Object.prototype.hasOwnProperty.call(options, "roleProfiles")
+    && !Object.prototype.hasOwnProperty.call(options, "fallbackModel")
+    && !Object.prototype.hasOwnProperty.call(options, "allowRoleProfileFallbacks")
+    && !Object.prototype.hasOwnProperty.call(options, "modelProbe")
+    && !Object.prototype.hasOwnProperty.call(options, "spawnCommandResolver")
+    && !Object.prototype.hasOwnProperty.call(options, "runCommandFn");
   assert(Number.isInteger(timeoutMs) && timeoutMs > 0, "pi launcher timeoutMs must be a positive integer");
+  assert(
+    Number.isInteger(timeoutKillGraceMs) && timeoutKillGraceMs > 0,
+    "pi launcher timeoutKillGraceMs must be a positive integer"
+  );
   assert(typeof roleContractGuidanceLoader === "function", "roleContractGuidanceLoader() must be a function");
   assert(typeof spawnCommandResolver === "function", "spawnCommandResolver(options) must be a function");
   assert(typeof runCommandFn === "function", "runCommandFn(request) must be a function");
@@ -1702,13 +2471,16 @@ export function createProcessPiCliLauncher({
     : createProcessRoleArgsBuilder({
       roleProfiles,
       fallbackModel,
+      allowRoleProfileFallbacks,
       modelProbe
     });
 
-  return async function launchPiWorker({
+  const launchPiWorker = async function launchPiWorker({
     packet,
     context,
+    repositoryRoot = null,
     workspaceRoot,
+    sandboxProvider = createUnsandboxedProcessSpawnProvider(),
     promptOverride = null,
     launchSelectionOverride = null
   }) {
@@ -1738,6 +2510,7 @@ export function createProcessPiCliLauncher({
         stderr: "",
         error,
         durationMs: 0,
+        timeoutBudgetMs: timeoutMs,
         launcher: "pi_cli_args_builder_error",
         launcherPath: null,
         piScriptPath: null,
@@ -1774,6 +2547,7 @@ export function createProcessPiCliLauncher({
         stderr: "",
         error,
         durationMs: 0,
+        timeoutBudgetMs: timeoutMs,
         launcher: "pi_cli_resolution_error",
         launcherPath: null,
         piScriptPath: null,
@@ -1808,6 +2582,7 @@ export function createProcessPiCliLauncher({
         stderr: "",
         error: new Error("Pi script path was not resolved; refusing fallback launcher"),
         durationMs: 0,
+        timeoutBudgetMs: timeoutMs,
         launcher: spawnCommand?.launcher ?? "pi_cli_unresolved",
         launcherPath: spawnCommand?.launcherPath ?? null,
         piScriptPath: spawnCommand?.piScriptPath ?? null,
@@ -1832,6 +2607,7 @@ export function createProcessPiCliLauncher({
         stderr: "",
         error: new Error("Pi launcher command is empty"),
         durationMs: 0,
+        timeoutBudgetMs: timeoutMs,
         launcher: spawnCommand?.launcher ?? "pi_cli",
         launcherPath: spawnCommand?.launcherPath ?? null,
         piScriptPath: spawnCommand?.piScriptPath ?? null,
@@ -1850,7 +2626,19 @@ export function createProcessPiCliLauncher({
         command,
         args: fullArgs,
         cwd: workspaceRoot,
-        timeoutMs
+        timeoutMs,
+        timeoutKillGraceMs,
+        sandboxProvider,
+        sandboxContext: {
+          workspaceRoot,
+          repositoryRoot,
+          extraReadRoots: uniqueExistingStringPaths([
+            dirname(command),
+            spawnCommand?.launcherPath ? dirname(spawnCommand.launcherPath) : null,
+            spawnCommand?.piScriptPath ? dirname(spawnCommand.piScriptPath) : null,
+            spawnCommand?.piPackageRoot ?? null
+          ])
+        }
       });
     } catch (error) {
       launchResult = {
@@ -1863,7 +2651,8 @@ export function createProcessPiCliLauncher({
         stdout: "",
         stderr: "",
         error,
-        durationMs: 0
+        durationMs: 0,
+        timeoutBudgetMs: timeoutMs
       };
     }
 
@@ -1874,12 +2663,21 @@ export function createProcessPiCliLauncher({
       piScriptPath: spawnCommand?.piScriptPath ?? null,
       piPackageRoot: spawnCommand?.piPackageRoot ?? null,
       piSpawnResolution: spawnCommand?.resolutionMessage ?? null,
+      timeoutBudgetMs: timeoutMs,
       commandsRun: [formatCommand(command, fullArgs)],
       observedCommandsRun: launchResult?.error ? [] : [formatCommand(command, fullArgs)],
       launchProfile,
       launchSelection
     };
   };
+  launchPiWorker.getTimeoutBudgetMs = () => timeoutMs;
+  if (!Object.prototype.hasOwnProperty.call(options, "runCommandFn")) {
+    PROCESS_SANDBOX_CAPABLE_LAUNCHERS.add(launchPiWorker);
+  }
+  if (usesTrustedDefaultLaunchPipeline) {
+    TRUSTED_PROCESS_WORKER_LAUNCHERS.add(launchPiWorker);
+  }
+  return launchPiWorker;
 }
 
 export function createPiCliLauncher(options = {}) {
@@ -1895,7 +2693,10 @@ export function createProcessWorkerBackend({
   repositoryRoot = process.cwd(),
   keepWorkspace = false,
   tempPrefix = DEFAULT_TEMP_PREFIX,
-  moveFileFn = rename
+  moveFileFn = rename,
+  processSandbox = PROCESS_SANDBOX_REQUIRED,
+  sandboxProvider,
+  unsandboxedProcessBackendOptIn = false
 } = {}) {
   assert(typeof launcher === "function", "launcher(request) is required");
   assert(typeof repositoryRoot === "string" && repositoryRoot.length > 0, "repositoryRoot must be a non-empty string");
@@ -1904,9 +2705,28 @@ export function createProcessWorkerBackend({
   assert(typeof moveFileFn === "function", "moveFileFn(sourcePath, destinationPath) must be a function");
 
   const normalizedRepositoryRoot = resolve(repositoryRoot);
+  const sandboxConfig = createProcessSandboxConfig({
+    processSandbox,
+    sandboxProvider,
+    unsandboxedProcessBackendOptIn
+  });
   const calls = [];
+  const trustedBackendProvenance = isTrustedProcessWorkerLauncher(launcher) && moveFileFn === rename
+    ? Object.freeze({
+      identity: "pi-orchestrator/process-worker-backend",
+      source: "createProcessWorkerBackend",
+      evidenceKind: sandboxConfig.osSandbox
+        ? "provider_model_selection_trusted_workspace_diff_os_sandboxed"
+        : "provider_model_selection_trusted_workspace_diff_observation_only",
+      osSandbox: sandboxConfig.osSandbox,
+      sandboxProvider: sandboxConfig.provider.id,
+      processSandbox: sandboxConfig.policy,
+      trustBoundary: sandboxConfig.trustBoundary,
+      unsandboxedProcessBackendOptIn: sandboxConfig.unsandboxedProcessBackendOptIn
+    })
+    : null;
 
-  return {
+  const backend = {
     async run(packetInput, contextInput = {}) {
       calls.push({
         packet: clone(packetInput),
@@ -1914,10 +2734,15 @@ export function createProcessWorkerBackend({
       });
 
       let workspaceRoot = null;
-      const finalizeWorkerResult = (result) => redactWorkerResultForBoundary(result, {
-        repositoryRoot: normalizedRepositoryRoot,
-        processWorkspaceRoots: workspaceRoot ? [workspaceRoot] : []
-      });
+      const finalizeWorkerResult = (result) => {
+        const finalizedResult = redactWorkerResultForBoundary(result, {
+          repositoryRoot: normalizedRepositoryRoot,
+          processWorkspaceRoots: workspaceRoot ? [workspaceRoot] : []
+        });
+        return trustedBackendProvenance
+          ? markTrustedProcessWorkerBackendRunResult(finalizedResult, trustedBackendProvenance)
+          : finalizedResult;
+      };
       const blockedResult = (summary, options = {}) => finalizeWorkerResult(createBlockedResult(summary, options));
       const failedResult = (summary, options = {}) => finalizeWorkerResult(createFailedResult(summary, options));
       const successResult = (summary, options = {}) => finalizeWorkerResult(createSuccessResult(summary, options));
@@ -1966,6 +2791,40 @@ export function createProcessWorkerBackend({
         contextFiles
       };
 
+      let sandboxAvailability;
+      try {
+        sandboxAvailability = await getSandboxProviderAvailability(sandboxConfig.provider);
+      } catch (error) {
+        sandboxAvailability = {
+          available: false,
+          reason: errorMessage(error)
+        };
+      }
+
+      if (sandboxConfig.policy === PROCESS_SANDBOX_REQUIRED && sandboxAvailability.available !== true) {
+        return blockedResult("process worker blocked: required OS sandbox provider is unavailable", {
+          evidence: buildProcessSandboxEvidence({
+            sandboxConfig,
+            availability: sandboxAvailability
+          }),
+          openQuestions: [
+            "Configure a supported OS sandbox provider before enabling the process backend for execution."
+          ]
+        });
+      }
+
+      if (sandboxConfig.policy === PROCESS_SANDBOX_REQUIRED && !isProcessSandboxCapableLauncher(launcher)) {
+        return blockedResult("process worker blocked: launcher does not support the process sandbox provider contract", {
+          evidence: buildProcessSandboxEvidence({
+            sandboxConfig,
+            availability: sandboxAvailability
+          }),
+          openQuestions: [
+            "Use createProcessPiCliLauncher without an injected runCommandFn, or disable process sandboxing only with explicit dev-mode opt-in."
+          ]
+        });
+      }
+
       let changedFiles = [];
       let launchResult = null;
       let providerModelSelection = null;
@@ -1983,18 +2842,26 @@ export function createProcessWorkerBackend({
         for (const seedFile of seedFiles) {
           const sourcePath = resolve(normalizedRepositoryRoot, seedFile);
           assertWithinRoot(normalizedRepositoryRoot, sourcePath, "seed source file");
+          await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, sourcePath, "seed source file");
+          await assertExistingPathRealpathWithinRoot(normalizedRepositoryRoot, sourcePath, "seed source file");
+          await assertExistingTreeHasNoSymlinks(sourcePath, "seed source file");
 
           const destinationPath = resolve(workspaceRoot, seedFile);
           assertWithinRoot(workspaceRoot, destinationPath, "seed destination file");
 
           const sourceStats = await getPathStats(sourcePath);
           if (sourceStats) {
-            await mkdir(dirname(destinationPath), { recursive: true });
+            await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, sourcePath, "seed source file");
+            await assertExistingPathRealpathWithinRoot(normalizedRepositoryRoot, sourcePath, "seed source file");
+            await assertExistingTreeHasNoSymlinks(sourcePath, "seed source file");
+            await ensureDirectoryNoSymlinkSegments(workspaceRoot, dirname(destinationPath), "seed destination file");
 
             if (sourceStats.isDirectory()) {
               await cp(sourcePath, destinationPath, { recursive: true });
+              await assertExistingTreeHasNoSymlinks(destinationPath, "seed destination file");
             } else {
               await copyFile(sourcePath, destinationPath);
+              await assertPathIsNotSymlink(destinationPath, "seed destination file");
             }
 
             copiedSeedFiles.push(seedFile);
@@ -2009,9 +2876,8 @@ export function createProcessWorkerBackend({
           assertWithinRoot(workspaceRoot, absolutePath, "allowed file");
           return absolutePath;
         });
-
         for (const targetAbsolutePath of targetAbsolutePaths) {
-          await mkdir(dirname(targetAbsolutePath), { recursive: true });
+          await ensureDirectoryNoSymlinkSegments(workspaceRoot, dirname(targetAbsolutePath), "allowed file parent");
         }
 
         const beforeSnapshot = await snapshotFiles(workspaceRoot);
@@ -2021,6 +2887,8 @@ export function createProcessWorkerBackend({
           context: clone(contextInput),
           repositoryRoot: normalizedRepositoryRoot,
           workspaceRoot,
+          processSandbox: sandboxConfig.policy,
+          sandboxProvider: sandboxConfig.provider,
           targetRelativePaths: clone(allowedFiles),
           targetAbsolutePaths: clone(targetAbsolutePaths),
           targetRelativePath: allowedFiles[0] ?? null,
@@ -2044,7 +2912,8 @@ export function createProcessWorkerBackend({
           contextFiles,
           copiedSeedFiles,
           missingSeedFiles,
-          changedFiles
+          changedFiles,
+          sandboxConfig
         });
         let readOnlyStructuredOutputSource = null;
 
@@ -2142,6 +3011,8 @@ export function createProcessWorkerBackend({
             context: clone(contextInput),
             repositoryRoot: normalizedRepositoryRoot,
             workspaceRoot,
+            processSandbox: sandboxConfig.policy,
+            sandboxProvider: sandboxConfig.provider,
             targetRelativePaths: clone(allowedFiles),
             targetAbsolutePaths: clone(targetAbsolutePaths),
             targetRelativePath: allowedFiles[0] ?? null,
@@ -2170,7 +3041,8 @@ export function createProcessWorkerBackend({
               contextFiles,
               copiedSeedFiles,
               missingSeedFiles,
-              changedFiles
+              changedFiles,
+              sandboxConfig
             }), "retry_")
           ]);
 
@@ -2337,9 +3209,40 @@ export function createProcessWorkerBackend({
           });
         }
 
+        const sandboxSummary = sandboxConfig.osSandbox
+          ? "inside an OS sandbox"
+          : "not OS sandboxing";
         const successSummary = READ_ONLY_ROLES.has(packet.role)
-          ? `${packet.role} process worker succeeded: non-interactive bounded read-only execution completed in isolated workspace`
-          : "implementer process worker succeeded: non-interactive bounded worker launch completed in isolated workspace";
+          ? `${packet.role} process worker succeeded: non-interactive bounded read-only execution completed with workspace diff observation, ${sandboxSummary}`
+          : `implementer process worker succeeded: non-interactive bounded worker launch completed with workspace diff observation, ${sandboxSummary}`;
+        const validationEvidence = extractValidationEvidence(launchResult);
+
+        if (
+          packet.role === "implementer"
+          && !implementerHasReviewableCompletionEvidence({
+            changedFiles
+          })
+        ) {
+          return blockedResult(
+            "implementer process worker blocked: launcher exited 0 but no changed files were captured by workspace diff observation",
+            {
+              changedFiles,
+              commandsRun,
+              observedCommandsRun,
+              evidence: unique([
+                ...evidence,
+                "implementer_completion_evidence: absent",
+                "structured_result_captured: false",
+                `validation_evidence_captured: ${validationEvidence.length > 0 ? "untrusted_launcher_reported" : "false"}`,
+                "repository_changes_applied: false"
+              ]),
+              openQuestions: [
+                "Capture a scoped file change before treating this implementer run as complete; launcher-reported validationEvidence alone is not completion proof."
+              ],
+              providerModelSelection
+            }
+          );
+        }
 
         if (packet.role === "implementer" && changedFiles.length > 0) {
           await applyChangedFilesToRepository({
@@ -2356,9 +3259,13 @@ export function createProcessWorkerBackend({
           observedCommandsRun,
           evidence: unique([
             ...evidence,
+            ...validationEvidence.map((entry) => `validation_evidence: ${entry}`),
             packet.role === "implementer"
               ? `repository_changes_applied: ${changedFiles.length > 0 ? "true" : "false"}`
               : "repository_changes_applied: not_applicable",
+            packet.role === "implementer"
+              ? `validation_evidence_captured: ${validationEvidence.length > 0 ? "true" : "false"}`
+              : "validation_evidence_captured: not_applicable",
             "allowlist_enforced: true",
             "recursive_delegation_forbidden: true"
           ]),
@@ -2382,7 +3289,8 @@ export function createProcessWorkerBackend({
             contextFiles,
             copiedSeedFiles,
             missingSeedFiles,
-            changedFiles
+            changedFiles,
+            sandboxConfig
           })
           : ["workspace was not created"];
 
@@ -2407,8 +3315,21 @@ export function createProcessWorkerBackend({
 
     getCalls() {
       return clone(calls);
+    },
+
+    getTimeoutBudgetMs() {
+      if (typeof launcher.getTimeoutBudgetMs !== "function") {
+        return null;
+      }
+
+      return launcher.getTimeoutBudgetMs();
     }
   };
+  if (trustedBackendProvenance) {
+    TRUSTED_PROCESS_WORKER_BACKENDS.add(backend);
+    TRUSTED_PROCESS_WORKER_BACKEND_PROVENANCE.set(backend, trustedBackendProvenance);
+  }
+  return backend;
 }
 
 export const PROCESS_WORKER_SUPPORTED_ROLE = SUPPORTED_ROLES[0];
@@ -2418,3 +3339,7 @@ export const PROCESS_WORKER_PROVIDER_ID = PROCESS_PROVIDER_OPENAI_CODEX;
 export const PROCESS_WORKER_MODEL_CANDIDATES = PROCESS_MODEL_PROBE_DEFAULT_CANDIDATES;
 export const PROCESS_WORKER_FALLBACK_MODEL = PROCESS_MODEL_FALLBACK;
 export const PROCESS_WORKER_ROLE_PROFILES = PROCESS_ROLE_PROFILES;
+export const PROCESS_WORKER_SANDBOX_POLICIES = Object.freeze({
+  REQUIRED: PROCESS_SANDBOX_REQUIRED,
+  DISABLED: PROCESS_SANDBOX_DISABLED
+});

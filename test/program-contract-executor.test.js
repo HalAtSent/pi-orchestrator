@@ -1,12 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createProgramContractExecutor } from "../src/program-contract-executor.js";
 import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
-import { createProcessWorkerBackend } from "../src/process-worker-backend.js";
+import {
+  createProcessWorkerBackend as createRawProcessWorkerBackend,
+  PROCESS_WORKER_SANDBOX_POLICIES
+} from "../src/process-worker-backend.js";
 import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
 
 function buildLowRiskContract(overrides = {}) {
@@ -37,6 +40,28 @@ function buildDeclaredHighRiskContract(overrides = {}) {
     risk: "high",
     ...overrides
   };
+}
+
+function createTrustedScriptedProcessBackend(script) {
+  const backend = createScriptedWorkerRunner(script);
+  return {
+    ...backend,
+    getTrustedBackendProvenance() {
+      return {
+        identity: "test/process-backend",
+        source: "test-harness",
+        evidenceKind: "observed_workspace_diff"
+      };
+    }
+  };
+}
+
+function createProcessWorkerBackend(options = {}) {
+  return createRawProcessWorkerBackend({
+    processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.DISABLED,
+    unsandboxedProcessBackendOptIn: true,
+    ...options
+  });
 }
 
 test("default program contract executor returns blocked when no worker handler exists", async () => {
@@ -277,9 +302,9 @@ test("program contract executor does not promote exact changed-surface evidence 
   assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
 });
 
-test("program contract executor promotes exact changed-surface evidence only for trusted process-backend runs", async () => {
+test("program contract executor rejects self-attested changed-surface evidence", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -330,8 +355,8 @@ test("program contract executor promotes exact changed-surface evidence only for
 
   assert.equal(result.status, "success");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/helpers.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -339,48 +364,31 @@ test("program contract executor promotes exact changed-surface evidence only for
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/helpers.js"]
+      paths: []
     },
-    status: "aligned"
+    status: "unknown"
   });
   assert.deepEqual(result.commandObservations, [
     {
       command: "node --check src/helpers.js",
-      source: "process_backend_launcher",
+      source: "worker_reported",
       actionClasses: ["execute_local_command"]
     },
     {
       command: "node --test --test-name-pattern helpers",
-      source: "process_backend_launcher",
+      source: "worker_reported",
       actionClasses: ["execute_local_command"]
     }
   ]);
-  assert.equal(result.providerModelEvidenceRequirement, "required");
-  assert.deepEqual(result.providerModelSelections, [
-    {
-      role: "implementer",
-      iteration: 0,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.3-codex",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.3-codex"
-    },
-    {
-      role: "verifier",
-      iteration: 0,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.4-mini",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.4-mini"
-    }
-  ]);
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
 
-test("program contract executor marks scope ownership as scope_violation when trusted observed paths are out of declared scope", async () => {
+test("program contract executor keeps scope ownership unknown for self-attested out-of-scope changed-surface", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -419,8 +427,8 @@ test("program contract executor marks scope ownership as scope_violation when tr
 
   assert.equal(result.status, "success");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/outside.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -428,15 +436,15 @@ test("program contract executor marks scope ownership as scope_violation when tr
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/outside.js"]
+      paths: []
     },
-    status: "scope_violation"
+    status: "unknown"
   });
 });
 
-test("program contract executor marks scope ownership as no_observed_changes when trusted changed-surface capture has no paths", async () => {
+test("program contract executor ignores self-attested no-change changed-surface capture", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -475,7 +483,7 @@ test("program contract executor marks scope ownership as no_observed_changes whe
 
   assert.equal(result.status, "success");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
+    capture: "not_captured",
     paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
@@ -486,13 +494,13 @@ test("program contract executor marks scope ownership as no_observed_changes whe
     observedChanges: {
       paths: []
     },
-    status: "no_observed_changes"
+    status: "unknown"
   });
 });
 
-test("program contract executor marks scope ownership as scope_violation for failed implementer runs with trusted out-of-scope changed-surface", async () => {
+test("program contract executor keeps failed self-attested out-of-scope changed-surface untrusted", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -520,8 +528,8 @@ test("program contract executor marks scope ownership as scope_violation for fai
 
   assert.equal(result.status, "failed");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/outside.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -529,17 +537,17 @@ test("program contract executor marks scope ownership as scope_violation for fai
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/outside.js"]
+      paths: []
     },
-    status: "scope_violation"
+    status: "unknown"
   });
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
 
-test("program contract executor marks scope ownership as aligned for failed implementer runs with trusted in-scope changed-surface", async () => {
+test("program contract executor keeps failed self-attested in-scope changed-surface untrusted", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -567,8 +575,8 @@ test("program contract executor marks scope ownership as aligned for failed impl
 
   assert.equal(result.status, "failed");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/helpers.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -576,17 +584,17 @@ test("program contract executor marks scope ownership as aligned for failed impl
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/helpers.js"]
+      paths: []
     },
-    status: "aligned"
+    status: "unknown"
   });
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
 
-test("program contract executor marks scope ownership as scope_violation for validation-failed implementer runs with trusted out-of-scope changed-surface", async () => {
+test("program contract executor keeps validation-failed self-attested out-of-scope changed-surface untrusted", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -614,8 +622,8 @@ test("program contract executor marks scope ownership as scope_violation for val
 
   assert.equal(result.status, "failed");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/outside.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -623,9 +631,9 @@ test("program contract executor marks scope ownership as scope_violation for val
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/outside.js"]
+      paths: []
     },
-    status: "scope_violation"
+    status: "unknown"
   });
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
@@ -670,9 +678,9 @@ test("program contract executor keeps changed-surface unknown for validation-fai
   });
 });
 
-test("program contract executor preserves trusted in-scope changed-surface on validation-failed implementer runs", async () => {
+test("program contract executor ignores self-attested in-scope changed-surface on validation-failed implementer runs", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -700,8 +708,8 @@ test("program contract executor preserves trusted in-scope changed-surface on va
 
   assert.equal(result.status, "failed");
   assert.deepEqual(result.changedSurface, {
-    capture: "complete",
-    paths: ["src/helpers.js"]
+    capture: "not_captured",
+    paths: []
   });
   assert.deepEqual(result.scopeOwnership, {
     declaredScope: {
@@ -709,9 +717,9 @@ test("program contract executor preserves trusted in-scope changed-surface on va
       paths: ["src/helpers.js"]
     },
     observedChanges: {
-      paths: ["src/helpers.js"]
+      paths: []
     },
-    status: "aligned"
+    status: "unknown"
   });
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
@@ -756,9 +764,9 @@ test("program contract executor keeps scope ownership unknown for failed impleme
   });
 });
 
-test("program contract executor promotes trusted provider/model selections from failed process-backend runs", async () => {
+test("program contract executor rejects self-attested provider/model selections from failed process-backend runs", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -787,24 +795,15 @@ test("program contract executor promotes trusted provider/model selections from 
   const result = await executeContract(buildLowRiskContract());
 
   assert.equal(result.status, "failed");
-  assert.equal(result.providerModelEvidenceRequirement, "required");
-  assert.deepEqual(result.providerModelSelections, [
-    {
-      role: "implementer",
-      iteration: 0,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.3-codex",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.3-codex"
-    }
-  ]);
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
 
-test("program contract executor does not synthesize process-backend typed command observations for blocked trusted launcher failures", async () => {
+test("program contract executor treats blocked self-attested launcher commands as worker-reported", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "implementer",
       result: {
@@ -827,7 +826,14 @@ test("program contract executor does not synthesize process-backend typed comman
   const result = await executeContract(buildLowRiskContract());
 
   assert.equal(result.status, "blocked");
-  assert.equal(Object.prototype.hasOwnProperty.call(result, "commandObservations"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "commandObservations"), true);
+  assert.deepEqual(result.commandObservations, [
+    {
+      command: "\"\"",
+      source: "worker_reported",
+      actionClasses: ["execute_local_command"]
+    }
+  ]);
   assert.equal(
     result.evidence.includes("run implementer command: \"\""),
     true
@@ -875,9 +881,9 @@ test("program contract executor does not promote changed-surface capture from le
   });
 });
 
-test("program contract executor marks changed-surface evidence partial when only some implementer runs are observed", async () => {
+test("program contract executor does not mark changed-surface partial from self-attested observations", async () => {
   const defaultRunner = createScriptedWorkerRunner([]);
-  const processBackend = createScriptedWorkerRunner([
+  const processBackend = createTrustedScriptedProcessBackend([
     {
       role: "explorer",
       result: {
@@ -980,36 +986,11 @@ test("program contract executor marks changed-surface evidence partial when only
 
   assert.equal(result.status, "success");
   assert.deepEqual(result.changedSurface, {
-    capture: "partial",
-    paths: ["src/helpers.js"]
+    capture: "not_captured",
+    paths: []
   });
-  assert.equal(result.providerModelEvidenceRequirement, "required");
-  assert.deepEqual(result.providerModelSelections, [
-    {
-      role: "implementer",
-      iteration: 0,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.3-codex",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.3-codex"
-    },
-    {
-      role: "reviewer",
-      iteration: 0,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.4",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.4"
-    },
-    {
-      role: "implementer",
-      iteration: 1,
-      requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.3-codex",
-      selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.3-codex"
-    }
-  ]);
+  assert.equal(result.providerModelEvidenceRequirement, "unknown");
+  assert.equal(Object.prototype.hasOwnProperty.call(result, "providerModelSelections"), false);
   assert.equal(defaultRunner.getCalls().length, 0);
   assert.equal(processBackend.getPendingStepCount(), 0);
 });
@@ -1122,7 +1103,12 @@ test("program contract executor preserves typed review findings through process-
     const defaultRunner = createScriptedWorkerRunner([]);
     const processBackend = createProcessWorkerBackend({
       repositoryRoot,
-      launcher: async ({ packet }) => {
+      launcher: async ({ packet, workspaceRoot }) => {
+        if (packet.role === "implementer") {
+          await mkdir(join(workspaceRoot, "src"), { recursive: true });
+          await writeFile(join(workspaceRoot, "src/helpers.js"), "export const helper = true;\n");
+        }
+
         const stdoutByRole = {
           explorer: JSON.stringify({
             status: "success",

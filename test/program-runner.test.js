@@ -15,6 +15,7 @@ import {
 import { createProgramContractExecutor } from "../src/program-contract-executor.js";
 import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
 import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import { createBuildSessionStore } from "../src/build-session-store.js";
 import { createRunStore } from "../src/run-store.js";
 import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
 
@@ -23,8 +24,12 @@ function loadFixture(name) {
 }
 
 function buildProgram() {
+  return buildLifecycle().executionProgram;
+}
+
+function buildLifecycle() {
   const brief = loadFixture("project-brief.json");
-  return buildProjectLifecycleArtifacts(brief).executionProgram;
+  return buildProjectLifecycleArtifacts(brief);
 }
 
 async function withTempDir(prefix, callback) {
@@ -34,6 +39,29 @@ async function withTempDir(prefix, callback) {
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+}
+
+async function createApprovedBuildSession(buildSessionStore, lifecycle) {
+  return buildSessionStore.createBuildSession({
+    intake: {
+      goal: lifecycle.executionProgram.goal
+    },
+    lifecycle,
+    approvalRequested: true
+  });
+}
+
+function trustProcessBackend(backend) {
+  return {
+    ...backend,
+    getTrustedBackendProvenance() {
+      return {
+        identity: "test/process-backend",
+        source: "test-harness",
+        evidenceKind: "observed_workspace_diff"
+      };
+    }
+  };
 }
 
 function createPersistedRunJournal(program, {
@@ -143,10 +171,41 @@ test("runExecutionProgram ignores caller-supplied approvalBinding so direct call
   });
 });
 
+test("runExecutionProgram blocks protected contract scope paths before contract execution", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    for (const protectedPath of [".git/config", ".pi/build-sessions/x.json", "node_modules/x.js", ".env"]) {
+      const program = buildProgram();
+      program.contracts[0].scopePaths = [protectedPath];
+      const runStore = createRunStore({ rootDir });
+      let executedContracts = 0;
+
+      const journal = await runExecutionProgram(program, {
+        contractExecutor: async () => {
+          executedContracts += 1;
+          return {
+            status: "success",
+            summary: "should not execute",
+            evidence: [],
+            openQuestions: []
+          };
+        },
+        runStore
+      });
+
+      assert.equal(journal.status, "blocked");
+      assert.match(journal.stopReason, /protected path/i);
+      assert.equal(executedContracts, 0);
+    }
+  });
+});
+
 test("trusted build-session runner path persists approvalBinding lineage", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
-    const program = buildProgram();
+    const lifecycle = buildLifecycle();
+    const program = lifecycle.executionProgram;
     const runStore = createRunStore({ rootDir });
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const buildSession = await createApprovedBuildSession(buildSessionStore, lifecycle);
 
     const journal = await runExecutionProgramFromApprovedBuildSession(program, {
       contractExecutor: async (contract) => ({
@@ -156,21 +215,112 @@ test("trusted build-session runner path persists approvalBinding lineage", async
         openQuestions: []
       }),
       runStore,
-      buildId: "build-approved-777"
+      buildSessionStore,
+      buildId: buildSession.buildId
     });
 
     assert.deepEqual(journal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: "build-approved-777"
+      buildId: buildSession.buildId
     });
 
     const persisted = await runStore.loadRun(program.id);
     assert.deepEqual(persisted.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: "build-approved-777"
+      buildId: buildSession.buildId
     });
+  });
+});
+
+test("trusted build-session runner rejects missing or unknown build sessions before minting lineage", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const lifecycle = buildLifecycle();
+    const program = lifecycle.executionProgram;
+    const runStore = createRunStore({ rootDir });
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    let executedContracts = 0;
+
+    const missingBuildId = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async () => {
+        executedContracts += 1;
+        return {
+          status: "success",
+          summary: "should not execute",
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore,
+      buildSessionStore
+    });
+    assert.equal(missingBuildId.status, "blocked");
+    assert.match(missingBuildId.stopReason, /buildId is required/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(missingBuildId, "approvalBinding"), false);
+
+    const unknownBuildId = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async () => {
+        executedContracts += 1;
+        return {
+          status: "success",
+          summary: "should not execute",
+          evidence: [],
+          openQuestions: []
+        };
+      },
+      runStore,
+      buildSessionStore,
+      buildId: "build-does-not-exist"
+    });
+    assert.equal(unknownBuildId.status, "blocked");
+    assert.match(unknownBuildId.stopReason, /No approved build session found/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(unknownBuildId, "approvalBinding"), false);
+    assert.equal(executedContracts, 0);
+  });
+});
+
+test("trusted build-session runner rejects unapproved and fingerprint-drifted sessions", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const lifecycle = buildLifecycle();
+    const program = lifecycle.executionProgram;
+    const runStore = createRunStore({ rootDir });
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+
+    const unapprovedSession = await buildSessionStore.createBuildSession({
+      intake: {
+        goal: lifecycle.executionProgram.goal
+      },
+      lifecycle,
+      approvalRequested: false
+    });
+    const unapproved = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async () => {
+        throw new Error("should not execute");
+      },
+      runStore,
+      buildSessionStore,
+      buildId: unapprovedSession.buildId
+    });
+    assert.equal(unapproved.status, "blocked");
+    assert.match(unapproved.stopReason, /not approved/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(unapproved, "approvalBinding"), false);
+
+    const approvedSession = await createApprovedBuildSession(buildSessionStore, lifecycle);
+    const driftedProgram = structuredClone(program);
+    driftedProgram.contracts[0].goal = `${driftedProgram.contracts[0].goal} with drift`;
+
+    const drifted = await runExecutionProgramFromApprovedBuildSession(driftedProgram, {
+      contractExecutor: async () => {
+        throw new Error("should not execute");
+      },
+      runStore,
+      buildSessionStore,
+      buildId: approvedSession.buildId
+    });
+    assert.equal(drifted.status, "blocked");
+    assert.match(drifted.stopReason, /fingerprint/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(drifted, "approvalBinding"), false);
   });
 });
 
@@ -602,12 +752,12 @@ test("runExecutionProgram uses runStore repository root for persistence-boundary
   });
 });
 
-test("runExecutionProgram persists required provider/model evidence requirement from trusted process-backed execution", async () => {
+test("runExecutionProgram does not persist provider/model trust from self-attested process-backed execution", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const program = buildProgram();
     const runStore = createRunStore({ rootDir });
     const defaultRunner = createScriptedWorkerRunner([]);
-    const processBackend = createLocalWorkerRunner({
+    const processBackend = trustProcessBackend(createLocalWorkerRunner({
       handlers: {
         explorer: async () => ({
           status: "success",
@@ -666,7 +816,7 @@ test("runExecutionProgram persists required provider/model evidence requirement 
           }
         })
       }
-    });
+    }));
     const runner = createAutoBackendRunner({
       defaultRunner,
       processBackend,
@@ -681,27 +831,29 @@ test("runExecutionProgram persists required provider/model evidence requirement 
 
     assert.equal(journal.status, "success");
     for (const entry of journal.contractRuns) {
-      assert.equal(entry.providerModelEvidenceRequirement, "required");
+      assert.equal(entry.providerModelEvidenceRequirement, "unknown");
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "providerModelSelections"), false);
       assert.equal(Array.isArray(entry.commandObservations), true);
       assert.equal(entry.commandObservations.length > 0, true);
       for (const observation of entry.commandObservations) {
-        assert.equal(observation.source, "process_backend_launcher");
+        assert.equal(observation.source, "worker_reported");
       }
     }
 
     const persisted = await runStore.loadRun(program.id);
     for (const entry of persisted.runJournal.contractRuns) {
-      assert.equal(entry.providerModelEvidenceRequirement, "required");
+      assert.equal(entry.providerModelEvidenceRequirement, "unknown");
+      assert.equal(Object.prototype.hasOwnProperty.call(entry, "providerModelSelections"), false);
       assert.equal(Array.isArray(entry.commandObservations), true);
       assert.equal(entry.commandObservations.length > 0, true);
       for (const observation of entry.commandObservations) {
-        assert.equal(observation.source, "process_backend_launcher");
+        assert.equal(observation.source, "worker_reported");
       }
     }
   });
 });
 
-test("runExecutionProgram persists typed scope ownership from contract executor results", async () => {
+test("runExecutionProgram keeps scope ownership unknown for self-attested changed-surface results", async () => {
   await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
     const sourceProgram = buildProgram();
     const program = {
@@ -710,7 +862,7 @@ test("runExecutionProgram persists typed scope ownership from contract executor 
     };
     const runStore = createRunStore({ rootDir });
     const defaultRunner = createScriptedWorkerRunner([]);
-    const processBackend = createLocalWorkerRunner({
+    const processBackend = trustProcessBackend(createLocalWorkerRunner({
       handlers: {
         explorer: async () => ({
           status: "success",
@@ -758,7 +910,7 @@ test("runExecutionProgram persists typed scope ownership from contract executor 
           openQuestions: []
         })
       }
-    });
+    }));
     const runner = createAutoBackendRunner({
       defaultRunner,
       processBackend,
@@ -775,16 +927,16 @@ test("runExecutionProgram persists typed scope ownership from contract executor 
     for (const entry of journal.contractRuns) {
       assert.equal(Object.prototype.hasOwnProperty.call(entry, "scopeOwnership"), true);
       assert.equal(entry.scopeOwnership.declaredScope.mode, "explicit_paths");
-      assert.equal(entry.scopeOwnership.status, "aligned");
-      assert.equal(entry.scopeOwnership.observedChanges.paths.length > 0, true);
+      assert.equal(entry.scopeOwnership.status, "unknown");
+      assert.deepEqual(entry.scopeOwnership.observedChanges.paths, []);
     }
 
     const persisted = await runStore.loadRun(program.id);
     for (const entry of persisted.runJournal.contractRuns) {
       assert.equal(Object.prototype.hasOwnProperty.call(entry, "scopeOwnership"), true);
       assert.equal(entry.scopeOwnership.declaredScope.mode, "explicit_paths");
-      assert.equal(entry.scopeOwnership.status, "aligned");
-      assert.equal(entry.scopeOwnership.observedChanges.paths.length > 0, true);
+      assert.equal(entry.scopeOwnership.status, "unknown");
+      assert.deepEqual(entry.scopeOwnership.observedChanges.paths, []);
     }
   });
 });

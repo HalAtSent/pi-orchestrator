@@ -22,6 +22,7 @@ import { createBoundaryPathRedactor, mergeRedactionMetadata } from "./redaction.
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
+const DEFAULT_PROCESS_BACKEND_HEARTBEAT_INTERVAL_MS = 30_000;
 export { RUN_CONTEXT_BUDGET_LIMITS };
 
 function assert(condition, message) {
@@ -398,6 +399,92 @@ async function emitProgress(onProgress, event) {
   }
 }
 
+function normalizeHeartbeatIntervalMs(value) {
+  return Number.isInteger(value) && value > 0
+    ? value
+    : DEFAULT_PROCESS_BACKEND_HEARTBEAT_INTERVAL_MS;
+}
+
+function resolveSelectedBackend(runner, packet, context) {
+  if (typeof runner?.getSelectedBackend !== "function") {
+    return null;
+  }
+
+  try {
+    const selectedBackend = runner.getSelectedBackend(packet, context);
+    return typeof selectedBackend === "string" && selectedBackend.trim().length > 0
+      ? selectedBackend.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveTimeoutBudgetMs(runner, packet, context) {
+  if (typeof runner?.getTimeoutBudgetMs !== "function") {
+    return null;
+  }
+
+  try {
+    const timeoutBudgetMs = runner.getTimeoutBudgetMs(packet, context);
+    return Number.isInteger(timeoutBudgetMs) && timeoutBudgetMs > 0
+      ? timeoutBudgetMs
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function progressContextIds(baseContext) {
+  return {
+    programId: typeof baseContext?.programId === "string" ? baseContext.programId : null,
+    contractId: typeof baseContext?.contractId === "string"
+      ? baseContext.contractId
+      : typeof baseContext?.currentContractId === "string"
+        ? baseContext.currentContractId
+        : null
+  };
+}
+
+function createProcessBackendHeartbeat({
+  onProgress,
+  packet,
+  workflow,
+  iteration,
+  repairCount,
+  selectedBackend,
+  timeoutBudgetMs,
+  baseContext,
+  heartbeatIntervalMs
+}) {
+  if (typeof onProgress !== "function" || selectedBackend !== "process_backend") {
+    return () => {};
+  }
+
+  const startedAt = Date.now();
+  const intervalHandle = setInterval(() => {
+    void emitProgress(onProgress, {
+      type: "packet_heartbeat",
+      packetId: packet.id,
+      role: packet.role,
+      workflowId: workflow.workflowId,
+      ...progressContextIds(baseContext),
+      iteration,
+      repairCount,
+      selectedBackend,
+      elapsedMs: Date.now() - startedAt,
+      timeoutBudgetMs
+    });
+  }, normalizeHeartbeatIntervalMs(heartbeatIntervalMs));
+  if (typeof intervalHandle.unref === "function") {
+    intervalHandle.unref();
+  }
+
+  return () => {
+    clearInterval(intervalHandle);
+  };
+}
+
 function resolveContextRepositoryRoot() {
   return process.cwd();
 }
@@ -543,13 +630,15 @@ async function executePacket({
   reviewResult = null,
   iteration = 0,
   baseContext = {},
-  onProgress = null
+  onProgress = null,
+  heartbeatIntervalMs = DEFAULT_PROCESS_BACKEND_HEARTBEAT_INTERVAL_MS
 }) {
   await emitProgress(onProgress, {
     type: "packet_start",
     packetId: packet.id,
     role: packet.role,
     workflowId: workflow.workflowId,
+    ...progressContextIds(baseContext),
     iteration,
     repairCount
   });
@@ -587,6 +676,7 @@ async function executePacket({
       packetId: packet.id,
       role: packet.role,
       workflowId: workflow.workflowId,
+      ...progressContextIds(baseContext),
       iteration,
       repairCount,
       status: result.status,
@@ -598,6 +688,19 @@ async function executePacket({
   let result;
   let changedSurfaceObservationTrusted = false;
   let providerModelSelectionTrusted = false;
+  const selectedBackend = resolveSelectedBackend(runner, packet, context);
+  const timeoutBudgetMs = resolveTimeoutBudgetMs(runner, packet, context);
+  const stopHeartbeat = createProcessBackendHeartbeat({
+    onProgress,
+    packet,
+    workflow,
+    iteration,
+    repairCount,
+    selectedBackend,
+    timeoutBudgetMs,
+    baseContext,
+    heartbeatIntervalMs
+  });
 
   try {
     result = await runner.run(packet, context);
@@ -609,6 +712,8 @@ async function executePacket({
       failureKind: "runner",
       reason: toErrorMessage(error)
     });
+  } finally {
+    stopHeartbeat();
   }
 
   try {
@@ -651,6 +756,7 @@ async function executePacket({
     packetId: packet.id,
     role: packet.role,
     workflowId: workflow.workflowId,
+    ...progressContextIds(baseContext),
     iteration,
     repairCount,
     status: result.status,
@@ -674,6 +780,55 @@ function parseEvidenceValue(evidenceEntries, key) {
   const prefix = `${key}: `;
   const entry = evidenceEntries.find((item) => typeof item === "string" && item.startsWith(prefix));
   return entry ? entry.slice(prefix.length).trim() : null;
+}
+
+function mergeStringFields(...values) {
+  return unique(
+    values
+      .flatMap((value) => Array.isArray(value) ? value : [])
+      .filter((value) => typeof value === "string" && value.trim().length > 0)
+  );
+}
+
+function findWorkflowPacket(workflow, role) {
+  return Array.isArray(workflow?.packets)
+    ? workflow.packets.find((candidate) => candidate?.role === role) ?? null
+    : null;
+}
+
+function mergeRepairPacketGuards(repairPacket, sourcePackets) {
+  const sourcePacketList = sourcePackets.filter(Boolean);
+  const mergedContextFiles = mergeStringFields(
+    ...sourcePacketList.map((sourcePacket) => sourcePacket.contextFiles),
+    repairPacket.contextFiles
+  );
+
+  return validateTaskPacket({
+    ...repairPacket,
+    nonGoals: mergeStringFields(
+      ...sourcePacketList.map((sourcePacket) => sourcePacket.nonGoals),
+      repairPacket.nonGoals
+    ),
+    acceptanceChecks: mergeStringFields(
+      ...sourcePacketList.map((sourcePacket) => sourcePacket.acceptanceChecks),
+      repairPacket.acceptanceChecks
+    ),
+    stopConditions: mergeStringFields(
+      ...sourcePacketList.map((sourcePacket) => sourcePacket.stopConditions),
+      repairPacket.stopConditions
+    ),
+    commands: mergeStringFields(
+      ...sourcePacketList.map((sourcePacket) => sourcePacket.commands),
+      repairPacket.commands
+    ),
+    contextFiles: mergedContextFiles,
+    contextManifest: resolveCanonicalPacketContextManifest({
+      contextFiles: mergedContextFiles,
+      contextManifest: undefined,
+      contextFilesFieldName: "repairPacket.contextFiles",
+      contextManifestFieldName: "repairPacket.contextManifest"
+    })
+  });
 }
 
 export function summarizeWorkflowLaunchSelection(execution) {
@@ -753,10 +908,25 @@ function createRepairPacket({ workflow, packet, role, repairCount }) {
   });
 
   repairPacket.id = `${repairPacket.id}-repair-${repairCount}`;
-  return repairPacket;
+  const originalRolePacket = findWorkflowPacket(workflow, role);
+  const originalImplementerPacket = findWorkflowPacket(workflow, "implementer");
+  return mergeRepairPacketGuards(repairPacket, [
+    originalImplementerPacket,
+    originalRolePacket,
+    packet
+  ]);
 }
 
-async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCount, baseContext, onProgress }) {
+async function runRepairLoop({
+  runner,
+  workflow,
+  reviewerPacket,
+  runs,
+  repairCount,
+  baseContext,
+  onProgress,
+  heartbeatIntervalMs
+}) {
   const implementerPacket = createRepairPacket({
     workflow,
     packet: reviewerPacket,
@@ -771,7 +941,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     repairCount,
     iteration: repairCount,
     baseContext,
-    onProgress
+    onProgress,
+    heartbeatIntervalMs
   });
 
   if (repairRun.result.status !== "success") {
@@ -796,7 +967,8 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
     reviewResult: repairRun.result,
     iteration: repairCount,
     baseContext,
-    onProgress
+    onProgress,
+    heartbeatIntervalMs
   });
 
   return {
@@ -809,7 +981,11 @@ async function runRepairLoop({ runner, workflow, reviewerPacket, runs, repairCou
   };
 }
 
-export async function runPlannedWorkflow(input, { runner, onProgress = null } = {}) {
+export async function runPlannedWorkflow(input, {
+  runner,
+  onProgress = null,
+  heartbeatIntervalMs = DEFAULT_PROCESS_BACKEND_HEARTBEAT_INTERVAL_MS
+} = {}) {
   assertRunner(runner);
   const normalizedInput = normalizePlannedWorkflowInput(input);
   const workflow = normalizedInput.workflow;
@@ -837,7 +1013,8 @@ export async function runPlannedWorkflow(input, { runner, onProgress = null } = 
       runs,
       repairCount,
       baseContext,
-      onProgress
+      onProgress,
+      heartbeatIntervalMs
     });
 
     if (packet.role === "reviewer" && run.result.status === "repair_required") {
@@ -860,7 +1037,8 @@ export async function runPlannedWorkflow(input, { runner, onProgress = null } = 
         runs,
         repairCount,
         baseContext,
-        onProgress
+        onProgress,
+        heartbeatIntervalMs
       });
 
       if (repairOutcome.status !== "success") {
@@ -899,7 +1077,11 @@ export async function runPlannedWorkflow(input, { runner, onProgress = null } = 
   });
 }
 
-export async function runAutoWorkflow(input, { runner, onProgress = null } = {}) {
+export async function runAutoWorkflow(input, {
+  runner,
+  onProgress = null,
+  heartbeatIntervalMs = DEFAULT_PROCESS_BACKEND_HEARTBEAT_INTERVAL_MS
+} = {}) {
   let normalizedInput;
   let workflow;
 
@@ -942,7 +1124,7 @@ export async function runAutoWorkflow(input, { runner, onProgress = null } = {})
     workflow,
     approvedHighRisk: normalizedInput.approvedHighRisk,
     maxRepairLoops: normalizedInput.maxRepairLoops
-  }, { runner, onProgress });
+  }, { runner, onProgress, heartbeatIntervalMs });
 }
 
 export function formatWorkflowExecution(execution) {

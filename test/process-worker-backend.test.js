@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -14,11 +14,17 @@ import {
 import {
   createPiCliLauncher,
   createProcessRoleArgsBuilder,
-  createProcessWorkerBackend,
+  createProcessWorkerBackend as createRawProcessWorkerBackend,
+  createDefaultProcessSandboxProvider,
+  createMacOSSandboxExecProvider,
+  getTrustedProcessWorkerBackendProvenance,
   loadRoleContractGuidance,
   PROCESS_WORKER_PROVIDER_ID,
-  PROCESS_WORKER_ROLE_PROFILES
+  PROCESS_WORKER_ROLE_PROFILES,
+  PROCESS_WORKER_SANDBOX_POLICIES
 } from "../src/process-worker-backend.js";
+
+const PROCESS_WORKER_BACKEND_TEST_SUPPORT_KEY = Symbol.for("pi-orchestrator.process-worker-backend.test-support");
 
 function createPacket(role = "implementer", overrides = {}) {
   return createTaskPacket({
@@ -36,6 +42,82 @@ function createPacket(role = "implementer", overrides = {}) {
     commands: [],
     ...overrides
   });
+}
+
+function createProcessWorkerBackend(options = {}) {
+  return createRawProcessWorkerBackend({
+    processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.DISABLED,
+    unsandboxedProcessBackendOptIn: true,
+    ...options
+  });
+}
+
+function createFakeSandboxProvider({
+  id = "test-fake-os-sandbox",
+  available = true,
+  reason = "test sandbox unavailable"
+} = {}) {
+  return {
+    id,
+    osSandbox: true,
+    guarantees: [
+      "test provider owns command construction and spawn options"
+    ],
+    async isAvailable() {
+      return available
+        ? { available: true, reason: null }
+        : { available: false, reason };
+    },
+    async prepareSpawn({ command, args, cwd }) {
+      if (!available) {
+        throw new Error(reason);
+      }
+
+      return {
+        command,
+        args,
+        spawnOptions: {
+          cwd,
+          detached: process.platform !== "win32",
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"]
+        },
+        evidence: ["test_sandbox_spawn_plan: true"]
+      };
+    }
+  };
+}
+
+function createFakeNonOsSandboxProvider({
+  id = "test-fake-non-os-sandbox",
+  available = true,
+  reason = "test non-os sandbox unavailable"
+} = {}) {
+  return {
+    id,
+    osSandbox: false,
+    guarantees: [
+      "test provider does not provide OS sandbox guarantees"
+    ],
+    async isAvailable() {
+      return available
+        ? { available: true, reason: null }
+        : { available: false, reason };
+    },
+    async prepareSpawn({ command, args, cwd }) {
+      return {
+        command,
+        args,
+        spawnOptions: {
+          cwd,
+          detached: process.platform !== "win32",
+          shell: false,
+          stdio: ["ignore", "pipe", "pipe"]
+        },
+        evidence: ["test_non_os_spawn_plan: true"]
+      };
+    }
+  };
 }
 
 async function exists(pathValue) {
@@ -104,6 +186,98 @@ function createPromptCaptureLauncher({ prompts, runCommandFn, launcherOptions = 
     ...launcherOptions
   });
 }
+
+function createFreshProcessWorkerBackendModuleUrl() {
+  return new URL(`../src/process-worker-backend.js?test=${Date.now()}-${Math.random().toString(16).slice(2)}`, import.meta.url);
+}
+
+function createTestSpawnOptions(cwd) {
+  return {
+    cwd,
+    detached: process.platform !== "win32",
+    shell: false,
+    stdio: ["ignore", "pipe", "pipe"]
+  };
+}
+
+async function getMacOSSandboxProviderAvailability(provider = createMacOSSandboxExecProvider()) {
+  return provider.isAvailable();
+}
+
+test("process backend production module does not export trusted test sandbox provider branding", async () => {
+  const moduleExports = await import("../src/process-worker-backend.js");
+
+  assert.equal(typeof moduleExports.createTrustedProcessSandboxProviderForTests, "undefined");
+});
+
+test("setting NODE_TEST_CONTEXT before production import does not expose a global test-support branding helper", async () => {
+  const previousNodeTestContext = process.env.NODE_TEST_CONTEXT;
+
+  try {
+    process.env.NODE_TEST_CONTEXT = "child-v8";
+
+    const moduleExports = await import(createFreshProcessWorkerBackendModuleUrl().href);
+
+    assert.equal(typeof moduleExports.createTrustedProcessSandboxProviderForTests, "undefined");
+    assert.equal(Object.prototype.hasOwnProperty.call(globalThis, PROCESS_WORKER_BACKEND_TEST_SUPPORT_KEY), false);
+    assert.equal(globalThis[PROCESS_WORKER_BACKEND_TEST_SUPPORT_KEY], undefined);
+  } finally {
+    if (previousNodeTestContext === undefined) {
+      delete process.env.NODE_TEST_CONTEXT;
+    } else {
+      process.env.NODE_TEST_CONTEXT = previousNodeTestContext;
+    }
+  }
+});
+
+test("process backend production import leaves no global test-support symbol", async () => {
+  await import("../src/process-worker-backend.js");
+
+  assert.equal(Object.prototype.hasOwnProperty.call(globalThis, PROCESS_WORKER_BACKEND_TEST_SUPPORT_KEY), false);
+  assert.equal(globalThis[PROCESS_WORKER_BACKEND_TEST_SUPPORT_KEY], undefined);
+});
+
+test("process backend forged stack text cannot brand a caller fake osSandbox provider", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-forged-stack-fake-provider-"));
+  const originalPrepareStackTrace = Error.prepareStackTrace;
+  let launchCount = 0;
+
+  try {
+    Error.prepareStackTrace = () => "/tmp/project/test/forged-stack.test.js";
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createFakeSandboxProvider({
+        id: "test-forged-stack-fake-os-sandbox",
+        available: true
+      }),
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+    assert.equal(launchCount, 0);
+    assert.equal(result.evidence.includes("process_sandbox_provider: test-forged-stack-fake-os-sandbox"), true);
+    assert.equal(
+      result.evidence.includes("process_sandbox_unavailable_reason: sandbox provider is not an internally trusted OS sandbox provider"),
+      true
+    );
+  } finally {
+    Error.prepareStackTrace = originalPrepareStackTrace;
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
 
 test("process backend blocks cleanly for unsupported roles", async () => {
   let launchCount = 0;
@@ -239,6 +413,12 @@ test("process backend maps launcher output into a contract-compatible worker res
 
     validateWorkerResult(result);
     assert.equal(result.status, "success");
+    assert.match(result.summary, /not OS sandboxing/i);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(
+      result.evidence.includes("process_backend_boundary: workspace copy plus allowlist apply checks; not an OS sandbox"),
+      true
+    );
     assert.deepEqual(result.changedFiles, ["test/fixtures/process-worker-output.md"]);
     assert.deepEqual(result.commandsRun, ["fake-worker --write-output"]);
     assert.deepEqual(result.commandObservations, [
@@ -249,6 +429,455 @@ test("process backend maps launcher output into a contract-compatible worker res
       }
     ]);
     assert.equal(result.openQuestions.length, 0);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend fails closed before launch when required sandbox provider is unavailable", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-required-sandbox-unavailable-"));
+  let launchCount = 0;
+
+  try {
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createFakeSandboxProvider({
+        id: "test-unavailable-sandbox",
+        available: false,
+        reason: "test provider intentionally unavailable"
+      }),
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+    assert.equal(launchCount, 0);
+    assert.equal(result.evidence.includes("process_sandbox_policy: required"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(result.evidence.includes("process_backend_trust_boundary: unavailable"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: test-unavailable-sandbox"), true);
+    assert.equal(result.evidence.includes("process_sandbox_available: false"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("trusted macos sandbox provider methods are immutable after creation", () => {
+  const provider = createMacOSSandboxExecProvider();
+  const forgedIsAvailable = async () => ({ available: true, reason: null });
+  const forgedPrepareSpawn = async ({ command, args, cwd }) => ({
+    command,
+    args,
+    spawnOptions: createTestSpawnOptions(cwd),
+    evidence: ["forged_unsandboxed_spawn_plan: true"]
+  });
+
+  assert.equal(Object.isFrozen(provider), true);
+  assert.equal(Object.isFrozen(provider.guarantees), true);
+  assert.throws(() => {
+    provider.isAvailable = forgedIsAvailable;
+  }, TypeError);
+  assert.throws(() => {
+    provider.prepareSpawn = forgedPrepareSpawn;
+  }, TypeError);
+  assert.notEqual(provider.isAvailable, forgedIsAvailable);
+  assert.notEqual(provider.prepareSpawn, forgedPrepareSpawn);
+});
+
+test("trusted macos sandbox provider guarantees are immutable after creation", () => {
+  const provider = createMacOSSandboxExecProvider();
+  const originalGuarantees = [...provider.guarantees];
+
+  assert.throws(() => {
+    provider.guarantees.push("forged guarantee");
+  }, TypeError);
+  assert.deepEqual(provider.guarantees, originalGuarantees);
+});
+
+test("process backend fails closed before launch when required provider is available but not an OS sandbox", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-required-non-os-sandbox-"));
+  let launchCount = 0;
+
+  try {
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createFakeNonOsSandboxProvider({
+        id: "test-available-non-os-sandbox"
+      }),
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+    assert.equal(launchCount, 0);
+    assert.equal(result.evidence.includes("process_sandbox_policy: required"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(result.evidence.includes("process_backend_trust_boundary: unavailable"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: test-available-non-os-sandbox"), true);
+    assert.equal(result.evidence.includes("process_sandbox_available: false"), true);
+    assert.equal(
+      result.evidence.includes("process_sandbox_unavailable_reason: sandbox provider is not an internally trusted OS sandbox provider"),
+      true
+    );
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend does not trust caller-supplied fake osSandbox providers in required mode", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-required-fake-os-sandbox-"));
+  let launchCount = 0;
+
+  try {
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createFakeSandboxProvider({
+        id: "test-caller-fake-os-sandbox",
+        available: true
+      }),
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+    const provenanceBackend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createFakeSandboxProvider({
+        id: "test-caller-fake-os-sandbox",
+        available: true
+      })
+    });
+    const provenance = getTrustedProcessWorkerBackendProvenance(provenanceBackend);
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+    assert.equal(launchCount, 0);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(result.evidence.includes("process_backend_trust_boundary: unavailable"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: test-caller-fake-os-sandbox"), true);
+    assert.equal(result.evidence.includes("process_sandbox_available: false"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: true"), false);
+    assert.equal(provenance?.osSandbox, false);
+    assert.equal(provenance?.trustBoundary, "unavailable");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend disabled sandbox mode requires explicit unsandboxed opt-in", () => {
+  assert.throws(
+    () => createRawProcessWorkerBackend({
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.DISABLED
+    }),
+    /unsandboxedProcessBackendOptIn: true/u
+  );
+});
+
+test("process backend records weaker observation-only evidence for explicit unsandboxed mode", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-unsandboxed-opt-in-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath }) => {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "updated without OS sandbox", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "created process output",
+          stderr: "",
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "success");
+    assert.equal(result.evidence.includes("process_sandbox_policy: disabled"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(result.evidence.includes("process_backend_trust_boundary: observation_only"), true);
+    assert.equal(result.evidence.includes("unsandboxed_process_backend_opt_in: true"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("mutating the returned trusted macos provider cannot force a plain unsandboxed spawn plan", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-mutated-official-provider-"));
+  const provider = createMacOSSandboxExecProvider();
+  const availability = await getMacOSSandboxProviderAvailability(provider);
+  let forgedPrepareSpawnCalls = 0;
+
+  try {
+    try {
+      provider.isAvailable = async () => ({ available: true, reason: null });
+    } catch {}
+    try {
+      provider.prepareSpawn = async ({ command, args, cwd }) => {
+        forgedPrepareSpawnCalls += 1;
+        return {
+          command,
+          args: Array.isArray(args) ? args.map((value) => String(value)) : [],
+          spawnOptions: createTestSpawnOptions(cwd),
+          evidence: ["forged_unsandboxed_spawn_plan: true"]
+        };
+      };
+    } catch {}
+
+    const launcher = createPiCliLauncher({
+      argsBuilder: async () => [],
+      spawnCommandResolver: async ({ workspaceRoot }) => {
+        const outputPath = join(workspaceRoot, "test", "fixtures", "process-worker-output.md");
+        return {
+          command: "/bin/sh",
+          argsPrefix: [
+            "-c",
+            "mkdir -p \"$(dirname \"$1\")\" && printf '%s' 'mutation bypass failed' > \"$1\"",
+            "sh",
+            outputPath
+          ],
+          launcher: "sh_test_mutation_bypass_launcher",
+          launcherPath: "/bin/sh",
+          piScriptPath: "/bin/sh",
+          piPackageRoot: "/bin",
+          resolutionMessage: "test mutation bypass launcher"
+        };
+      }
+    });
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      launcher,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: provider
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(forgedPrepareSpawnCalls, 0);
+    assert.equal(result.evidence.includes("forged_unsandboxed_spawn_plan: true"), false);
+
+    if (availability.available === true) {
+      assert.notEqual(result.status, "blocked");
+      assert.equal(result.evidence.includes("process_backend_os_sandbox: true"), true);
+      assert.equal(result.evidence.includes("process_backend_trust_boundary: os_sandbox"), true);
+      assert.equal(result.evidence.includes("process_sandbox_available: true"), true);
+    } else {
+      assert.equal(result.status, "blocked");
+      assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+      assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+      assert.equal(result.evidence.includes("process_backend_trust_boundary: unavailable"), true);
+    }
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend records sandbox provider identity when required sandbox mode launches", async (t) => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-required-sandbox-launch-"));
+  const repositoryOutputPath = join(repositoryRoot, "test", "fixtures", "process-worker-output.md");
+
+  try {
+    const sandboxProvider = createMacOSSandboxExecProvider();
+    const availability = await getMacOSSandboxProviderAvailability(sandboxProvider);
+    if (availability.available !== true) {
+      t.skip(availability.reason ?? "macos sandbox-exec provider unavailable");
+      return;
+    }
+
+    const launcher = createPiCliLauncher({
+      argsBuilder: async () => [],
+      spawnCommandResolver: async ({ workspaceRoot }) => {
+        const outputPath = join(workspaceRoot, "test", "fixtures", "process-worker-output.md");
+        return {
+          command: "/bin/sh",
+          argsPrefix: [
+            "-c",
+            "mkdir -p \"$(dirname \"$1\")\" && printf '%s' 'updated from sandboxed process backend' > \"$1\"",
+            "sh",
+            outputPath
+          ],
+          launcher: "sh_test_sandbox_launcher",
+          launcherPath: "/bin/sh",
+          piScriptPath: "/bin/sh",
+          piPackageRoot: "/bin",
+          resolutionMessage: "test sandbox-capable launcher"
+        };
+      }
+    });
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      launcher,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.evidence.includes("process_sandbox_policy: required"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: true"), true);
+    assert.equal(result.evidence.includes("process_backend_trust_boundary: os_sandbox"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: macos-sandbox-exec"), true);
+    assert.equal(result.evidence.includes("process_sandbox_available: true"), true);
+    assert.equal(result.evidence.some((entry) => entry.startsWith("process_sandbox_profile: ")), true);
+    assert.notEqual(result.status, "blocked");
+    if (result.status === "success") {
+      assert.equal(await readFile(repositoryOutputPath, "utf8"), "updated from sandboxed process backend");
+    }
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("sandboxed process worker cannot mutate repository allowlist paths directly during execution", async (t) => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-required-repo-write-denied-"));
+  const repositoryOutputPath = join(repositoryRoot, "test", "fixtures", "process-worker-output.md");
+
+  try {
+    const sandboxProvider = createMacOSSandboxExecProvider();
+    const availability = await getMacOSSandboxProviderAvailability(sandboxProvider);
+    if (availability.available !== true) {
+      t.skip(availability.reason ?? "macos sandbox-exec provider unavailable");
+      return;
+    }
+
+    await mkdir(dirname(repositoryOutputPath), { recursive: true });
+    await writeFile(repositoryOutputPath, "original repository content", "utf8");
+
+    const launcher = createPiCliLauncher({
+      argsBuilder: async () => [],
+      spawnCommandResolver: async () => {
+        return {
+          command: "/bin/sh",
+          argsPrefix: [
+            "-c",
+            "printf '%s' 'direct repository mutation' > \"$1\"",
+            "sh",
+            repositoryOutputPath
+          ],
+          launcher: "sh_test_direct_repo_write_launcher",
+          launcherPath: "/bin/sh",
+          piScriptPath: "/bin/sh",
+          piPackageRoot: "/bin",
+          resolutionMessage: "test direct repository write launcher"
+        };
+      }
+    });
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      launcher,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /launcher exited with code/i);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: true"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: macos-sandbox-exec"), true);
+    assert.equal(result.evidence.some((entry) => entry.startsWith("process_sandbox_profile: ")), true);
+    assert.equal(await readFile(repositoryOutputPath, "utf8"), "original repository content");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend platform-unavailable sandbox path fails closed without unsandboxed fallback", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-platform-unavailable-"));
+  let launchCount = 0;
+
+  try {
+    const backend = createRawProcessWorkerBackend({
+      repositoryRoot,
+      processSandbox: PROCESS_WORKER_SANDBOX_POLICIES.REQUIRED,
+      sandboxProvider: createDefaultProcessSandboxProvider({ platform: "linux" }),
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "blocked");
+    assert.equal(launchCount, 0);
+    assert.match(result.summary, /required OS sandbox provider is unavailable/i);
+    assert.equal(result.evidence.includes("process_sandbox_policy: required"), true);
+    assert.equal(result.evidence.includes("process_backend_os_sandbox: false"), true);
+    assert.equal(result.evidence.includes("process_sandbox_provider: linux-process-sandbox-unavailable"), true);
+    assert.equal(result.evidence.includes("process_sandbox_available: false"), true);
+    assert.equal(result.evidence.includes("unsandboxed_process_backend_opt_in: true"), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend reports launcher output buffer truncation evidence", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-output-buffer-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: 0,
+        stdout: "x".repeat(10),
+        stderr: "y".repeat(10),
+        stdoutTruncated: true,
+        stderrTruncated: true,
+        commandsRun: ["fake-worker --noisy-output"]
+      })
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "output-buffer-truncation"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.equal(result.evidence.includes("stdout_buffer_truncated: true"), true);
+    assert.equal(result.evidence.includes("stderr_buffer_truncated: true"), true);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -822,6 +1451,47 @@ test("process backend preserves trusted provider/model selection on launcher tim
   }
 });
 
+test("process backend launcher timeout escalates from SIGTERM to forced termination", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-timeout-escalation-"));
+  const ignoreSigtermScript = "process.on('SIGTERM',()=>{}); setInterval(()=>{}, 1000);";
+
+  try {
+    const launcher = createPiCliLauncher({
+      timeoutMs: 50,
+      timeoutKillGraceMs: 50,
+      argsBuilder: async ({ prompt }) => ["-p", "--no-session", prompt],
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: ["-e", ignoreSigtermScript, "--"],
+        launcher: "node_ignores_sigterm",
+        launcherPath: process.execPath,
+        piScriptPath: process.execPath,
+        piPackageRoot: dirname(process.execPath),
+        resolutionMessage: "test node process ignores SIGTERM"
+      })
+    });
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "timeout-escalation"
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /launcher timed out/i);
+    assert.equal(result.evidence.includes("timed_out: true"), true);
+    assert.equal(result.evidence.includes("timeout_signal: SIGTERM"), true);
+    assert.equal(result.evidence.includes("timeout_forced_termination_attempted: true"), true);
+    assert.equal(result.evidence.includes("timeout_forced_signal: SIGKILL"), true);
+    assert.equal(result.evidence.includes("timeout_budget_ms: 50"), true);
+    assert.equal(backend.getTimeoutBudgetMs(), 50);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend preserves trusted provider/model selection on launcher non-zero exit failures", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-exit-selection-"));
 
@@ -948,7 +1618,7 @@ test("process backend applies implementer changes back to the repository root on
   }
 });
 
-test("process backend marks no-op implementer success as not applied while still reporting observed empty changed surface", async () => {
+test("process backend blocks exit-zero implementer runs with no changes or validation evidence", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-noop-"));
 
   try {
@@ -967,16 +1637,42 @@ test("process backend marks no-op implementer success as not applied while still
       workflowId: "process-test-workflow-noop"
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /no changed files were captured/i);
     assert.deepEqual(result.changedFiles, []);
     assert.equal(
       result.evidence.includes("repository_changes_applied: false"),
       true
     );
-    assert.deepEqual(result.changedSurfaceObservation, {
-      capture: "complete",
-      paths: []
+    assert.equal(result.evidence.includes("validation_evidence_captured: false"), true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend blocks no-op implementer runs with launcher-reported validation evidence only", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-noop-validation-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => ({
+        launcher: "fake_launcher",
+        exitCode: 0,
+        stdout: "no-op validation run",
+        stderr: "",
+        commandsRun: ["fake-worker --validate"],
+        validationEvidence: ["targeted validation command exited 0"]
+      })
     });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-test-workflow-noop-validation"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.deepEqual(result.changedFiles, []);
+    assert.equal(result.evidence.includes("validation_evidence_captured: untrusted_launcher_reported"), true);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -1053,6 +1749,93 @@ test("process backend rolls back repository writes when apply fails mid-commit",
   }
 });
 
+test("process backend rejects hardlinked workspace changed files before apply", {
+  skip: process.platform === "win32"
+}, async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-hardlink-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, "docs"), { recursive: true });
+        const changedPath = join(workspaceRoot, "docs", "guide.md");
+        await writeFile(changedPath, "hardlinked content", "utf8");
+        await link(changedPath, join(workspaceRoot, "docs", "guide-alias.md"));
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "created hardlinked files",
+          stderr: "",
+          commandsRun: ["fake-worker --hardlink-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["docs/"]
+    }), {
+      workflowId: "hardlink-apply-rejection"
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /hardlinked to multiple directory entries/i);
+    assert.equal(await exists(join(repositoryRoot, "docs", "guide.md")), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend rejects repository destination symlink swaps at apply write boundary and rolls back", {
+  skip: process.platform === "win32"
+}, async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-symlink-swap-"));
+  const outsideRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-symlink-swap-outside-"));
+
+  try {
+    await mkdir(join(repositoryRoot, "docs"), { recursive: true });
+    await writeFile(join(repositoryRoot, "docs", "guide.md"), "repo original", "utf8");
+    await writeFile(join(outsideRoot, "outside.md"), "outside original", "utf8");
+
+    let swapped = false;
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      moveFileFn: async (sourcePath, destinationPath) => {
+        await rename(sourcePath, destinationPath);
+        if (!swapped && normalizeFilePath(sourcePath).endsWith("/docs/guide.md")) {
+          swapped = true;
+          await symlink(join(outsideRoot, "outside.md"), join(repositoryRoot, "docs", "guide.md"));
+        }
+      },
+      launcher: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, "docs"), { recursive: true });
+        await writeFile(join(workspaceRoot, "docs", "guide.md"), "repo updated", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "updated guide",
+          stderr: "",
+          commandsRun: ["fake-worker --write-guide"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["docs/guide.md"]
+    }), {
+      workflowId: "symlink-swap-apply-rejection"
+    });
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /repository changed file must not be a symlink/i);
+    assert.equal(await readFile(join(repositoryRoot, "docs", "guide.md"), "utf8"), "repo original");
+    assert.equal(await readFile(join(outsideRoot, "outside.md"), "utf8"), "outside original");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
 test("process backend seeds file scope entries into the isolated workspace", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-seed-file-"));
 
@@ -1079,7 +1862,7 @@ test("process backend seeds file scope entries into the isolated workspace", asy
       allowedFiles: ["src/seeded-file.js"]
     }), {});
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(seededContent, expectedContent);
     assert.equal(result.evidence.includes("copied_seed_files: src/seeded-file.js"), true);
   } finally {
@@ -1115,12 +1898,91 @@ test("process backend seeds directory scope entries into the isolated workspace"
       allowedFiles: ["docs/"]
     }), {});
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(guideContent, "guide content");
     assert.equal(nestedContent, "nested notes");
     assert.equal(result.evidence.includes("copied_seed_files: docs/"), true);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend rejects symlink directory scope seeds before launch", {
+  skip: process.platform === "win32"
+}, async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-symlink-scope-"));
+  const outsideRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-outside-"));
+
+  try {
+    await writeFile(join(outsideRoot, "outside.txt"), "outside original", "utf8");
+    await symlink(outsideRoot, join(repositoryRoot, "linkdir"), "dir");
+
+    let launchCount = 0;
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => {
+        launchCount += 1;
+        await writeFile(join(outsideRoot, "outside.txt"), "mutated outside", "utf8");
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --mutate-symlink-target"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["linkdir/"]
+    }), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /seed source file.*symlink/i);
+    assert.equal(launchCount, 0);
+    assert.equal(await readFile(join(outsideRoot, "outside.txt"), "utf8"), "outside original");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend rejects nested symlinks in directory scope seeds before launch", {
+  skip: process.platform === "win32"
+}, async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-nested-symlink-scope-"));
+  const outsideRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-outside-"));
+
+  try {
+    await mkdir(join(repositoryRoot, "docs"), { recursive: true });
+    await writeFile(join(repositoryRoot, "docs", "guide.md"), "guide content", "utf8");
+    await writeFile(join(outsideRoot, "outside.txt"), "outside original", "utf8");
+    await symlink(outsideRoot, join(repositoryRoot, "docs", "outside-link"), "dir");
+
+    let launchCount = 0;
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => {
+        launchCount += 1;
+        return {
+          exitCode: 0,
+          stdout: "",
+          stderr: "",
+          commandsRun: ["fake-worker --inspect-seeded-directory"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["docs/"]
+    }), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /seed source file.*symlink/i);
+    assert.equal(launchCount, 0);
+    assert.equal(await readFile(join(outsideRoot, "outside.txt"), "utf8"), "outside original");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+    await rm(outsideRoot, { recursive: true, force: true });
   }
 });
 
@@ -1146,7 +2008,7 @@ test("process backend reports missing directory scope seeds without failing", as
       allowedFiles: ["docs/"]
     }), {});
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(docsDirectoryExistsInWorkspace, false);
     assert.equal(result.evidence.includes("missing_seed_files: docs/"), true);
   } finally {
@@ -1443,7 +2305,7 @@ test("process backend does not retry implementer runs for structured output pars
   });
 
   validateWorkerResult(result);
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "blocked");
   assert.equal(launchCount, 1);
   assert.equal(
     result.evidence.some((entry) => entry.startsWith("read_only_json_repair_retry_attempted:")),
@@ -1645,7 +2507,7 @@ test("process backend keeps implementer prompts usable when the advisory role do
     workflowId: "implementer-missing-advisory-doc"
   });
 
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "blocked");
   assert.equal(prompts.length, 1);
   assert.match(prompts[0], /Source docs: docs\/agents\/COMMON\.md, docs\/agents\/IMPLEMENTER\.md/iu);
   assert.match(prompts[0], /Advisory doc status: docs\/agents\/IMPLEMENTER\.md fallback active \(advisory role doc missing\)\./iu);
@@ -1845,6 +2707,28 @@ test("process role args builder probes custom fallback model and selects fallbac
   assert.equal(launchSelection.modelSelectionMode, "fallback");
 });
 
+test("process role args builder fails closed on malformed role profiles", () => {
+  const malformedProfiles = createRoleProfilesWithOverrides({
+    implementer: {
+      preferredModel: undefined,
+      modelTypo: "gpt-5.5"
+    }
+  });
+  delete malformedProfiles.implementer.preferredModel;
+
+  assert.throws(
+    () => createProcessRoleArgsBuilder({
+      roleProfiles: malformedProfiles,
+      modelProbe: async () => ({
+        providerId: PROCESS_WORKER_PROVIDER_ID,
+        supportedModels: ["gpt-5.4"],
+        blockedReason: null
+      })
+    }),
+    /role profile for implementer must include preferredModel/u
+  );
+});
+
 test("pi launcher command evidence uses resolved pi script path in non-interactive mode", async () => {
   const launcher = createPiCliLauncher({
     modelProbe: async () => ({
@@ -1899,7 +2783,7 @@ test("process backend launcher passes explicit openai-codex provider and preferr
     const launcher = createPiCliLauncher({
       modelProbe: async () => ({
         providerId: PROCESS_WORKER_PROVIDER_ID,
-        supportedModels: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+        supportedModels: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"],
         blockedReason: null
       }),
       spawnCommandResolver: async () => ({
@@ -1937,29 +2821,29 @@ test("process backend launcher passes explicit openai-codex provider and preferr
       workflowId: "direct-launch-profile-test"
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(launchedArgs.includes("--provider"), true);
     assert.equal(launchedArgs.includes(PROCESS_WORKER_PROVIDER_ID), true);
     assert.equal(launchedArgs.includes("--model"), true);
-    assert.equal(launchedArgs.includes("gpt-5.3-codex"), true);
+    assert.equal(launchedArgs.includes("gpt-5.5"), true);
     assert.equal(launchedArgs.includes("--thinking"), true);
     assert.equal(launchedArgs.includes("medium"), true);
     assert.equal(result.evidence.includes("provider_flag_passed: true"), true);
     assert.equal(result.evidence.includes(`provider_selection: ${PROCESS_WORKER_PROVIDER_ID}`), true);
     assert.equal(result.evidence.includes("model_flag_passed: true"), true);
-    assert.equal(result.evidence.includes("model_selection: gpt-5.3-codex"), true);
+    assert.equal(result.evidence.includes("model_selection: gpt-5.5"), true);
     assert.equal(result.evidence.includes("requested_provider: openai-codex"), true);
-    assert.equal(result.evidence.includes("requested_model: gpt-5.3-codex"), true);
+    assert.equal(result.evidence.includes("requested_model: gpt-5.5"), true);
     assert.equal(result.evidence.includes("selected_provider: openai-codex"), true);
-    assert.equal(result.evidence.includes("selected_model: gpt-5.3-codex"), true);
+    assert.equal(result.evidence.includes("selected_model: gpt-5.5"), true);
     assert.equal(result.evidence.includes("model_selection_mode: direct"), true);
     assert.equal(result.evidence.includes("model_selection_reason: preferred_model_supported"), true);
     assert.equal(result.evidence.includes("effective_launcher_mode: explicit_provider_model_override"), true);
     assert.deepEqual(result.providerModelSelection, {
       requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.3-codex",
+      requestedModel: "gpt-5.5",
       selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.3-codex"
+      selectedModel: "gpt-5.5"
     });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
@@ -1984,7 +2868,7 @@ test("process backend retry preserves explicit openai-codex provider/model selec
     const launcher = createPiCliLauncher({
       modelProbe: async () => ({
         providerId: PROCESS_WORKER_PROVIDER_ID,
-        supportedModels: ["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"],
+        supportedModels: ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex"],
         blockedReason: null
       }),
       spawnCommandResolver: async () => ({
@@ -2034,8 +2918,8 @@ test("process backend retry preserves explicit openai-codex provider/model selec
     assert.equal(launchedArgs.length, 2);
     assert.equal(readOptionValue(launchedArgs[0], "--provider"), PROCESS_WORKER_PROVIDER_ID);
     assert.equal(readOptionValue(launchedArgs[1], "--provider"), PROCESS_WORKER_PROVIDER_ID);
-    assert.equal(readOptionValue(launchedArgs[0], "--model"), "gpt-5.4");
-    assert.equal(readOptionValue(launchedArgs[1], "--model"), "gpt-5.4");
+    assert.equal(readOptionValue(launchedArgs[0], "--model"), "gpt-5.5");
+    assert.equal(readOptionValue(launchedArgs[1], "--model"), "gpt-5.5");
     assert.equal(readOptionValue(launchedArgs[0], "--thinking"), "high");
     assert.equal(readOptionValue(launchedArgs[1], "--thinking"), "high");
     assert.equal(
@@ -2044,9 +2928,9 @@ test("process backend retry preserves explicit openai-codex provider/model selec
     );
     assert.deepEqual(result.providerModelSelection, {
       requestedProvider: "openai-codex",
-      requestedModel: "gpt-5.4",
+      requestedModel: "gpt-5.5",
       selectedProvider: "openai-codex",
-      selectedModel: "gpt-5.4"
+      selectedModel: "gpt-5.5"
     });
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
@@ -2095,13 +2979,13 @@ test("process backend falls back to gpt-5.4 when preferred role model is unavail
       workflowId: "fallback-launch-profile-test"
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(result.evidence.includes("model_selection: gpt-5.4"), true);
     assert.equal(result.evidence.includes("selected_model: gpt-5.4"), true);
     assert.equal(result.evidence.includes("model_selection_mode: fallback"), true);
     assert.equal(result.evidence.includes("model_selection_reason: preferred_model_unavailable"), true);
     assert.equal(
-      result.evidence.some((entry) => /model_fallback_reason: preferred model unavailable: gpt-5\.3-codex; fallback model selected: gpt-5\.4/u.test(entry)),
+      result.evidence.some((entry) => /model_fallback_reason: preferred model unavailable: gpt-5\.5; fallback model selected: gpt-5\.4/u.test(entry)),
       true
     );
   } finally {
@@ -2210,7 +3094,7 @@ test("process backend evidence reports explicit provider/model selections when l
       workflowId: "explicit-launch-profile-test"
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "blocked");
     assert.equal(result.evidence.includes("provider_flag_passed: true"), true);
     assert.equal(result.evidence.includes("provider_selection: openrouter"), true);
     assert.equal(result.evidence.includes("model_flag_passed: true"), true);

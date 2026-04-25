@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   isPathWithinScope,
+  normalizeRelativeScopePath,
   normalizeScopedPath,
   scopesOverlap
 } from "../src/path-scopes.js";
@@ -19,6 +20,28 @@ test("normalizeScopedPath rejects non-string values", () => {
     () => normalizeScopedPath({}),
     /scope path must be a string/u
   );
+});
+
+test("normalizeRelativeScopePath accepts only non-escaping repo-relative paths", () => {
+  assert.equal(normalizeRelativeScopePath("./src/a.js"), "src/a.js");
+  assert.equal(normalizeRelativeScopePath("docs/"), "docs/");
+
+  for (const pathValue of [
+    "",
+    "   ",
+    "/tmp/outside.txt",
+    "../outside.txt",
+    "src/../outside.txt",
+    "foo/../../outside.txt",
+    "C:outside.txt",
+    "C:\\Users\\hal\\outside.txt"
+  ]) {
+    assert.throws(
+      () => normalizeRelativeScopePath(pathValue),
+      /must not be empty|must be a repository-relative path|must not escape the repository root/u,
+      pathValue
+    );
+  }
 });
 
 test("isPathWithinScope rejects traversal escapes from directory scopes", () => {
@@ -44,5 +67,12 @@ test("isPathWithinScope compares path casing case-insensitively on Windows", {
 test("scopesOverlap compares scope casing case-insensitively on Windows", {
   skip: process.platform !== "win32"
 }, () => {
+  assert.equal(scopesOverlap("src/file.js", "SRC/file.js"), true);
+});
+
+test("scope comparisons are conservative for common case-insensitive macOS volumes", {
+  skip: process.platform !== "darwin"
+}, () => {
+  assert.equal(isPathWithinScope("SRC/File.js", "src/"), true);
   assert.equal(scopesOverlap("src/file.js", "SRC/file.js"), true);
 });

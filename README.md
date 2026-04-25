@@ -51,12 +51,18 @@ The strongest repo-local runtime evidence currently centers on the process-backe
 ## Current Process-Backend Provider/Model Selection
 
 - provider: `openai-codex`
-- explorer: `gpt-5.4`
-- implementer: `gpt-5.3-codex`
-- reviewer: `gpt-5.4`
-- verifier: `gpt-5.4-mini`
+- explorer: `gpt-5.5`
+- implementer: `gpt-5.5`
+- reviewer: `gpt-5.5`
+- verifier: `gpt-5.5`
 
-These are selected explicitly in the current process backend path rather than inherited implicitly from Pi defaults.
+These are selected explicitly in the current process backend path rather than inherited implicitly from Pi defaults. Process role profiles now fail closed when provider, preferred model, or thinking settings are missing unless an explicit fallback-compatibility mode is requested.
+
+The process backend probes model availability before launch and records requested and selected provider/model evidence. When the preferred `gpt-5.5` model is unavailable, the configured fallback path is explicit; when no preferred or fallback model is available, the run blocks instead of silently inheriting a default.
+
+Implementer process runs also require reviewable completion evidence. A launcher exit code of 0 without changed files, a structured result, or explicit validation evidence is reported as blocked/unproven rather than as plain success.
+
+Process execution now has an explicit sandbox policy. `processSandbox: "required"` is the fail-closed path: if a supported OS sandbox provider is unavailable, the worker is blocked before launch. The built-in provider path uses macOS `sandbox-exec` when available; Linux and Windows block unless a real namespace/seccomp/bubblewrap/firejail-style or restricted-token/job-object/AppContainer provider is configured. `processSandbox: "disabled"` is a development/compatibility mode only and must be paired with `unsandboxedProcessBackendOptIn: true`. Unsandboxed process mode is observation-only, not a security boundary; its evidence records `process_backend_os_sandbox: false`, `process_backend_trust_boundary: observation_only`, and `unsandboxed_process_backend_opt_in: true`. Those runs can support trusted repo changed-surface observation for files the launcher actually changed and the parent applied, but they must not be used as proof of no external side effects, no secret reads, no network access, or descendant-process confinement.
 
 ## Layout
 
@@ -125,6 +131,7 @@ Available Pi command and tool surfaces:
 - `/bootstrap`: command entrypoint for the first bootstrap contract
 - `/audit`: command entrypoint for lifecycle audit
 - `/auto`: command entrypoint for bounded workflow execution
+- `/tiny-edit`: command entrypoint for small scoped documentation or file edits with explicit `allowedFiles`, without creating a `/build` lifecycle session
 - `/run-program`: command entrypoint for execution-program runs
 - `/resume-program`: command entrypoint to continue a persisted run
 - `/worker-runtime-status`: inspect live Pi worker-runtime support

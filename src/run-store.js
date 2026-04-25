@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, utimes, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import { createExecutionProgram, createRunJournal } from "./project-contracts.js";
@@ -16,6 +16,12 @@ import {
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
 } from "./redaction.js";
+import {
+  assertExistingPathHasNoSymlinkSegments,
+  assertPathIsNotSymlink,
+  assertStoreDirectorySafe,
+  getPathLstat
+} from "./path-safety.js";
 
 export const RUN_STORE_FORMAT_VERSION = 1;
 const DEFAULT_RUN_DIRECTORY = ".pi/runs";
@@ -388,7 +394,7 @@ export function createRunStore({
   );
 
   async function ensureRunsDirectory() {
-    await mkdir(resolvedRunsDirectory, { recursive: true });
+    await assertStoreDirectorySafe(normalizedRootDir, resolvedRunsDirectory, "run store directory");
   }
 
   function resolveRunPath(programId) {
@@ -410,6 +416,8 @@ export function createRunStore({
       const lockId = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const lockPayload = `${JSON.stringify({ pid: process.pid, lockId, acquiredAt: new Date().toISOString() })}\n`;
       try {
+        await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "run update lock");
+        await assertPathIsNotSymlink(lockPath, "run update lock");
         await writeFile(lockPath, lockPayload, {
           encoding: "utf8",
           flag: "wx"
@@ -433,11 +441,14 @@ export function createRunStore({
           released = true;
           clearInterval(heartbeatTimer);
           try {
+            await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "run update lock");
+            await assertPathIsNotSymlink(lockPath, "run update lock");
             const rawLock = await readFile(lockPath, "utf8");
             const parsedLock = parseRunUpdateLockPayload(rawLock);
             if (!parsedLock || parsedLock.lockId !== lockId) {
               return;
             }
+            await assertPathIsNotSymlink(lockPath, "run update lock");
             await unlink(lockPath);
           } catch (error) {
             if (error && error.code === "ENOENT") {
@@ -454,8 +465,12 @@ export function createRunStore({
 
       let staleLockRemoved = false;
       try {
-        const lockStats = await stat(lockPath);
-        if (Date.now() - lockStats.mtimeMs > lockStaleMs) {
+        await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "run update lock");
+        await assertPathIsNotSymlink(lockPath, "run update lock");
+        const lockStats = await getPathLstat(lockPath);
+        if (!lockStats) {
+          staleLockRemoved = true;
+        } else if (Date.now() - lockStats.mtimeMs > lockStaleMs) {
           let observedStaleLockId = null;
           try {
             const observedRawLock = await readFile(lockPath, "utf8");
@@ -477,9 +492,12 @@ export function createRunStore({
             }
 
             try {
+              await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, lockPath, "run update lock");
+              await assertPathIsNotSymlink(lockPath, "run update lock");
               const currentRawLock = await readFile(lockPath, "utf8");
               const currentLockId = parseRunUpdateLockPayload(currentRawLock)?.lockId ?? null;
               if (currentLockId === observedStaleLockId) {
+                await assertPathIsNotSymlink(lockPath, "run update lock");
                 await unlink(lockPath);
                 staleLockRemoved = true;
               }
@@ -516,8 +534,16 @@ export function createRunStore({
     const runPath = resolveRunPath(record.programId);
     const tempPath = `${runPath}.${process.pid}.${Date.now()}.tmp`;
     await ensureRunsDirectory();
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, runPath, "persisted run file");
+    await assertPathIsNotSymlink(runPath, "persisted run file");
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, tempPath, "persisted run temp file");
+    await assertPathIsNotSymlink(tempPath, "persisted run temp file");
     await writeFile(tempPath, formatPersistedRecord(record), "utf8");
+    await assertPathIsNotSymlink(tempPath, "persisted run temp file");
+    await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, runPath, "persisted run file");
+    await assertPathIsNotSymlink(runPath, "persisted run file");
     await rename(tempPath, runPath);
+    await assertPathIsNotSymlink(runPath, "persisted run file");
   }
 
   return {
@@ -536,6 +562,9 @@ export function createRunStore({
     async loadRun(programId) {
       const normalizedProgramId = normalizeProgramId(programId);
       const runPath = resolveRunPath(normalizedProgramId);
+      await ensureRunsDirectory();
+      await assertExistingPathHasNoSymlinkSegments(normalizedRootDir, runPath, "persisted run file");
+      await assertPathIsNotSymlink(runPath, "persisted run file");
 
       let raw;
       try {
