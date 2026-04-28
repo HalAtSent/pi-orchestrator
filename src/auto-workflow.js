@@ -1,13 +1,20 @@
 import { buildTaskPacket, createInitialWorkflow } from "./orchestrator.js";
 import { parseBooleanFlag } from "./boolean-flags.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import {
+  laneRequiresHumanGate,
+  laneRequiresIndependentReview,
+  resolveTaskLane
+} from "./policies.js";
 import { safeClone } from "./safe-clone.js";
 import { validateTaskPacket } from "./contracts.js";
 import {
   buildChangedSurfaceContextManifest,
   buildPriorResultContextManifest,
   buildReviewResultContextManifest,
+  normalizeReconArtifact,
   RUN_CONTEXT_BUDGET_LIMITS,
+  sanitizeReconArtifactForBoundary,
   setTrustedForwardedRedactionMetadata,
   setTrustedRuntimeRepositoryRoot,
   mergeContextManifestEntries,
@@ -81,7 +88,7 @@ function normalizeWorkflowInput(input) {
     "allowedFiles must contain at least one file path for /auto workflows"
   );
 
-  return {
+  const normalized = {
     goal: input.goal.trim(),
     allowedFiles,
     forbiddenFiles: Array.isArray(input.forbiddenFiles) ? input.forbiddenFiles.map(normalizePath) : [],
@@ -92,6 +99,12 @@ function normalizeWorkflowInput(input) {
     }),
     maxRepairLoops: input.maxRepairLoops ?? 1
   };
+
+  if (Object.prototype.hasOwnProperty.call(input, "lane")) {
+    normalized.lane = input.lane;
+  }
+
+  return normalized;
 }
 
 function normalizePlannedWorkflowInput(input) {
@@ -110,6 +123,41 @@ function normalizePlannedWorkflowInput(input) {
       throw new Error(`workflow.packets[${index}] ${toErrorMessage(error)}`);
     }
   });
+  const userSuppliedWorkflowLane = Object.prototype.hasOwnProperty.call(workflow, "lane");
+  const packetLanes = unique(workflow.packets
+    .filter((packet) => Object.prototype.hasOwnProperty.call(packet, "lane"))
+    .map((packet) => packet.lane));
+  if (!userSuppliedWorkflowLane && packetLanes.length > 1) {
+    throw new Error("workflow.packets[].lane values must not conflict");
+  }
+  if (userSuppliedWorkflowLane && packetLanes.some((lane) => lane !== workflow.lane)) {
+    throw new Error("workflow.packets[].lane must match workflow.lane");
+  }
+  const allowedFiles = unique(workflow.packets.flatMap((packet) => (
+    Array.isArray(packet.allowedFiles) ? packet.allowedFiles : []
+  )));
+  workflow.lane = resolveTaskLane({
+    goal: workflow.goal,
+    allowedFiles,
+    lane: userSuppliedWorkflowLane ? workflow.lane : packetLanes[0],
+    hasUserSuppliedLane: userSuppliedWorkflowLane || packetLanes.length === 1
+  });
+  if (laneRequiresHumanGate(workflow.lane) && workflow.humanGate !== true) {
+    throw new Error("workflow.humanGate must be true for human-gated task lanes");
+  }
+  if (
+    laneRequiresIndependentReview(workflow.lane) &&
+    (
+      !workflow.roleSequence.includes("reviewer") ||
+      !workflow.packets.some((packet) => packet.role === "reviewer")
+    )
+  ) {
+    throw new Error("workflow.roleSequence and workflow.packets must include reviewer for review-gated task lanes");
+  }
+  workflow.packets = workflow.packets.map((packet) => ({
+    ...packet,
+    lane: workflow.lane
+  }));
 
   return {
     workflow,
@@ -150,13 +198,23 @@ function sanitizePriorResults(runs, { redactor }) {
     const openQuestions = redactor.redactStringArray(clone(result.openQuestions), {
       fieldName: `${fieldPrefix}.openQuestions`
     });
+    const sanitizedRecon = Object.prototype.hasOwnProperty.call(result, "recon")
+      ? sanitizeReconArtifactForBoundary(result.recon, {
+        redactor,
+        fieldName: `${fieldPrefix}.recon`
+      })
+      : {
+        recon: undefined,
+        redaction: undefined
+      };
     const redaction = mergeRedactionMetadata(
       result.redaction,
       summary.redaction,
       changedFiles.redaction,
       commandsRun.redaction,
       evidence.redaction,
-      openQuestions.redaction
+      openQuestions.redaction,
+      sanitizedRecon.redaction
     );
 
     return {
@@ -168,6 +226,7 @@ function sanitizePriorResults(runs, { redactor }) {
       commandsRun: commandsRun.values,
       evidence: evidence.values,
       openQuestions: openQuestions.values,
+      ...(sanitizedRecon.recon !== undefined ? { recon: sanitizedRecon.recon } : {}),
       redaction
     };
   });
@@ -509,10 +568,31 @@ function resolveContextRepositoryRoot() {
 }
 
 function sanitizeWorkflowWorkerResult(result) {
-  return sanitizeWorkerResultForBoundary(result, {
-    repositoryRoot: resolveContextRepositoryRoot(),
+  const repositoryRoot = resolveContextRepositoryRoot();
+  const sanitizedResult = sanitizeWorkerResultForBoundary(result, {
+    repositoryRoot,
     mergeExistingRedaction: true
   });
+  if (!Object.prototype.hasOwnProperty.call(sanitizedResult, "recon")) {
+    return sanitizedResult;
+  }
+
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot
+  });
+  const sanitizedRecon = sanitizeReconArtifactForBoundary(sanitizedResult.recon, {
+    redactor,
+    fieldName: "result.recon"
+  });
+
+  return {
+    ...sanitizedResult,
+    recon: sanitizedRecon.recon,
+    redaction: mergeRedactionMetadata(
+      sanitizedResult.redaction,
+      sanitizedRecon.redaction
+    )
+  };
 }
 
 function toContextAdmissionFailureReason(error) {
@@ -572,11 +652,15 @@ function buildRunContext({ workflow, packet, runs, repairCount, reviewResult, ba
   });
   const contextManifest = mergeContextManifestEntries(
     resolvePacketContextManifest(packet),
-    buildPriorResultContextManifest(priorResults),
-    buildReviewResultContextManifest(normalizedReviewResult),
-    buildChangedSurfaceContextManifest(
-      changedSurfaceContext.map((entry) => `${entry.packetId}:${entry.role}`)
-    )
+    buildPriorResultContextManifest(priorResults, {
+      includeMetadata: true
+    }),
+    buildReviewResultContextManifest(normalizedReviewResult, {
+      includeMetadata: true
+    }),
+    buildChangedSurfaceContextManifest(changedSurfaceContext, {
+      includeMetadata: true
+    })
   );
 
   const runContext = {
@@ -645,6 +729,24 @@ function validateChangedFiles(packet, result) {
       `${packet.role} reported a forbidden file: ${changedFile}`
     );
   }
+}
+
+function validateReconResult(packet, result) {
+  if (!Object.prototype.hasOwnProperty.call(result ?? {}, "recon")) {
+    return;
+  }
+
+  result.recon = normalizeReconArtifact(result.recon, {
+    fieldName: "result.recon"
+  });
+  assert(
+    READ_ONLY_ROLES.has(packet.role),
+    "recon artifacts are read-only and may only be reported by read-only roles"
+  );
+  assert(
+    Array.isArray(result.changedFiles) && result.changedFiles.length === 0,
+    "recon artifacts are read-only and require changedFiles to be empty"
+  );
 }
 
 async function executePacket({
@@ -744,6 +846,7 @@ async function executePacket({
   }
 
   try {
+    validateReconResult(packet, result);
     validateChangedFiles(packet, result);
   } catch (error) {
     const preservedChangedSurfaceObservation = (
@@ -816,6 +919,124 @@ function findWorkflowPacket(workflow, role) {
   return Array.isArray(workflow?.packets)
     ? workflow.packets.find((candidate) => candidate?.role === role) ?? null
     : null;
+}
+
+function normalizeOptionalRepairText(value, fallback) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : fallback;
+}
+
+function isWithinAnyScope(pathValue, scopeEntries) {
+  return scopeEntries.some((scopeEntry) => isPathWithinScope(pathValue, scopeEntry));
+}
+
+function resolveRepairTargetFiles(finding, originalAllowedFiles) {
+  if (typeof finding?.path !== "string" || finding.path.trim().length === 0) {
+    return [];
+  }
+
+  const targetFile = normalizePath(finding.path);
+  return isWithinAnyScope(targetFile, originalAllowedFiles) ? [targetFile] : [];
+}
+
+function concreteRepairCommands(values) {
+  return unique(
+    values
+      .filter((value) => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim())
+      .filter((value) => !value.startsWith("<"))
+  );
+}
+
+function createRepairContractForbiddenChanges({ targetFiles, originalAllowedFiles, originalForbiddenFiles }) {
+  return unique([
+    "Do not modify files outside the repair packet allowedFiles.",
+    ...(targetFiles.length > 0
+      ? [`Limit code changes for this finding to: ${targetFiles.join(", ")}.`]
+      : ["Do not widen beyond the original packet allowlist when no finding target file is known."]),
+    ...originalForbiddenFiles.map((pathValue) => `Do not modify forbidden scope: ${pathValue}.`),
+    `Original packet allowlist boundary: ${originalAllowedFiles.join(", ")}.`
+  ]);
+}
+
+function buildRepairContracts({ workflow, reviewerPacket, reviewResult, repairCount }) {
+  const originalAllowedFiles = reviewerPacket.allowedFiles.map(normalizePath);
+  const originalForbiddenFiles = reviewerPacket.forbiddenFiles.map(normalizePath);
+  const reviewFindings = Array.isArray(reviewResult?.reviewFindings)
+    ? reviewResult.reviewFindings
+    : [];
+  const findings = reviewFindings.length > 0
+    ? reviewFindings
+    : [
+      {
+        kind: "issue",
+        severity: "medium",
+        message: "Resolve the blocking reviewer result without widening the original packet scope."
+      }
+    ];
+  const sourcePackets = [
+    findWorkflowPacket(workflow, "implementer"),
+    reviewerPacket,
+    findWorkflowPacket(workflow, "verifier")
+  ].filter(Boolean);
+  const expectedVerification = concreteRepairCommands([
+    ...sourcePackets.flatMap((sourcePacket) => sourcePacket.commands ?? []),
+    ...(Array.isArray(reviewResult?.commandsRun) ? reviewResult.commandsRun : [])
+  ]);
+
+  const contracts = findings.map((finding, index) => {
+    const targetFiles = resolveRepairTargetFiles(finding, originalAllowedFiles);
+    return {
+      findingId: `${reviewerPacket.id}-repair-${repairCount}-finding-${index + 1}`,
+      targetFiles,
+      requiredCorrection: normalizeOptionalRepairText(
+        finding.message,
+        "Resolve the blocking reviewer finding."
+      ),
+      forbiddenChanges: createRepairContractForbiddenChanges({
+        targetFiles,
+        originalAllowedFiles,
+        originalForbiddenFiles
+      }),
+      expectedVerification
+    };
+  });
+
+  const targetedAllowedFiles = unique(contracts.flatMap((contract) => contract.targetFiles));
+  const repairAllowedFiles = targetedAllowedFiles.length > 0
+    ? targetedAllowedFiles
+    : originalAllowedFiles;
+  assert(
+    repairAllowedFiles.every((pathValue) => isWithinAnyScope(pathValue, originalAllowedFiles)),
+    "repair packet scope must not exceed the original packet allowlist"
+  );
+
+  return {
+    contracts,
+    repairAllowedFiles,
+    originalAllowedFiles
+  };
+}
+
+function repairContractAcceptanceChecks(repairContracts) {
+  return repairContracts.flatMap((contract) => [
+    `Repair finding ${contract.findingId}: ${contract.requiredCorrection}`,
+    ...(contract.targetFiles.length > 0
+      ? [`Repair finding ${contract.findingId} target files: ${contract.targetFiles.join(", ")}`]
+      : [`Repair finding ${contract.findingId} target files: not specified by reviewer; keep original scope bounded.`]),
+    ...(contract.expectedVerification.length > 0
+      ? [`Repair finding ${contract.findingId} expected verification: ${contract.expectedVerification.join(" | ")}`]
+      : [])
+  ]);
+}
+
+function repairContractNonGoals(repairContracts) {
+  return repairContracts.flatMap((contract) => (
+    contract.forbiddenChanges.map((forbiddenChange) => (
+      `Repair finding ${contract.findingId}: ${forbiddenChange}`
+    ))
+  ));
 }
 
 function mergeRepairPacketGuards(repairPacket, sourcePackets) {
@@ -918,21 +1139,44 @@ export function summarizeWorkflowLaunchSelection(execution) {
   return roleSummaries.join(", ");
 }
 
-function createRepairPacket({ workflow, packet, role, repairCount }) {
+function createRepairPacket({ workflow, packet, role, repairCount, reviewResult }) {
+  const repairContractPacket = buildRepairContracts({
+    workflow,
+    reviewerPacket: packet,
+    reviewResult,
+    repairCount
+  });
   const repairPacket = buildTaskPacket({
-    goal: `${role === "implementer" ? "Address review findings for" : "Re-review repaired patch for"}: ${workflow.goal}`,
+    goal: `${role === "implementer" ? "Apply scoped repair contracts for" : "Re-review scoped repair contracts for"}: ${workflow.goal}`,
     role,
-    allowedFiles: packet.allowedFiles,
+    allowedFiles: repairContractPacket.repairAllowedFiles,
     forbiddenFiles: packet.forbiddenFiles,
     parentTaskId: `${workflow.workflowId}-repair-${repairCount}`,
     risk: workflow.risk,
     contextFiles: unique([
       ...packet.contextFiles,
-      ...packet.allowedFiles
+      ...repairContractPacket.repairAllowedFiles
     ])
   });
 
   repairPacket.id = `${repairPacket.id}-repair-${repairCount}`;
+  repairPacket.repairContracts = clone(repairContractPacket.contracts);
+  repairPacket.repairScope = {
+    originalAllowedFiles: clone(repairContractPacket.originalAllowedFiles),
+    allowedFiles: clone(repairContractPacket.repairAllowedFiles)
+  };
+  repairPacket.acceptanceChecks = mergeStringFields(
+    repairPacket.acceptanceChecks,
+    repairContractAcceptanceChecks(repairContractPacket.contracts)
+  );
+  repairPacket.nonGoals = mergeStringFields(
+    repairPacket.nonGoals,
+    repairContractNonGoals(repairContractPacket.contracts)
+  );
+  repairPacket.commands = mergeStringFields(
+    repairPacket.commands,
+    ...repairContractPacket.contracts.map((contract) => contract.expectedVerification)
+  );
   const originalRolePacket = findWorkflowPacket(workflow, role);
   const originalImplementerPacket = findWorkflowPacket(workflow, "implementer");
   return mergeRepairPacketGuards(repairPacket, [
@@ -946,6 +1190,7 @@ async function runRepairLoop({
   runner,
   workflow,
   reviewerPacket,
+  reviewResult,
   runs,
   repairCount,
   baseContext,
@@ -956,7 +1201,8 @@ async function runRepairLoop({
     workflow,
     packet: reviewerPacket,
     role: "implementer",
-    repairCount
+    repairCount,
+    reviewResult
   });
   const repairRun = await executePacket({
     runner,
@@ -981,7 +1227,8 @@ async function runRepairLoop({
     workflow,
     packet: reviewerPacket,
     role: "reviewer",
-    repairCount
+    repairCount,
+    reviewResult
   });
   const rereviewRun = await executePacket({
     runner,
@@ -1059,6 +1306,7 @@ export async function runPlannedWorkflow(input, {
         runner,
         workflow,
         reviewerPacket: packet,
+        reviewResult: run.result,
         runs,
         repairCount,
         baseContext,
@@ -1121,12 +1369,16 @@ export async function runAutoWorkflow(input, {
   }
 
   try {
-    workflow = createInitialWorkflow({
+    const workflowInput = {
       goal: normalizedInput.goal,
       allowedFiles: normalizedInput.allowedFiles,
       forbiddenFiles: normalizedInput.forbiddenFiles,
       contextFiles: normalizedInput.contextFiles
-    });
+    };
+    if (Object.prototype.hasOwnProperty.call(normalizedInput, "lane")) {
+      workflowInput.lane = normalizedInput.lane;
+    }
+    workflow = createInitialWorkflow(workflowInput);
   } catch (error) {
     return blockedInputExecution({
       goal: normalizedInput.goal,
@@ -1158,6 +1410,7 @@ export function formatWorkflowExecution(execution) {
     `workflow: ${execution.workflow.workflowId}`,
     `status: ${execution.status}`,
     `risk: ${execution.workflow.risk}`,
+    ...(execution.workflow.lane ? [`lane: ${execution.workflow.lane}`] : []),
     `human_gate: ${execution.workflow.humanGate ? "required" : "not-required"}`,
     `repair_loops: ${execution.repairCount}/${execution.maxRepairLoops}`,
     `stop_reason: ${execution.stopReason ?? "none"}`,

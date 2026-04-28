@@ -15,6 +15,11 @@ import {
   PI_ADAPTER_DEFAULT_SUPPORTED_ROLES
 } from "./pi-adapter.js";
 import {
+  createPreflightStopReason,
+  createPreflightWarningSummary,
+  runPreflight
+} from "./preflight.js";
+import {
   formatPiWorkerRuntimeStatus,
   inspectPiWorkerRuntime
 } from "./pi-runtime-diagnostics.js";
@@ -33,14 +38,17 @@ import {
   normalizePolicyProfile,
   normalizeReviewability,
   normalizeStopReasonCode,
+  normalizeValidationOutcome,
   normalizeValidationArtifacts
 } from "./run-evidence.js";
+import { createRunJournal } from "./project-contracts.js";
 import {
   brainstormProject,
   buildProjectLifecycleArtifacts,
   createExecutionProgramPlanFingerprint,
   deriveExecutionProgramActionClasses
 } from "./project-workflows.js";
+import { classifyRisk, TASK_LANES } from "./policies.js";
 import {
   formatOperatorApprovalCheckpoint,
   formatOperatorBuildSessionLookupBlocked,
@@ -131,6 +139,7 @@ function formatWorkflow(workflow) {
   return [
     `workflow: ${workflow.workflowId}`,
     `risk: ${workflow.risk}`,
+    ...(workflow.lane ? [`lane: ${workflow.lane}`] : []),
     `human_gate: ${workflow.humanGate ? "required" : "not-required"}`,
     "roles:",
     ...packetLines
@@ -243,7 +252,7 @@ function parseProjectBriefArgs(args) {
 function parseAutoArgs(args) {
   const parsed = parseJsonArgs(args);
 
-  return {
+  const normalized = {
     goal: String(parsed.goal ?? "").trim(),
     allowedFiles: normalizeStringArray(parsed.allowedFiles),
     forbiddenFiles: normalizeStringArray(parsed.forbiddenFiles),
@@ -254,6 +263,12 @@ function parseAutoArgs(args) {
     }),
     maxRepairLoops: parsed.maxRepairLoops ?? 1
   };
+
+  if (Object.prototype.hasOwnProperty.call(parsed, "lane")) {
+    normalized.lane = String(parsed.lane ?? "").trim();
+  }
+
+  return normalized;
 }
 
 function coerceGoal(value) {
@@ -718,6 +733,73 @@ function createPiProgressReporter(ctx, {
   };
 }
 
+function executionProgramContractIds(program) {
+  return Array.isArray(program?.contracts)
+    ? program.contracts
+      .map((contract) => (typeof contract?.id === "string" ? contract.id.trim() : ""))
+      .filter((contractId) => contractId.length > 0)
+    : [];
+}
+
+function inferProgramRequiresProcessBackend(program, mode) {
+  if (mode === AUTO_BACKEND_MODES.PI_RUNTIME) {
+    return false;
+  }
+
+  if (mode === AUTO_BACKEND_MODES.PROCESS_SUBAGENTS) {
+    return true;
+  }
+
+  if (mode === AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER) {
+    if (!Array.isArray(program?.contracts)) {
+      return null;
+    }
+
+    return program.contracts.some((contract) => (
+      contract?.risk === "low" &&
+      classifyRisk({
+        goal: contract.goal,
+        allowedFiles: Array.isArray(contract.scopePaths) ? contract.scopePaths : []
+      }) === "low"
+    ));
+  }
+
+  return null;
+}
+
+function createPreflightBlockedRunJournal(program, stopReason) {
+  const programId = typeof program?.id === "string" && program.id.trim().length > 0
+    ? program.id.trim()
+    : "unknown-program";
+  return createRunJournal({
+    programId,
+    status: "blocked",
+    stopReason,
+    stopReasonCode: normalizeStopReasonCode(null, {
+      status: "blocked",
+      stopReason
+    }),
+    validationOutcome: normalizeValidationOutcome(null, {
+      status: "blocked"
+    }),
+    contractRuns: [],
+    completedContractIds: [],
+    pendingContractIds: executionProgramContractIds(program)
+  });
+}
+
+async function persistPreflightBlockedRun(runStore, program, blockedRunJournal) {
+  if (!runStore || typeof runStore.saveRun !== "function") {
+    return;
+  }
+
+  await runStore.saveRun({
+    programId: blockedRunJournal.programId,
+    program,
+    runJournal: blockedRunJournal
+  });
+}
+
 export function createPiExtension({
   workerRunner = null,
   contractExecutor,
@@ -785,6 +867,26 @@ export function createPiExtension({
           ? { heartbeatIntervalMs: processHeartbeatIntervalMs }
           : {})
       });
+    };
+
+    const runExecutionProgramPreflight = async (program) => {
+      const processBackendRequired = inferProgramRequiresProcessBackend(program, autoBackendMode);
+      const nativeModelProbeApplies = processBackendRequired === false && typeof nativeModelProbe === "function";
+      return runPreflight({
+        repositoryRoot: process.cwd(),
+        program,
+        processBackendRequired,
+        processBackend: processWorkerBackend,
+        modelProbe: nativeModelProbeApplies ? nativeModelProbe : null,
+        modelProbeRequired: processBackendRequired === true || nativeModelProbeApplies
+      });
+    };
+
+    const notifyPreflightWarnings = (ctx, preflightResult) => {
+      const warningSummary = createPreflightWarningSummary(preflightResult);
+      if (warningSummary) {
+        ctx?.ui?.notify?.(warningSummary, "warning");
+      }
     };
 
     const syncBuildSessionWithRunStore = async (buildSession) => {
@@ -954,6 +1056,39 @@ export function createPiExtension({
               }
             };
           }
+
+          const preflight = await runExecutionProgramPreflight(lifecycle.executionProgram);
+          if (preflight.status === "blocked") {
+            const message = createPreflightStopReason(preflight);
+            buildSession = await persistBlockedBuildSessionExecution(
+              resolvedBuildSessionStore,
+              buildSession,
+              message
+            );
+
+            ctx.ui.notify(`build blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build blocked");
+
+            return {
+              status: "blocked",
+              stopReason: message,
+              summary: "Build flow blocked before execution.",
+              buildId: buildSession?.buildId ?? null,
+              buildSession,
+              text: formatBuildBlockedText({
+                buildSession,
+                buildId: buildSession?.buildId ?? null,
+                message
+              }),
+              details: {
+                buildId: buildSession?.buildId ?? null,
+                stopReason: message,
+                buildSession,
+                preflight
+              }
+            };
+          }
+          notifyPreflightWarnings(ctx, preflight);
 
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildSession.buildId, (existingSession) => {
             if (!existingSession) {
@@ -1207,6 +1342,39 @@ export function createPiExtension({
               }
             };
           }
+
+          const preflight = await runExecutionProgramPreflight(buildSession.lifecycle.executionProgram);
+          if (preflight.status === "blocked") {
+            const message = createPreflightStopReason(preflight);
+            buildSession = await persistBlockedBuildSessionExecution(
+              resolvedBuildSessionStore,
+              buildSession,
+              message
+            );
+
+            ctx.ui.notify(`build approval blocked: ${message}`, "warning");
+            ctx.ui.setStatus("workflow", "build approval blocked");
+
+            return {
+              status: "blocked",
+              buildId,
+              stopReason: message,
+              summary: "Build approval could not proceed.",
+              buildSession,
+              text: formatBuildBlockedText({
+                buildSession,
+                buildId,
+                message
+              }),
+              details: {
+                buildId,
+                stopReason: message,
+                buildSession,
+                preflight
+              }
+            };
+          }
+          notifyPreflightWarnings(ctx, preflight);
 
           buildSession = await resolvedBuildSessionStore.updateBuildSession(buildId, (existingSession) => {
             if (!existingSession) {
@@ -1614,6 +1782,26 @@ export function createPiExtension({
       description: "Execute an ExecutionProgram contract-by-contract with a configured contract executor.",
       handler: async (args, ctx) => {
         const { program, approvedHighRisk } = parseRunProgramArgs(args);
+        const preflight = await runExecutionProgramPreflight(program);
+        if (preflight.status === "blocked") {
+          const stopReason = createPreflightStopReason(preflight);
+          const blockedRunJournal = createPreflightBlockedRunJournal(program, stopReason);
+          await persistPreflightBlockedRun(runStore, program, blockedRunJournal);
+
+          ctx.ui.notify(`execution program blocked: ${stopReason}`, "warning");
+          ctx.ui.setStatus("workflow", `${blockedRunJournal.status}: ${blockedRunJournal.programId}`);
+
+          return {
+            ...blockedRunJournal,
+            text: formatProgramRunJournal(blockedRunJournal),
+            details: {
+              ...blockedRunJournal,
+              preflight
+            }
+          };
+        }
+        notifyPreflightWarnings(ctx, preflight);
+
         const progressReporter = createPiProgressReporter(ctx, {
           label: "run-program"
         });
@@ -1675,7 +1863,11 @@ export function createPiExtension({
         contextFiles: Type.Array(Type.String(), {
           description: "Files that provide extra context without widening write scope.",
           default: []
-        })
+        }),
+        lane: Type.Optional(Type.String({
+          description: "Optional closed task lane override. Omit to let the harness infer conservatively.",
+          enum: TASK_LANES
+        }))
       }),
       async execute(_toolCallId, params) {
         const workflow = createInitialWorkflow(params);
@@ -1790,6 +1982,10 @@ export function createPiExtension({
           description: "Files that provide extra context without widening write scope.",
           default: []
         }),
+        lane: Type.Optional(Type.String({
+          description: "Optional closed task lane override. Omit to let the harness infer conservatively.",
+          enum: TASK_LANES
+        })),
         approvedHighRisk: Type.Boolean({
           description: "Whether a human explicitly approved high-risk execution.",
           default: false
@@ -1818,6 +2014,20 @@ export function createPiExtension({
       description: "Execute an ExecutionProgram sequentially with dependency-aware contract gating.",
       parameters: runExecutionProgramSchema,
       async execute(_toolCallId, params) {
+        const preflight = await runExecutionProgramPreflight(params.program);
+        if (preflight.status === "blocked") {
+          const stopReason = createPreflightStopReason(preflight);
+          const blockedRunJournal = createPreflightBlockedRunJournal(params.program, stopReason);
+          await persistPreflightBlockedRun(runStore, params.program, blockedRunJournal);
+          return {
+            content: [{ type: "text", text: formatProgramRunJournal(blockedRunJournal) }],
+            details: {
+              ...blockedRunJournal,
+              preflight
+            }
+          };
+        }
+
         const runJournal = await runExecutionProgram(params.program, {
           contractExecutor: createExecutionProgramExecutor({
             approvedHighRisk: parseBooleanFlag(params.approvedHighRisk, {

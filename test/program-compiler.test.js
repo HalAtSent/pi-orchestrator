@@ -25,8 +25,11 @@ test("compiler preserves contract scope, constraints, and contract guards", () =
   assert.deepEqual(compiled.verificationPlan, contract.verificationPlan);
   assert.deepEqual(compiled.stopConditions, contract.stopConditions);
   assert.deepEqual(compiled.contextFiles, ["README.md"]);
+  assert.equal(compiled.lane, "policy_or_harness_change");
+  assert.equal(compiled.workflow.lane, "policy_or_harness_change");
 
   for (const packet of compiled.workflow.packets) {
+    assert.equal(packet.lane, "policy_or_harness_change");
     assert.deepEqual(packet.allowedFiles, contract.scopePaths);
     assert.deepEqual(packet.contextManifest, [
       {
@@ -69,9 +72,36 @@ test("compiler derives role sequence from effective risk policy", () => {
   const compiled = compileExecutionContract(contract);
 
   assert.equal(compiled.risk, "high");
+  assert.equal(compiled.lane, "migration");
   assert.deepEqual(compiled.intendedRoleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
   assert.deepEqual(compiled.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
   assert.equal(compiled.workflow.humanGate, true);
+});
+
+test("compiler carries user-supplied stricter lanes through the compiled contract", () => {
+  const contract = {
+    id: "declared-refactor-lane",
+    goal: "Rename a helper constant in one file",
+    scopePaths: ["src/helpers.js"],
+    lane: "refactor",
+    constraints: ["Do not widen scope."],
+    nonGoals: ["Do not edit files outside src/helpers.js."],
+    acceptanceChecks: ["Change remains scoped and reviewable."],
+    stopConditions: ["Stop if another file needs edits."],
+    deliverables: ["Renamed helper constant"],
+    risk: "low"
+  };
+
+  const compiled = compileExecutionContract(contract);
+
+  assert.equal(compiled.risk, "low");
+  assert.equal(compiled.lane, "refactor");
+  assert.equal(compiled.workflow.lane, "refactor");
+  assert.equal(compiled.workflow.humanGate, true);
+  assert.deepEqual(compiled.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  for (const packet of compiled.workflow.packets) {
+    assert.equal(packet.lane, "refactor");
+  }
 });
 
 test("compiler does not downgrade declared high risk when heuristics are low", () => {
@@ -142,6 +172,36 @@ test("compiler rejects contracts with an empty scopePaths allowlist", () => {
   assert.throws(
     () => compileExecutionContract(contract),
     /scopePaths must contain at least one file path/i
+  );
+});
+
+test("compiler rejects unknown or downclassifying user-supplied lanes", () => {
+  const contract = {
+    id: "invalid-lane-contract",
+    goal: "Adjust task lane handling",
+    scopePaths: ["src/policies.js"],
+    constraints: ["Do not widen scope."],
+    nonGoals: ["Do not edit files outside src/policies.js."],
+    acceptanceChecks: ["Policy behavior remains reviewable."],
+    stopConditions: ["Stop if approval behavior changes unexpectedly."],
+    deliverables: ["Policy update"],
+    risk: "low"
+  };
+
+  assert.throws(
+    () => compileExecutionContract({
+      ...contract,
+      lane: "unknown_lane"
+    }),
+    /lane must be one of:/u
+  );
+
+  assert.throws(
+    () => compileExecutionContract({
+      ...contract,
+      lane: "tiny_edit"
+    }),
+    /lane conflicts with inferred task lane: policy_or_harness_change/u
   );
 });
 

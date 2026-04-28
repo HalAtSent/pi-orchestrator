@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { createExecutionProgram, createRunJournal } from "./project-contracts.js";
 import {
   normalizeActionClasses,
+  normalizeFailureClass,
   normalizeLineageDepth,
   normalizePolicyProfile,
   normalizeReviewability,
@@ -16,6 +17,10 @@ import {
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
 } from "./redaction.js";
+import {
+  collectTypedClaimSurfaceRedactionFields,
+  redactTypedClaimSurfaces
+} from "./typed-claim-redaction.js";
 import {
   assertExistingPathHasNoSymlinkSegments,
   assertPathIsNotSymlink,
@@ -108,10 +113,18 @@ function redactRunJournalContractRuns(runJournal, { repositoryRoot }) {
       const openQuestions = redactor.redactStringArray(entry.openQuestions, {
         fieldName: `runJournal.contractRuns[${index}].openQuestions`
       });
+      const typedClaimSurfaces = redactTypedClaimSurfaces(entry, {
+        redactor,
+        fieldName: `runJournal.contractRuns[${index}]`
+      });
+      const typedClaimSurfaceFields = collectTypedClaimSurfaceRedactionFields(entry, {
+        fieldName: `runJournal.contractRuns[${index}]`
+      });
       const boundaryRedaction = mergeRedactionMetadata(
         summary.redaction,
         evidence.redaction,
-        openQuestions.redaction
+        openQuestions.redaction,
+        typedClaimSurfaces.redaction
       );
       if (Object.prototype.hasOwnProperty.call(entry, "redaction")) {
         assertRedactionMetadataMatchesCoveredStrings(entry.redaction, {
@@ -121,7 +134,8 @@ function redactRunJournalContractRuns(runJournal, { repositoryRoot }) {
             {
               fieldName: `runJournal.contractRuns[${index}].summary`,
               value: entry.summary
-            }
+            },
+            ...typedClaimSurfaceFields.stringFields
           ],
           stringArrayFields: [
             {
@@ -131,13 +145,15 @@ function redactRunJournalContractRuns(runJournal, { repositoryRoot }) {
             {
               fieldName: `runJournal.contractRuns[${index}].openQuestions`,
               value: entry.openQuestions
-            }
+            },
+            ...typedClaimSurfaceFields.stringArrayFields
           ]
         });
       }
 
       return {
         ...entry,
+        ...typedClaimSurfaces.fields,
         summary: summary.value,
         evidence: evidence.values,
         openQuestions: openQuestions.values,
@@ -231,6 +247,12 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
     validationArtifacts: normalizedRunJournalValidationArtifacts,
     contractRuns: runJournal.contractRuns
   });
+  const normalizedRunJournalFailureClass = normalizeFailureClass(runJournal.failureClass, {
+    status: runJournal.status,
+    stopReason: normalizedStopReason,
+    stopReasonCode: normalizedStopReasonCode,
+    contractRuns: runJournal.contractRuns
+  });
   if (runJournal.reviewability !== undefined && runJournal.reviewability !== null) {
     normalizeReviewability(runJournal.reviewability, {
       status: runJournal.status,
@@ -254,7 +276,8 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
     actionClasses: normalizedRunJournalActionClasses,
     policyProfile: normalizedRunJournalPolicyProfile,
     validationArtifacts: normalizedRunJournalValidationArtifacts,
-    reviewability: normalizedRunJournalReviewability
+    reviewability: normalizedRunJournalReviewability,
+    failureClass: normalizedRunJournalFailureClass
   };
 
   const defaultSourceArtifactIds = [
@@ -285,6 +308,12 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
       contractRuns: normalizedRunJournal.contractRuns
     });
   }
+  const failureClass = normalizeFailureClass(recordInput.failureClass ?? normalizedRunJournalFailureClass, {
+    status: normalizedRunJournal.status,
+    stopReason: normalizedStopReason,
+    stopReasonCode: normalizedStopReasonCode,
+    contractRuns: normalizedRunJournal.contractRuns
+  });
   const normalizedRepositoryRoot = repositoryRoot;
   const artifactType = normalizeExactArtifactType(
     "persistedRun.artifactType",
@@ -316,6 +345,7 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
     lastStatus: normalizedRunJournal.status,
     stopReason: normalizedStopReason,
     stopReasonCode: normalizedStopReasonCode,
+    failureClass,
     validationOutcome: runJournal.validationOutcome,
     actionClasses,
     policyProfile,

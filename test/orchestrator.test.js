@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import { createInitialWorkflow } from "../src/orchestrator.js";
 import { scopesOverlap } from "../src/path-scopes.js";
-import { classifyRisk, isProtectedPath, requiresHumanGate } from "../src/policies.js";
+import { classifyRisk, classifyTaskLane, isProtectedPath, requiresHumanGate } from "../src/policies.js";
 import { validateWorkerResult } from "../src/contracts.js";
 
 test("protected paths are recognized", () => {
@@ -21,6 +21,43 @@ test("risk becomes high for schema work", () => {
   });
 
   assert.equal(risk, "high");
+});
+
+test("task lane inference distinguishes bounded task shapes", () => {
+  assert.equal(classifyTaskLane({
+    goal: "Clarify operating guide wording",
+    allowedFiles: ["docs/OPERATING-GUIDE.md", "README.md"]
+  }), "docs_only");
+
+  assert.equal(classifyTaskLane({
+    goal: "Add coverage for packet validation",
+    allowedFiles: ["test/contracts.test.js"]
+  }), "test_only");
+
+  assert.equal(classifyTaskLane({
+    goal: "Fix a regression in packet validation",
+    allowedFiles: ["src/contracts.js"]
+  }), "policy_or_harness_change");
+
+  assert.equal(classifyTaskLane({
+    goal: "Fix a regression in local formatting",
+    allowedFiles: ["src/format.js"]
+  }), "bounded_bugfix");
+
+  assert.equal(classifyTaskLane({
+    goal: "Add a data migration for cached run records",
+    allowedFiles: ["db/migrations/001-run-records.sql"]
+  }), "migration");
+
+  assert.equal(classifyTaskLane({
+    goal: "Adjust task lane gate handling",
+    allowedFiles: ["src/policies.js"]
+  }), "policy_or_harness_change");
+
+  assert.equal(classifyTaskLane({
+    goal: "Clarify contract wording",
+    allowedFiles: ["docs/HARNESS-CONTRACT.md"]
+  }), "policy_or_harness_change");
 });
 
 test("human gate is required for infra changes", () => {
@@ -199,8 +236,12 @@ test("low risk workflow uses implementer and verifier only", () => {
   });
 
   assert.equal(workflow.risk, "low");
+  assert.equal(workflow.lane, "tiny_edit");
   assert.deepEqual(workflow.roleSequence, ["implementer", "verifier"]);
   assert.equal(workflow.humanGate, false);
+  for (const packet of workflow.packets) {
+    assert.equal(packet.lane, "tiny_edit");
+  }
 });
 
 test("medium and high risk workflows include independent review", () => {
@@ -211,6 +252,45 @@ test("medium and high risk workflows include independent review", () => {
 
   assert.equal(workflow.risk, "high");
   assert.deepEqual(workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+});
+
+test("review-gated lanes require independent review and human gates even when risk is low", () => {
+  const workflow = createInitialWorkflow({
+    goal: "Adjust task lane handling",
+    allowedFiles: ["src/policies.js"]
+  });
+
+  assert.equal(workflow.risk, "low");
+  assert.equal(workflow.lane, "policy_or_harness_change");
+  assert.equal(workflow.humanGate, true);
+  assert.deepEqual(workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  for (const packet of workflow.packets) {
+    assert.equal(packet.lane, "policy_or_harness_change");
+    assert.equal(
+      packet.acceptanceChecks.includes("Policy, scope, approval, and evidence semantics stay code-owned and documented truthfully."),
+      true
+    );
+  }
+});
+
+test("user-supplied lane must be valid and cannot downclassify inferred task shape", () => {
+  assert.throws(
+    () => createInitialWorkflow({
+      goal: "Clarify wording",
+      allowedFiles: ["README.md"],
+      lane: "unknown_lane"
+    }),
+    /lane must be one of:/u
+  );
+
+  assert.throws(
+    () => createInitialWorkflow({
+      goal: "Adjust task lane handling",
+      allowedFiles: ["src/policies.js"],
+      lane: "tiny_edit"
+    }),
+    /lane conflicts with inferred task lane: policy_or_harness_change/u
+  );
 });
 
 test("initial workflow uses role-specific packet goals for read-only roles", () => {

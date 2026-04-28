@@ -4,18 +4,23 @@ import assert from "node:assert/strict";
 import {
   deriveCommandObservationsFromCommands,
   derivePlannedActionClassesFromWorkflow,
+  createFixtureRecommendationMetadata,
   inferActionClasses,
   inferActionClassesFromCommands,
+  inferFailureClass,
   inferStopReasonCode,
   inferValidationOutcome,
+  normalizeAcceptanceArtifact,
   normalizeActionClasses,
   normalizeApprovalBinding,
+  normalizeClaimLedger,
   normalizeDeclaredActionClasses,
   normalizeLineageDepth,
   normalizePolicyProfile,
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
   normalizeCommandObservations,
+  normalizeFailureClass,
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelection,
   normalizeProviderModelSelections,
@@ -24,6 +29,7 @@ import {
   normalizeScopeOwnership,
   normalizeSourceArtifactIds,
   normalizeStopReasonCode,
+  normalizeTraceability,
   normalizeValidationArtifacts,
   normalizeValidationOutcome
 } from "../src/run-evidence.js";
@@ -66,6 +72,107 @@ test("run evidence infers stop reason codes from common terminal reasons", () =>
     }),
     "runtime_unavailable"
   );
+});
+
+test("run evidence infers deterministic failure classes for terminal states", () => {
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReasonCode: "approval_required",
+      stopReason: "Human approval is required before executing this workflow."
+    }),
+    "approval_required"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReasonCode: "scope_violation",
+      stopReason: "implementer reported a file outside its allowlist"
+    }),
+    "scope_violation"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReasonCode: "protected_path_violation",
+      stopReason: "Execution program references protected path(s): .env"
+    }),
+    "protected_path_violation"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReasonCode: "runtime_unavailable",
+      stopReason: "process worker failed: launcher timed out"
+    }),
+    "model_or_runtime_unavailable"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReasonCode: "invalid_worker_output",
+      stopReason: "Contract executor returned an invalid result"
+    }),
+    "worker_output_invalid"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "failed",
+      stopReasonCode: "validation_failed",
+      stopReason: "Validation failed: node --test failed"
+    }),
+    "missing_validation"
+  );
+  assert.equal(
+    inferFailureClass({
+      status: "blocked",
+      stopReason: "Contract blocked: deterministic spec drift was detected."
+    }),
+    "summary_overclaim"
+  );
+  assert.equal(inferFailureClass({ status: "success" }), null);
+});
+
+test("run evidence normalizes failure classes and fixture recommendations without creating fixtures", () => {
+  assert.equal(
+    normalizeFailureClass(null, {
+      status: "blocked",
+      stopReasonCode: "approval_required",
+      stopReason: "Approval required."
+    }),
+    "approval_required"
+  );
+  assert.throws(
+    () => normalizeFailureClass("scope_violation", {
+      status: "blocked",
+      stopReasonCode: "approval_required",
+      stopReason: "Approval required."
+    }),
+    /must match inferred failure class approval_required/u
+  );
+  assert.throws(
+    () => normalizeFailureClass("unknown", {
+      status: "success"
+    }),
+    /must be omitted unless status is blocked, failed, or repair_required/u
+  );
+  assert.throws(
+    () => normalizeFailureClass("unknown", {
+      status: "running"
+    }),
+    /must be omitted unless status is blocked, failed, or repair_required/u
+  );
+  assert.deepEqual(
+    createFixtureRecommendationMetadata("worker_output_invalid"),
+    {
+      recommended: true,
+      autoCreate: false,
+      failureClass: "worker_output_invalid",
+      targetDirectory: "test/fixtures",
+      reason: "Capture a deterministic regression fixture for failureClass=worker_output_invalid."
+    }
+  );
+  assert.equal(createFixtureRecommendationMetadata("approval_required"), null);
 });
 
 test("run evidence normalizers fall back to inferred values when fields are omitted", () => {
@@ -1090,5 +1197,204 @@ test("run evidence normalizes provider/model evidence requirements and fails clo
       fieldName: "runJournalEntry.providerModelEvidenceRequirement"
     }),
     /runJournalEntry\.providerModelEvidenceRequirement must be one of: required, unknown/u
+  );
+});
+
+test("run evidence normalizes typed acceptance artifacts, claim ledgers, and traceability", () => {
+  assert.deepEqual(
+    normalizeAcceptanceArtifact({
+      status: "satisfied",
+      items: [
+        {
+          id: "contract-1:acceptance_check:1",
+          type: "acceptance_check",
+          text: "Scoped behavior is verified.",
+          required: true
+        }
+      ]
+    }, {
+      fieldName: "runJournalEntry.acceptanceArtifact"
+    }),
+    {
+      status: "satisfied",
+      items: [
+        {
+          id: "contract-1:acceptance_check:1",
+          type: "acceptance_check",
+          text: "Scoped behavior is verified.",
+          required: true
+        }
+      ]
+    }
+  );
+
+  assert.deepEqual(
+    normalizeClaimLedger([
+      {
+        id: "contract-1:acceptance_check:1",
+        type: "acceptance_check",
+        text: "Scoped behavior is verified.",
+        status: "proven",
+        evidenceRefs: ["run:verifier:commandsRun[0]"]
+      },
+      {
+        id: "contract-1:non_goal:1",
+        type: "non_goal",
+        text: "Do not edit generated files.",
+        status: "unproven",
+        reason: "Changed-path capture is not complete."
+      }
+    ], {
+      fieldName: "runJournalEntry.claimLedger"
+    }),
+    [
+      {
+        id: "contract-1:acceptance_check:1",
+        type: "acceptance_check",
+        text: "Scoped behavior is verified.",
+        status: "proven",
+        required: true,
+        evidenceRefs: ["run:verifier:commandsRun[0]"]
+      },
+      {
+        id: "contract-1:non_goal:1",
+        type: "non_goal",
+        text: "Do not edit generated files.",
+        status: "unproven",
+        required: true,
+        evidenceRefs: [],
+        reason: "Changed-path capture is not complete."
+      }
+    ]
+  );
+
+  assert.deepEqual(
+    normalizeTraceability({
+      requirementChecks: [
+        {
+          id: "contract-1:acceptance_check:1",
+          type: "acceptance_check",
+          text: "Scoped behavior is verified.",
+          claimIds: ["contract-1:acceptance_check:1"],
+          changedFilesKnown: true,
+          changedFiles: ["src\\helpers.js"],
+          validationEvidenceKnown: true,
+          validationEvidenceRefs: ["run:verifier:commandsRun[0]"]
+        }
+      ],
+      nonGoals: [
+        {
+          id: "contract-1:non_goal:1",
+          text: "Do not edit generated files.",
+          preservationStatus: "unproven",
+          claimIds: ["contract-1:non_goal:1"],
+          changedFiles: ["src/helpers.js"],
+          evidenceRefs: [],
+          reason: "Changed-path capture is not complete."
+        }
+      ]
+    }, {
+      fieldName: "runJournalEntry.traceability"
+    }),
+    {
+      requirementChecks: [
+        {
+          id: "contract-1:acceptance_check:1",
+          type: "acceptance_check",
+          text: "Scoped behavior is verified.",
+          claimIds: ["contract-1:acceptance_check:1"],
+          changedFilesKnown: true,
+          changedFiles: ["src/helpers.js"],
+          validationEvidenceKnown: true,
+          validationEvidenceRefs: ["run:verifier:commandsRun[0]"]
+        }
+      ],
+      nonGoals: [
+        {
+          id: "contract-1:non_goal:1",
+          text: "Do not edit generated files.",
+          preservationStatus: "unproven",
+          claimIds: ["contract-1:non_goal:1"],
+          changedFiles: ["src/helpers.js"],
+          evidenceRefs: [],
+          reason: "Changed-path capture is not complete."
+        }
+      ]
+    }
+  );
+});
+
+test("run evidence fails closed on malformed typed claim surfaces and unproven required claims block reviewability", () => {
+  assert.throws(
+    () => normalizeClaimLedger([
+      {
+        id: "contract-1:acceptance_check:1",
+        type: "acceptance_check",
+        text: "Scoped behavior is verified.",
+        status: "proven",
+        evidenceRefs: []
+      }
+    ], {
+      fieldName: "runJournalEntry.claimLedger"
+    }),
+    /runJournalEntry\.claimLedger\[0\] must include evidenceRefs or evidenceSummary when status is proven/u
+  );
+
+  assert.throws(
+    () => normalizeClaimLedger([
+      {
+        id: "contract-1:acceptance_check:1",
+        type: "acceptance_check",
+        text: "Scoped behavior is verified.",
+        status: "unproven"
+      }
+    ], {
+      fieldName: "runJournalEntry.claimLedger"
+    }),
+    /runJournalEntry\.claimLedger\[0\]\.reason is required when status is unproven/u
+  );
+
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelEvidenceRequirement: "required",
+          providerModelSelections: [
+            {
+              role: "implementer",
+              iteration: 0,
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          ],
+          claimLedger: [
+            {
+              id: "contract-1:acceptance_check:1",
+              type: "acceptance_check",
+              text: "Scoped behavior is verified.",
+              status: "unproven",
+              reason: "No verifier evidence was captured."
+            }
+          ]
+        }
+      ]
+    }),
+    {
+      status: "not_reviewable",
+      reasons: ["required_claims_unproven"]
+    }
   );
 });

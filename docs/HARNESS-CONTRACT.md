@@ -17,6 +17,7 @@ This contract defines:
 - kernel invariants
 - correctness, preservation, and durability defaults
 - action classes and default approval policy
+- task lanes as a code-owned complement to risk classification
 - evidence rules for terminal claims
 - approval-role boundaries and companion-update requirements
 - control-plane boundaries, governed procedure boundaries, and current orchestrator and worker responsibilities
@@ -39,9 +40,11 @@ Current code enforces or materially normalizes these parts already, especially:
 - explicit run and build-session statuses
 - persisted run journals and build sessions
 - approval gating for high-risk execution
+- first-class task-lane classification for planned workflows, task packets, and compiled contract plans
 - protected-path rejection in declared workflow scope
 - allowlist and forbidden-scope enforcement for writes
 - pre-execution approval-scope checks against the currently derived plan action-class set
+- pre-execution preflight readiness checks on Pi-extension execution starts for repository-root validity, test-script discovery, dirty-worktree ambiguity, protected planned scope, process-backend/sandbox readiness when exposed, and model availability when exposed
 
 Target-state hardening that is not enforced today is tracked separately in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md). This file should not silently rely on stricter reviewability, validation, or audit behavior than the current implementation provides.
 
@@ -121,20 +124,26 @@ Every boundary crossing must either be:
 
 Current implementation notes:
 
-- `worker_output -> prompt_or_context` also exists in practice: `src/auto-workflow.js` now assembles a typed `contextManifest[]` at the worker execution boundary and forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, and `openQuestions`, plus repair-loop `reviewResult`, into later worker context objects.
-- The current manifest is structural provenance only (`kind`, `source`, `reference`, `reason`) and explains why context entered worker scope; it does not persist full file contents or prior-result payloads in that field.
+- `worker_output -> prompt_or_context` also exists in practice: `src/auto-workflow.js` now assembles a typed `contextManifest[]` at the worker execution boundary and forwards prior worker `summary`, `changedFiles`, `commandsRun`, `evidence`, `openQuestions`, and read-only recon artifacts when present, plus repair-loop `reviewResult`, into later worker context objects.
+- The current manifest is structural provenance only (`kind`, `source`, `reference`, `reason`, plus optional deterministic `metadata` such as payload role, status, recon presence, or changed-path count) and explains why context entered worker scope; it does not persist full file contents or prior-result payloads in that field.
 - packet-level `contextManifest[]` is canonicalized from explicit packet `contextFiles` only (`context_file` entries). Packet input may omit the field (it is materialized), but if provided it must exactly match the canonical `context_file` subset and cannot introduce runtime-derived kinds.
 - runtime context assembly remains code-owned for carry-forward provenance (`prior_result`, `review_result`, and trusted `changed_surface` entries).
 - runtime context admission now fails closed when forwarded payloads and
   `contextManifest[]` drift in either direction across `context_file`,
-  `prior_result`, `review_result`, or trusted `changed_surface` entries.
+  `prior_result`, `review_result`, or trusted `changed_surface` entries,
+  including malformed or drifted present manifest metadata.
 - prior-result carry-forward now has explicit structural budget caps in code;
   when truncation happens, runtime context surfaces typed `contextBudget`
   metadata rather than silently dropping that fact.
 - `contextBudget` is admission-validated as structural truth, not caller
   commentary: truncation flags and counts must agree, and truncated
   `priorResult` packet ids cannot overlap with forwarded `priorResults`.
-- Current process-backed prompts in `src/process-worker-backend.js` do not interpolate that forwarded context into prompt text, but `src/pi-worker-runner.js` still passes the context object through the runner and adapter surface.
+- read-only workers may return a structured `recon_result` advisory artifact
+  in prior-result context. It can carry proposed scope, included and excluded
+  context files with reasons, expected validation commands, open questions,
+  and a `go` or `no_go` recommendation, but it does not authorize writes or
+  widen later packet scope; later packet validation remains authoritative.
+- Current process-backed prompts in `src/process-worker-backend.js` interpolate bounded workflow context when present, and `src/pi-worker-runner.js` passes the context object through the runner and adapter surface.
 - `tool_output -> evidence_record` is currently concrete in `src/process-worker-backend.js`, which copies truncated launcher `stdout`/`stderr` and launcher metadata into `evidence[]`; `src/program-runner.js` then persists worker `evidence[]`, typed `commandObservations[]` when present, normalized `changedSurface`, promoted `providerModelSelections`, and per-contract `providerModelEvidenceRequirement` into `run_journal.contractRuns[]`.
 - first-class `providerModelSelections` persistence is a trusted-metadata path only: process-backend typed worker metadata (`result.providerModelSelection`) is promoted only when backend-owned provenance attests trust (`run.provenance.providerModelSelectionTrusted = true`).
 - first-class `providerModelEvidenceRequirement` persistence is also a trusted-metadata path only: `src/program-contract-executor.js` derives `required` or `unknown` from backend-owned provenance (`run.provenance.providerModelSelectionTrusted`) and does not derive that requirement from prompt text, role labels, or compatibility `evidence[]` strings.
@@ -203,6 +212,10 @@ These invariants may not be bypassed by prompts, worker output, or policy profil
 
 - Policy enforcement lives in code, not in prompt text.
 - High-risk execution requires explicit approval unless a stricter profile denies it entirely.
+- Task lanes complement risk classification and do not replace it. Current closed lane values are `tiny_edit`, `docs_only`, `test_only`, `bounded_bugfix`, `feature_slice`, `refactor`, `migration`, and `policy_or_harness_change`.
+- Lane inference is deterministic and code-owned from the task goal plus scoped files. Missing inferred lanes default conservatively to `feature_slice`.
+- User-supplied lane values must be from the closed enum and must not downclassify the lane inferred from goal and scope. A stricter user-supplied review-gated lane may be accepted; invalid, unknown, or downclassifying lane input fails closed.
+- `refactor`, `migration`, and `policy_or_harness_change` are review-gated lanes. Current workflow planning requires independent review roles and a human gate for those lanes, even when risk remains `low`.
 - Build-scoped approval commands must bind approval to the current stored `programId` plus a concrete `planFingerprint` derived from that stored execution program, and may not authorize action classes outside that bound scope.
 - Current approval gating is narrower than the broader schema action-class vocabulary. Today the live gate is primarily the workflow-level high-risk approval check plus the pre-execution approval-scope comparison against the currently derived action-class set for the stored plan.
 - A profile may tighten approvals, but may not reduce required approvals below the contract floor.
@@ -378,6 +391,7 @@ The orchestrator is responsible for:
 - producing lifecycle artifacts and compiled execution plans
 - assigning roles
 - assigning file scope
+- classifying task lanes as a deterministic complement to risk
 - applying risk classification and human-gate logic
 - deciding whether a run continues, blocks, fails, repairs, or succeeds
 - integrating validated worker results
@@ -405,6 +419,7 @@ Every worker invocation must receive a bounded task envelope that includes:
 - stop conditions
 - optional context files
 - explicit risk level
+- explicit task lane
 
 Workers must obey all of the following:
 
@@ -522,6 +537,8 @@ The harness must deny or block when:
 - the active profile requires a human gate before execution and no explicit approval signal is present
 - with the current live `default`-only registry, the three active-profile disallow bullets above describe compiled-gate behavior but are not yet reachable through supported profile selection
 - the current stored plan requires action classes outside the recorded approval scope before execution begins
+- task-lane input is invalid, unknown, or attempts to downclassify the deterministic inferred lane
+- a review-gated task lane is planned without the required human gate or independent reviewer role
 - evidence required for a claimed reviewable terminal state is missing
 
 ## Policy Profile Validity

@@ -25,6 +25,7 @@ Current implemented scope includes:
 - a Pi-backed worker adapter and runner boundary with local/scripted runners for tests
 - a role-aware process worker backend for bounded out-of-process execution (`explorer`, `implementer`, `reviewer`, `verifier`)
 - an opt-in `/auto` backend selector with `pi_runtime` (default), `low_risk_process_implementer`, and `process_subagents` modes
+- deterministic preflight readiness checks for Pi-extension execution starts, including blocked protected planned scope and warning/unknown reporting for uncertain runtime conditions
 - a thin Pi extension entrypoint with program-run and resume surfaces
 - local persisted run journals for execution programs
 - explicit process-model probing and role-specific provider/model selection

@@ -1,12 +1,16 @@
 import { RISK_LEVELS, ROLE_TYPES, validateTaskPacket } from "./contracts.js";
+import { validateTaskLane } from "./policies.js";
 import {
   validateEvaluationCoverage,
   validateEvaluationCriteria
 } from "./doctrine-evaluation.js";
 import {
+  normalizeAcceptanceArtifact,
   normalizeApprovalBinding,
   normalizeChangedSurface,
+  normalizeClaimLedger,
   normalizeCommandObservations,
+  normalizeFailureClass,
   normalizeProviderModelEvidenceRequirement,
   normalizeProviderModelSelections,
   normalizePolicyDecision,
@@ -14,6 +18,7 @@ import {
   normalizeReviewability,
   normalizeScopeOwnership,
   normalizeStopReasonCode,
+  normalizeTraceability,
   normalizeValidationOutcome
 } from "./run-evidence.js";
 import { normalizeRedactionMetadata } from "./redaction.js";
@@ -189,6 +194,11 @@ export function validateExecutionProgram(program) {
     assertStringArray("program.contracts[].nonGoals", contract.nonGoals);
     assertStringArray("program.contracts[].successCriteria", contract.successCriteria);
     assert(RISK_LEVELS.includes(contract.risk), `program.contracts[].risk must be one of: ${RISK_LEVELS.join(", ")}`);
+    if (Object.prototype.hasOwnProperty.call(contract, "lane")) {
+      contract.lane = validateTaskLane(contract.lane, {
+        fieldName: "program.contracts[].lane"
+      });
+    }
     assertStringArray("program.contracts[].acceptanceChecks", contract.acceptanceChecks);
     assertStringArray("program.contracts[].verificationPlan", contract.verificationPlan);
     assertStringArray("program.contracts[].stopConditions", contract.stopConditions);
@@ -245,6 +255,51 @@ export function validateContractExecutionResult(result) {
   assertString("contractExecutionResult.summary", result.summary);
   assertStringArray("contractExecutionResult.evidence", result.evidence);
   assertStringArray("contractExecutionResult.openQuestions", result.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(result, "acceptanceArtifact")) {
+    try {
+      const normalizedAcceptanceArtifact = normalizeAcceptanceArtifact(result.acceptanceArtifact, {
+        fieldName: "contractExecutionResult.acceptanceArtifact",
+        allowMissing: false
+      });
+      if (normalizedAcceptanceArtifact === null) {
+        delete result.acceptanceArtifact;
+      } else {
+        result.acceptanceArtifact = normalizedAcceptanceArtifact;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "claimLedger")) {
+    try {
+      const normalizedClaimLedger = normalizeClaimLedger(result.claimLedger, {
+        fieldName: "contractExecutionResult.claimLedger",
+        allowMissing: false
+      });
+      if (normalizedClaimLedger === null) {
+        delete result.claimLedger;
+      } else {
+        result.claimLedger = normalizedClaimLedger;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(result, "traceability")) {
+    try {
+      const normalizedTraceability = normalizeTraceability(result.traceability, {
+        fieldName: "contractExecutionResult.traceability",
+        allowMissing: false
+      });
+      if (normalizedTraceability === null) {
+        delete result.traceability;
+      } else {
+        result.traceability = normalizedTraceability;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(result, "reviewFindings")) {
     try {
       const normalizedReviewFindings = normalizeReviewFindings(result.reviewFindings, {
@@ -360,6 +415,51 @@ export function validateRunJournalEntry(entry) {
   assertString("runJournalEntry.summary", entry.summary);
   assertStringArray("runJournalEntry.evidence", entry.evidence);
   assertStringArray("runJournalEntry.openQuestions", entry.openQuestions);
+  if (Object.prototype.hasOwnProperty.call(entry, "acceptanceArtifact")) {
+    try {
+      const normalizedAcceptanceArtifact = normalizeAcceptanceArtifact(entry.acceptanceArtifact, {
+        fieldName: "runJournalEntry.acceptanceArtifact",
+        allowMissing: false
+      });
+      if (normalizedAcceptanceArtifact === null) {
+        delete entry.acceptanceArtifact;
+      } else {
+        entry.acceptanceArtifact = normalizedAcceptanceArtifact;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "claimLedger")) {
+    try {
+      const normalizedClaimLedger = normalizeClaimLedger(entry.claimLedger, {
+        fieldName: "runJournalEntry.claimLedger",
+        allowMissing: false
+      });
+      if (normalizedClaimLedger === null) {
+        delete entry.claimLedger;
+      } else {
+        entry.claimLedger = normalizedClaimLedger;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(entry, "traceability")) {
+    try {
+      const normalizedTraceability = normalizeTraceability(entry.traceability, {
+        fieldName: "runJournalEntry.traceability",
+        allowMissing: false
+      });
+      if (normalizedTraceability === null) {
+        delete entry.traceability;
+      } else {
+        entry.traceability = normalizedTraceability;
+      }
+    } catch (error) {
+      throw new Error(`${error.message}`);
+    }
+  }
   if (Object.prototype.hasOwnProperty.call(entry, "reviewFindings")) {
     try {
       const normalizedReviewFindings = normalizeReviewFindings(entry.reviewFindings, {
@@ -467,6 +567,20 @@ export function validateRunJournalEntry(entry) {
   } catch (error) {
     throw new Error(`runJournalEntry.validationOutcome ${error.message}`);
   }
+  try {
+    const normalizedFailureClass = normalizeFailureClass(entry.failureClass, {
+      status: entry.status,
+      stopReason: entry.summary,
+      contractRuns: [entry]
+    });
+    if (normalizedFailureClass === null) {
+      delete entry.failureClass;
+    } else {
+      entry.failureClass = normalizedFailureClass;
+    }
+  } catch (error) {
+    throw new Error(`runJournalEntry.failureClass ${error.message}`);
+  }
   return entry;
 }
 
@@ -522,6 +636,16 @@ export function validateRunJournal(journal) {
   } catch (error) {
     throw new Error(`runJournal.reviewability ${error.message}`);
   }
+  try {
+    journal.failureClass = normalizeFailureClass(journal.failureClass, {
+      status: journal.status,
+      stopReason: journal.stopReason,
+      stopReasonCode: journal.stopReasonCode,
+      contractRuns: journal.contractRuns
+    });
+  } catch (error) {
+    throw new Error(`runJournal.failureClass ${error.message}`);
+  }
   return journal;
 }
 
@@ -543,6 +667,9 @@ export function validateCompiledContractExecutionPlan(plan) {
     RISK_LEVELS.includes(plan.risk),
     `compiledContractExecutionPlan.risk must be one of: ${RISK_LEVELS.join(", ")}`
   );
+  plan.lane = validateTaskLane(plan.lane, {
+    fieldName: "compiledContractExecutionPlan.lane"
+  });
   assertStringArray("compiledContractExecutionPlan.constraints", plan.constraints);
   assertStringArray("compiledContractExecutionPlan.nonGoals", plan.nonGoals);
   assertStringArray("compiledContractExecutionPlan.acceptanceChecks", plan.acceptanceChecks);
@@ -557,6 +684,13 @@ export function validateCompiledContractExecutionPlan(plan) {
     RISK_LEVELS.includes(workflow.risk),
     `compiledContractExecutionPlan.workflow.risk must be one of: ${RISK_LEVELS.join(", ")}`
   );
+  workflow.lane = validateTaskLane(workflow.lane, {
+    fieldName: "compiledContractExecutionPlan.workflow.lane"
+  });
+  assert(
+    workflow.lane === plan.lane,
+    "compiledContractExecutionPlan.workflow.lane must match compiledContractExecutionPlan.lane"
+  );
   assert(typeof workflow.humanGate === "boolean", "compiledContractExecutionPlan.workflow.humanGate must be a boolean");
   assertStringArray("compiledContractExecutionPlan.workflow.roleSequence", workflow.roleSequence);
   for (const role of workflow.roleSequence) {
@@ -568,6 +702,10 @@ export function validateCompiledContractExecutionPlan(plan) {
   assertArrayOfObjects("compiledContractExecutionPlan.workflow.packets", workflow.packets);
   for (const packet of workflow.packets) {
     validateTaskPacket(packet);
+    assert(
+      packet.lane === plan.lane,
+      "compiledContractExecutionPlan.workflow.packets[].lane must match compiledContractExecutionPlan.lane"
+    );
   }
 
   return plan;

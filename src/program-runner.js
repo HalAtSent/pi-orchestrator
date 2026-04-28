@@ -11,6 +11,8 @@ import { findProtectedPaths } from "./policies.js";
 import {
   normalizeDeclaredActionClasses,
   normalizeApprovalBinding,
+  createFixtureRecommendationMetadata,
+  normalizeFailureClass,
   normalizePolicyProfile,
   normalizeReviewability,
   normalizeStopReasonCode,
@@ -21,6 +23,10 @@ import {
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
 } from "./redaction.js";
+import {
+  collectTypedClaimSurfaceRedactionFields,
+  redactTypedClaimSurfaces
+} from "./typed-claim-redaction.js";
 
 const TERMINAL_STOP_STATUSES = new Set(["blocked", "failed", "repair_required"]);
 // Only journals that still represent in-progress work are resumable.
@@ -99,11 +105,19 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
       message: redactedReviewFindingMessages.values[index]
     }))
     : contractRunEntry.reviewFindings;
+  const typedClaimSurfaces = redactTypedClaimSurfaces(contractRunEntry, {
+    redactor,
+    fieldName: "contractRunEntry"
+  });
+  const typedClaimSurfaceFields = collectTypedClaimSurfaceRedactionFields(contractRunEntry, {
+    fieldName: "contractRunEntry"
+  });
   const boundaryRedaction = mergeRedactionMetadata(
     summary.redaction,
     evidence.redaction,
     openQuestions.redaction,
-    redactedReviewFindingMessages.redaction
+    redactedReviewFindingMessages.redaction,
+    typedClaimSurfaces.redaction
   );
   if (Object.prototype.hasOwnProperty.call(contractRunEntry, "redaction")) {
     assertRedactionMetadataMatchesCoveredStrings(contractRunEntry.redaction, {
@@ -113,7 +127,8 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
         {
           fieldName: "contractRunEntry.summary",
           value: contractRunEntry.summary
-        }
+        },
+        ...typedClaimSurfaceFields.stringFields
       ],
       stringArrayFields: [
         {
@@ -127,13 +142,15 @@ function redactContractRunEntryForPersistence(contractRunEntry, { redactor }) {
         {
           fieldName: "contractRunEntry.reviewFindings[].message",
           value: reviewFindingMessages
-        }
+        },
+        ...typedClaimSurfaceFields.stringArrayFields
       ]
     });
   }
 
   return {
     ...contractRunEntry,
+    ...typedClaimSurfaces.fields,
     summary: summary.value,
     evidence: evidence.values,
     openQuestions: openQuestions.values,
@@ -317,14 +334,23 @@ function createRunJournalSnapshot({
   completedContractIds,
   approvalBinding = null
 }) {
+  const stopReasonCode = normalizeStopReasonCode(null, {
+    status,
+    stopReason
+  });
+  const failureClass = normalizeFailureClass(null, {
+    status,
+    stopReason,
+    stopReasonCode,
+    contractRuns
+  });
+  const fixtureRecommendation = createFixtureRecommendationMetadata(failureClass);
   const journal = {
     programId: program.id,
     status,
     stopReason,
-    stopReasonCode: normalizeStopReasonCode(null, {
-      status,
-      stopReason
-    }),
+    stopReasonCode,
+    failureClass,
     validationOutcome: normalizeValidationOutcome(null, {
       status
     }),
@@ -334,6 +360,9 @@ function createRunJournalSnapshot({
   };
   if (approvalBinding !== null) {
     journal.approvalBinding = approvalBinding;
+  }
+  if (fixtureRecommendation !== null) {
+    journal.fixtureRecommendation = fixtureRecommendation;
   }
   return createRunJournal(journal);
 }
@@ -357,14 +386,23 @@ function stopProgram({
 }
 
 function createBlockedRunJournal(programId, stopReason, { approvalBinding = null } = {}) {
+  const stopReasonCode = normalizeStopReasonCode(null, {
+    status: "blocked",
+    stopReason
+  });
+  const failureClass = normalizeFailureClass(null, {
+    status: "blocked",
+    stopReason,
+    stopReasonCode,
+    contractRuns: []
+  });
+  const fixtureRecommendation = createFixtureRecommendationMetadata(failureClass);
   const journal = {
     programId,
     status: "blocked",
     stopReason,
-    stopReasonCode: normalizeStopReasonCode(null, {
-      status: "blocked",
-      stopReason
-    }),
+    stopReasonCode,
+    failureClass,
     validationOutcome: normalizeValidationOutcome(null, {
       status: "blocked"
     }),
@@ -374,6 +412,9 @@ function createBlockedRunJournal(programId, stopReason, { approvalBinding = null
   };
   if (approvalBinding !== null) {
     journal.approvalBinding = approvalBinding;
+  }
+  if (fixtureRecommendation !== null) {
+    journal.fixtureRecommendation = fixtureRecommendation;
   }
   return createRunJournal(journal);
 }
@@ -844,11 +885,20 @@ async function runProgramFromState(program, {
     }
 
     pendingContractIdSet.delete(contract.id);
-    const contractRunEntry = redactContractRunEntryForPersistence({
+    const contractRunEntryInput = {
       contractId: contract.id,
       status: result.status,
       summary: result.summary,
       evidence: result.evidence,
+      ...(Object.prototype.hasOwnProperty.call(result, "acceptanceArtifact")
+        ? { acceptanceArtifact: result.acceptanceArtifact }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(result, "claimLedger")
+        ? { claimLedger: result.claimLedger }
+        : {}),
+      ...(Object.prototype.hasOwnProperty.call(result, "traceability")
+        ? { traceability: result.traceability }
+        : {}),
       ...(Object.prototype.hasOwnProperty.call(result, "policyDecision")
         ? { policyDecision: result.policyDecision }
         : {}),
@@ -867,7 +917,17 @@ async function runProgramFromState(program, {
       validationOutcome: normalizeValidationOutcome(null, {
         status: result.status
       })
-    }, {
+    };
+    const contractFailureClass = normalizeFailureClass(null, {
+      status: result.status,
+      stopReason: result.summary,
+      contractRuns: [contractRunEntryInput]
+    });
+    if (contractFailureClass !== null) {
+      contractRunEntryInput.failureClass = contractFailureClass;
+    }
+
+    const contractRunEntry = redactContractRunEntryForPersistence(contractRunEntryInput, {
       redactor: persistenceBoundaryRedactor
     });
     if (Array.isArray(result.providerModelSelections) && result.providerModelSelections.length > 0) {
@@ -1110,6 +1170,12 @@ export function formatProgramRunJournal(journal) {
     validationArtifacts: journal.validationArtifacts,
     contractRuns: journal.contractRuns
   });
+  const journalFailureClass = normalizeFailureClass(journal.failureClass, {
+    status: journal.status,
+    stopReason: journal.stopReason,
+    stopReasonCode: journalStopReasonCode,
+    contractRuns: journal.contractRuns
+  });
   const journalApprovalBinding = normalizeApprovalBinding(journal.approvalBinding, {
     fieldName: "journal.approvalBinding",
     allowMissing: true
@@ -1119,6 +1185,7 @@ export function formatProgramRunJournal(journal) {
     `status: ${journal.status}`,
     `stop_reason: ${journal.stopReason ?? "none"}`,
     `stop_reason_code: ${journalStopReasonCode ?? "none"}`,
+    `failure_class: ${journalFailureClass ?? "none"}`,
     `validation_outcome: ${journalValidationOutcome}`,
     `reviewability_status: ${journalReviewability.status}`,
     `reviewability_reasons: ${journalReviewability.reasons.length > 0 ? journalReviewability.reasons.join(", ") : "none"}`,
@@ -1142,7 +1209,15 @@ export function formatProgramRunJournal(journal) {
       const entryValidationOutcome = entry.validationOutcome ?? normalizeValidationOutcome(null, {
         status: entry.status
       });
+      const entryFailureClass = normalizeFailureClass(entry.failureClass, {
+        status: entry.status,
+        stopReason: entry.summary,
+        contractRuns: [entry]
+      });
       lines.push(`- ${entry.contractId} (${entry.status}): ${entry.summary}`);
+      if (entryFailureClass !== null) {
+        lines.push(`  failure_class: ${entryFailureClass}`);
+      }
       lines.push(`  validation_outcome: ${entryValidationOutcome}`);
       if (entry.policyDecision) {
         lines.push(`  policy_decision_profile: ${entry.policyDecision.profileId}`);
@@ -1190,6 +1265,15 @@ export function formatProgramRunJournal(journal) {
         lines.push("  evidence:");
         for (const evidence of entry.evidence) {
           lines.push(`  - ${evidence}`);
+        }
+      }
+      if (Array.isArray(entry.claimLedger) && entry.claimLedger.length > 0) {
+        lines.push("  claim_ledger:");
+        for (const claim of entry.claimLedger) {
+          const reason = typeof claim.reason === "string" && claim.reason.length > 0
+            ? `; reason: ${claim.reason}`
+            : "";
+          lines.push(`  - ${claim.id} [${claim.type}/${claim.status}]: ${claim.text}${reason}`);
         }
       }
       if (entry.openQuestions.length > 0) {

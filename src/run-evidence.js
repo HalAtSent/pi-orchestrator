@@ -29,7 +29,8 @@ export const REVIEWABILITY_REASONS = Object.freeze([
   "missing_stop_reason",
   "missing_stop_reason_code",
   "provider_model_evidence_missing",
-  "provider_model_evidence_requirement_unknown"
+  "provider_model_evidence_requirement_unknown",
+  "required_claims_unproven"
 ]);
 
 export const STOP_REASON_CODES = Object.freeze([
@@ -46,6 +47,19 @@ export const STOP_REASON_CODES = Object.freeze([
   "dependency_cycle",
   "missing_dependency",
   "terminal_resume_rejected",
+  "unknown"
+]);
+
+export const FAILURE_CLASSES = Object.freeze([
+  "bad_context",
+  "missing_validation",
+  "scope_violation",
+  "protected_path_violation",
+  "approval_required",
+  "model_or_runtime_unavailable",
+  "unsafe_command",
+  "worker_output_invalid",
+  "summary_overclaim",
   "unknown"
 ]);
 
@@ -131,6 +145,36 @@ export const APPROVAL_BINDING_SOURCES = Object.freeze([
   "build_session",
   "unknown"
 ]);
+export const ACCEPTANCE_ITEM_TYPES = Object.freeze([
+  "success_criterion",
+  "acceptance_check",
+  "verification",
+  "non_goal"
+]);
+export const ACCEPTANCE_ARTIFACT_STATUSES = Object.freeze([
+  "satisfied",
+  "partial",
+  "unsatisfied",
+  "not_applicable"
+]);
+export const CLAIM_LEDGER_TYPES = Object.freeze([
+  "terminal_state",
+  "success_criterion",
+  "acceptance_check",
+  "verification",
+  "non_goal"
+]);
+export const CLAIM_LEDGER_STATUSES = Object.freeze([
+  "proven",
+  "partial",
+  "unproven",
+  "not_applicable"
+]);
+export const TRACEABILITY_NON_GOAL_STATUSES = Object.freeze([
+  "preserved",
+  "unproven",
+  "not_applicable"
+]);
 
 const ROLE_TO_ACTION_CLASSES = Object.freeze({
   explorer: ["read_repo"],
@@ -150,18 +194,34 @@ const TERMINAL_REVIEWABILITY_STATUSES = new Set([
   "failed",
   "repair_required"
 ]);
+const TERMINAL_FAILURE_STATUSES = new Set([
+  "blocked",
+  "failed",
+  "repair_required"
+]);
 const REVIEWABILITY_BLOCKING_REASONS = new Set([
   "non_terminal_status",
   "validation_artifacts_not_captured",
   "missing_stop_reason",
   "missing_stop_reason_code",
-  "provider_model_evidence_missing"
+  "provider_model_evidence_missing",
+  "required_claims_unproven"
 ]);
 const PROVIDER_MODEL_EVIDENCE_KEYS = new Set([
   "requested_provider",
   "requested_model",
   "selected_provider",
   "selected_model"
+]);
+const HIGH_VALUE_FAILURE_FIXTURE_CLASSES = new Set([
+  "bad_context",
+  "missing_validation",
+  "scope_violation",
+  "protected_path_violation",
+  "model_or_runtime_unavailable",
+  "unsafe_command",
+  "worker_output_invalid",
+  "summary_overclaim"
 ]);
 
 function normalizeString(value) {
@@ -1294,6 +1354,257 @@ export function normalizeStopReasonCode(value, { status, stopReason } = {}) {
   return normalizedValue;
 }
 
+function collectFailureClassText({ stopReason = null, contractRuns = [] } = {}) {
+  const parts = [stopReason];
+
+  if (Array.isArray(contractRuns)) {
+    for (const contractRun of contractRuns) {
+      if (!isPlainObject(contractRun)) {
+        continue;
+      }
+
+      parts.push(contractRun.summary);
+      if (Array.isArray(contractRun.evidence)) {
+        parts.push(...contractRun.evidence);
+      }
+      if (Array.isArray(contractRun.openQuestions)) {
+        parts.push(...contractRun.openQuestions);
+      }
+      if (Array.isArray(contractRun.reviewFindings)) {
+        parts.push(...contractRun.reviewFindings.map((finding) => finding?.message));
+      }
+      if (isPlainObject(contractRun.policyDecision)) {
+        parts.push(contractRun.policyDecision.status, contractRun.policyDecision.reason);
+      }
+      if (isPlainObject(contractRun.scopeOwnership)) {
+        parts.push(contractRun.scopeOwnership.status);
+      }
+    }
+  }
+
+  return parts
+    .map((part) => normalizeString(part).toLowerCase())
+    .filter((part) => part.length > 0)
+    .join(" ");
+}
+
+function failureTextIncludes(text, patterns) {
+  return patterns.some((pattern) => (
+    typeof pattern === "string" ? text.includes(pattern) : pattern.test(text)
+  ));
+}
+
+function hasContractRunPolicyStatus(contractRuns, status) {
+  return Array.isArray(contractRuns) && contractRuns.some((contractRun) => (
+    isPlainObject(contractRun?.policyDecision)
+    && normalizeString(contractRun.policyDecision.status) === status
+  ));
+}
+
+function hasContractRunScopeViolation(contractRuns) {
+  return Array.isArray(contractRuns) && contractRuns.some((contractRun) => (
+    isPlainObject(contractRun?.scopeOwnership)
+    && normalizeString(contractRun.scopeOwnership.status) === "scope_violation"
+  ));
+}
+
+export function inferFailureClass({
+  status,
+  stopReason = null,
+  stopReasonCode = null,
+  contractRuns = []
+} = {}) {
+  const normalizedStatus = normalizeString(status);
+  if (!TERMINAL_FAILURE_STATUSES.has(normalizedStatus)) {
+    return null;
+  }
+
+  const normalizedStopReasonCode = normalizeString(stopReasonCode);
+  if (normalizedStopReasonCode === "protected_path_violation") {
+    return "protected_path_violation";
+  }
+  if (normalizedStopReasonCode === "scope_violation" || hasContractRunScopeViolation(contractRuns)) {
+    return "scope_violation";
+  }
+  if (normalizedStopReasonCode === "approval_required" || hasContractRunPolicyStatus(contractRuns, "approval_required")) {
+    return "approval_required";
+  }
+  if (normalizedStopReasonCode === "invalid_worker_output") {
+    return "worker_output_invalid";
+  }
+  if (normalizedStopReasonCode === "runtime_unavailable") {
+    return "model_or_runtime_unavailable";
+  }
+  if (normalizedStopReasonCode === "invalid_input" || normalizedStopReasonCode === "invalid_artifact") {
+    return "bad_context";
+  }
+
+  const text = collectFailureClassText({
+    stopReason,
+    contractRuns
+  });
+
+  if (failureTextIncludes(text, [
+    "protected path",
+    "write_protected"
+  ])) {
+    return "protected_path_violation";
+  }
+  if (failureTextIncludes(text, [
+    "scope_violation",
+    "outside its allowlist",
+    "outside the allowlist",
+    "outside current scope",
+    "forbidden file",
+    "forbidden scope",
+    "write scope already claimed",
+    "allowlist"
+  ])) {
+    return "scope_violation";
+  }
+  if (failureTextIncludes(text, [
+    "approval required",
+    "human approval",
+    "requires approval",
+    "profile_requires_human_gate"
+  ])) {
+    return "approval_required";
+  }
+  if (failureTextIncludes(text, [
+    "unsafe command",
+    "disallowed command",
+    "blocked command",
+    "command not permitted",
+    "profile_disallows_action_class"
+  ])) {
+    return "unsafe_command";
+  }
+  if (failureTextIncludes(text, [
+    "runtime context assembly invalid",
+    "context_admission",
+    "contextmanifest",
+    "bad context",
+    "persisted run state is invalid",
+    "persisted run state is inconsistent",
+    "persisted execution program does not match",
+    "programid does not match"
+  ])) {
+    return "bad_context";
+  }
+  if (failureTextIncludes(text, [
+    "model unavailable",
+    "model is unavailable",
+    "runtime unavailable",
+    "runtime_unavailable",
+    "runworker",
+    "launcher",
+    "spawn command resolution",
+    "no preferred model",
+    "no fallback model",
+    "provider/model"
+  ])) {
+    return "model_or_runtime_unavailable";
+  }
+  if (failureTextIncludes(text, [
+    "invalid worker output",
+    "invalid result",
+    "invalid structured",
+    "malformed_result",
+    "malformed"
+  ])) {
+    return "worker_output_invalid";
+  }
+  if (failureTextIncludes(text, [
+    "missing_validation",
+    "missing verification",
+    "missing_verification_commands",
+    "required verificationplan command",
+    "validation artifacts not captured",
+    "not_captured",
+    "validation failed",
+    "acceptance checks",
+    "test failed",
+    "tests fail",
+    "lint failed",
+    "build failed"
+  ])) {
+    return "missing_validation";
+  }
+  if (failureTextIncludes(text, [
+    "summary overclaim",
+    "overclaim",
+    "claiming success",
+    "spec drift",
+    "drift_detected",
+    "drift was detected",
+    "required claims unproven",
+    "unproven claim"
+  ])) {
+    return "summary_overclaim";
+  }
+
+  if (normalizedStopReasonCode === "validation_failed") {
+    return "missing_validation";
+  }
+  if (normalizedStopReasonCode === "policy_denied") {
+    return failureTextIncludes(text, ["command", "action_class", "install_dependency", "mutate_git_state"])
+      ? "unsafe_command"
+      : "unknown";
+  }
+  if (normalizedStopReasonCode === "execution_error") {
+    return failureTextIncludes(text, ["model", "runtime", "runworker", "launcher", "spawn", "timed out"])
+      ? "model_or_runtime_unavailable"
+      : "unknown";
+  }
+
+  return "unknown";
+}
+
+export function normalizeFailureClass(value, {
+  status,
+  stopReason = null,
+  stopReasonCode = null,
+  contractRuns = []
+} = {}) {
+  const inferred = inferFailureClass({
+    status,
+    stopReason,
+    stopReasonCode,
+    contractRuns
+  });
+  const normalizedValue = normalizeString(value);
+  if (normalizedValue.length === 0) {
+    return inferred;
+  }
+
+  if (!FAILURE_CLASSES.includes(normalizedValue)) {
+    throw new Error(`must be one of: ${FAILURE_CLASSES.join(", ")}`);
+  }
+  if (inferred === null) {
+    throw new Error("must be omitted unless status is blocked, failed, or repair_required");
+  }
+  if (inferred !== null && normalizedValue !== inferred) {
+    throw new Error(`must match inferred failure class ${inferred}`);
+  }
+
+  return normalizedValue;
+}
+
+export function createFixtureRecommendationMetadata(failureClass) {
+  const normalizedFailureClass = normalizeString(failureClass);
+  if (!HIGH_VALUE_FAILURE_FIXTURE_CLASSES.has(normalizedFailureClass)) {
+    return null;
+  }
+
+  return {
+    recommended: true,
+    autoCreate: false,
+    failureClass: normalizedFailureClass,
+    targetDirectory: "test/fixtures",
+    reason: `Capture a deterministic regression fixture for failureClass=${normalizedFailureClass}.`
+  };
+}
+
 export function inferActionClasses({ contractRuns = [], stopReasonCode = null } = {}) {
   const inferred = new Set();
 
@@ -1533,6 +1844,345 @@ export function normalizeValidationArtifacts(value, { validationOutcome = null }
   return normalized;
 }
 
+function normalizeClosedString(value, {
+  fieldName,
+  allowedValues
+} = {}) {
+  const normalized = normalizeString(value);
+  if (normalized.length === 0) {
+    throw new Error(`${fieldName} must be a non-empty string`);
+  }
+  if (!allowedValues.includes(normalized)) {
+    throw new Error(`${fieldName} must be one of: ${allowedValues.join(", ")}`);
+  }
+  return normalized;
+}
+
+function normalizeStringList(value, { fieldName, allowMissing = false } = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return [];
+    }
+    throw new Error(`${fieldName} must be an array`);
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  return unique(value.map((entry, index) => {
+    const normalized = normalizeString(entry);
+    if (normalized.length === 0) {
+      throw new Error(`${fieldName}[${index}] must be a non-empty string`);
+    }
+    return normalized;
+  }));
+}
+
+function normalizeRequiredBoolean(value, { fallback = true, fieldName } = {}) {
+  if (value === undefined || value === null) {
+    return fallback;
+  }
+  if (typeof value !== "boolean") {
+    throw new Error(`${fieldName} must be a boolean`);
+  }
+  return value;
+}
+
+function normalizeAcceptanceItem(value, { fieldName = "acceptanceArtifact.items[]" } = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  return {
+    id: normalizeStringList([value.id], {
+      fieldName: `${fieldName}.id`
+    })[0],
+    type: normalizeClosedString(value.type, {
+      fieldName: `${fieldName}.type`,
+      allowedValues: ACCEPTANCE_ITEM_TYPES
+    }),
+    text: normalizeStringList([value.text], {
+      fieldName: `${fieldName}.text`
+    })[0],
+    required: normalizeRequiredBoolean(value.required, {
+      fieldName: `${fieldName}.required`,
+      fallback: true
+    })
+  };
+}
+
+export function normalizeAcceptanceArtifact(value, {
+  fieldName = "acceptanceArtifact",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an object`);
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const status = normalizeClosedString(value.status, {
+    fieldName: `${fieldName}.status`,
+    allowedValues: ACCEPTANCE_ARTIFACT_STATUSES
+  });
+  const rawItems = value.items ?? [];
+  if (!Array.isArray(rawItems)) {
+    throw new Error(`${fieldName}.items must be an array`);
+  }
+
+  return {
+    status,
+    items: rawItems.map((item, index) => normalizeAcceptanceItem(item, {
+      fieldName: `${fieldName}.items[${index}]`
+    }))
+  };
+}
+
+function normalizeClaimLedgerEntry(value, { fieldName = "claimLedger[]" } = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const id = normalizeStringList([value.id], {
+    fieldName: `${fieldName}.id`
+  })[0];
+  const type = normalizeClosedString(value.type, {
+    fieldName: `${fieldName}.type`,
+    allowedValues: CLAIM_LEDGER_TYPES
+  });
+  const text = normalizeStringList([value.text], {
+    fieldName: `${fieldName}.text`
+  })[0];
+  const status = normalizeClosedString(value.status, {
+    fieldName: `${fieldName}.status`,
+    allowedValues: CLAIM_LEDGER_STATUSES
+  });
+  const evidenceRefs = normalizeStringList(value.evidenceRefs ?? [], {
+    fieldName: `${fieldName}.evidenceRefs`,
+    allowMissing: true
+  });
+  const evidenceSummary = value.evidenceSummary === undefined || value.evidenceSummary === null
+    ? null
+    : normalizeString(value.evidenceSummary);
+  if (value.evidenceSummary !== undefined && value.evidenceSummary !== null && evidenceSummary.length === 0) {
+    throw new Error(`${fieldName}.evidenceSummary must be a non-empty string when provided`);
+  }
+  const required = normalizeRequiredBoolean(value.required, {
+    fieldName: `${fieldName}.required`,
+    fallback: true
+  });
+  const reason = value.reason === undefined || value.reason === null
+    ? null
+    : normalizeString(value.reason);
+  if (value.reason !== undefined && value.reason !== null && reason.length === 0) {
+    throw new Error(`${fieldName}.reason must be a non-empty string when provided`);
+  }
+
+  if ((status === "proven" || status === "partial") && evidenceRefs.length === 0 && !evidenceSummary) {
+    throw new Error(`${fieldName} must include evidenceRefs or evidenceSummary when status is ${status}`);
+  }
+  if (status !== "proven" && !reason) {
+    throw new Error(`${fieldName}.reason is required when status is ${status}`);
+  }
+
+  return {
+    id,
+    type,
+    text,
+    status,
+    required,
+    evidenceRefs,
+    ...(evidenceSummary ? { evidenceSummary } : {}),
+    ...(reason ? { reason } : {})
+  };
+}
+
+export function normalizeClaimLedger(value, {
+  fieldName = "claimLedger",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an array`);
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${fieldName} must be an array`);
+  }
+
+  return value.map((entry, index) => normalizeClaimLedgerEntry(entry, {
+    fieldName: `${fieldName}[${index}]`
+  }));
+}
+
+function normalizeTraceabilityRequirementCheck(value, {
+  fieldName = "traceability.requirementChecks[]"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const changedFilesKnown = normalizeRequiredBoolean(value.changedFilesKnown, {
+    fieldName: `${fieldName}.changedFilesKnown`,
+    fallback: false
+  });
+  const changedFiles = normalizeStringList(value.changedFiles ?? [], {
+    fieldName: `${fieldName}.changedFiles`,
+    allowMissing: true
+  }).map((pathValue, index) => normalizeRepoRelativePath(pathValue, {
+    fieldName: `${fieldName}.changedFiles[${index}]`
+  }));
+  if (!changedFilesKnown && changedFiles.length > 0) {
+    throw new Error(`${fieldName}.changedFiles must be empty when ${fieldName}.changedFilesKnown is false`);
+  }
+
+  const validationEvidenceKnown = normalizeRequiredBoolean(value.validationEvidenceKnown, {
+    fieldName: `${fieldName}.validationEvidenceKnown`,
+    fallback: false
+  });
+  const validationEvidenceRefs = normalizeStringList(value.validationEvidenceRefs ?? [], {
+    fieldName: `${fieldName}.validationEvidenceRefs`,
+    allowMissing: true
+  });
+  if (!validationEvidenceKnown && validationEvidenceRefs.length > 0) {
+    throw new Error(
+      `${fieldName}.validationEvidenceRefs must be empty when ${fieldName}.validationEvidenceKnown is false`
+    );
+  }
+  if (validationEvidenceKnown && validationEvidenceRefs.length === 0) {
+    throw new Error(
+      `${fieldName}.validationEvidenceRefs must include at least one entry when ${fieldName}.validationEvidenceKnown is true`
+    );
+  }
+
+  return {
+    id: normalizeStringList([value.id], {
+      fieldName: `${fieldName}.id`
+    })[0],
+    type: normalizeClosedString(value.type, {
+      fieldName: `${fieldName}.type`,
+      allowedValues: ACCEPTANCE_ITEM_TYPES.filter((type) => type !== "non_goal")
+    }),
+    text: normalizeStringList([value.text], {
+      fieldName: `${fieldName}.text`
+    })[0],
+    claimIds: normalizeStringList(value.claimIds ?? [], {
+      fieldName: `${fieldName}.claimIds`,
+      allowMissing: true
+    }),
+    changedFilesKnown,
+    changedFiles,
+    validationEvidenceKnown,
+    validationEvidenceRefs
+  };
+}
+
+function normalizeTraceabilityNonGoal(value, {
+  fieldName = "traceability.nonGoals[]"
+} = {}) {
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const preservationStatus = normalizeClosedString(value.preservationStatus, {
+    fieldName: `${fieldName}.preservationStatus`,
+    allowedValues: TRACEABILITY_NON_GOAL_STATUSES
+  });
+  const changedFiles = normalizeStringList(value.changedFiles ?? [], {
+    fieldName: `${fieldName}.changedFiles`,
+    allowMissing: true
+  }).map((pathValue, index) => normalizeRepoRelativePath(pathValue, {
+    fieldName: `${fieldName}.changedFiles[${index}]`
+  }));
+  const evidenceRefs = normalizeStringList(value.evidenceRefs ?? [], {
+    fieldName: `${fieldName}.evidenceRefs`,
+    allowMissing: true
+  });
+  const reason = value.reason === undefined || value.reason === null
+    ? null
+    : normalizeString(value.reason);
+  if (value.reason !== undefined && value.reason !== null && reason.length === 0) {
+    throw new Error(`${fieldName}.reason must be a non-empty string when provided`);
+  }
+  if (preservationStatus !== "preserved" && !reason) {
+    throw new Error(`${fieldName}.reason is required when preservationStatus is ${preservationStatus}`);
+  }
+
+  return {
+    id: normalizeStringList([value.id], {
+      fieldName: `${fieldName}.id`
+    })[0],
+    text: normalizeStringList([value.text], {
+      fieldName: `${fieldName}.text`
+    })[0],
+    preservationStatus,
+    claimIds: normalizeStringList(value.claimIds ?? [], {
+      fieldName: `${fieldName}.claimIds`,
+      allowMissing: true
+    }),
+    changedFiles,
+    evidenceRefs,
+    ...(reason ? { reason } : {})
+  };
+}
+
+export function normalizeTraceability(value, {
+  fieldName = "traceability",
+  allowMissing = false
+} = {}) {
+  if (value === undefined || value === null) {
+    if (allowMissing) {
+      return null;
+    }
+    throw new Error(`${fieldName} must be an object`);
+  }
+  if (!isPlainObject(value)) {
+    throw new Error(`${fieldName} must be an object`);
+  }
+
+  const rawRequirementChecks = value.requirementChecks ?? [];
+  if (!Array.isArray(rawRequirementChecks)) {
+    throw new Error(`${fieldName}.requirementChecks must be an array`);
+  }
+  const rawNonGoals = value.nonGoals ?? [];
+  if (!Array.isArray(rawNonGoals)) {
+    throw new Error(`${fieldName}.nonGoals must be an array`);
+  }
+
+  return {
+    requirementChecks: rawRequirementChecks.map((entry, index) => (
+      normalizeTraceabilityRequirementCheck(entry, {
+        fieldName: `${fieldName}.requirementChecks[${index}]`
+      })
+    )),
+    nonGoals: rawNonGoals.map((entry, index) => (
+      normalizeTraceabilityNonGoal(entry, {
+        fieldName: `${fieldName}.nonGoals[${index}]`
+      })
+    ))
+  };
+}
+
+function hasUnprovenRequiredClaims(contractRun) {
+  if (!isPlainObject(contractRun) || !Object.prototype.hasOwnProperty.call(contractRun, "claimLedger")) {
+    return false;
+  }
+
+  const claimLedger = normalizeClaimLedger(contractRun.claimLedger, {
+    fieldName: "contractRuns[].claimLedger",
+    allowMissing: false
+  });
+  return claimLedger.some((claim) => (
+    claim.required !== false
+    && (claim.status === "partial" || claim.status === "unproven")
+  ));
+}
+
 export function inferReviewability({
   status,
   stopReason = null,
@@ -1595,6 +2245,10 @@ export function inferReviewability({
         } else if (!providerModelSignals.hasSelectedProvider || !providerModelSignals.hasSelectedModel) {
           reasons.push("provider_model_evidence_missing");
         }
+      }
+
+      if (successfulContractRuns.some((contractRun) => hasUnprovenRequiredClaims(contractRun))) {
+        reasons.push("required_claims_unproven");
       }
     }
   } else {

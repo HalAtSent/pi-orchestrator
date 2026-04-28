@@ -1,6 +1,6 @@
 import { RISK_LEVELS, createTaskPacket } from "./contracts.js";
 import { buildTaskPacket, makeRoleSequence } from "./orchestrator.js";
-import { classifyRisk } from "./policies.js";
+import { classifyRisk, requiresHumanGate, resolveTaskLane } from "./policies.js";
 import { createCompiledContractExecutionPlan } from "./project-contracts.js";
 
 const RISK_RANK = Object.freeze({
@@ -58,6 +58,12 @@ function validateExecutionContract(contract) {
     id: contract.id.trim(),
     goal: contract.goal.trim(),
     scopePaths,
+    lane: resolveTaskLane({
+      goal: contract.goal,
+      allowedFiles: scopePaths,
+      lane: contract.lane,
+      hasUserSuppliedLane: Object.prototype.hasOwnProperty.call(contract, "lane")
+    }),
     constraints: normalizeStringArray("contract.constraints", contract.constraints),
     nonGoals: normalizeStringArray("contract.nonGoals", contract.nonGoals),
     acceptanceChecks: normalizeStringArray("contract.acceptanceChecks", contract.acceptanceChecks),
@@ -106,7 +112,8 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
     allowedFiles: allowedFileScope
   });
   const effectiveRisk = maxRisk(contract.risk, heuristicRisk);
-  const intendedRoleSequence = makeRoleSequence(effectiveRisk);
+  const lane = contract.lane;
+  const intendedRoleSequence = makeRoleSequence(effectiveRisk, lane);
   const boundedGoal = deriveBoundedGoal(contract);
   const workflowId = `contract-${slugify(contract.id) || "task"}`;
   const packets = intendedRoleSequence.map((role) => mergePacketPolicy(
@@ -117,6 +124,7 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
       forbiddenFiles: [],
       parentTaskId: workflowId,
       risk: effectiveRisk,
+      lane,
       contextFiles: normalizedContextFiles
     }),
     contract
@@ -130,6 +138,7 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
     contextFiles: normalizedContextFiles,
     intendedRoleSequence,
     risk: effectiveRisk,
+    lane,
     declaredRisk: contract.risk,
     constraints: [...contract.constraints],
     nonGoals: [...contract.nonGoals],
@@ -140,7 +149,12 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
       workflowId,
       goal: boundedGoal,
       risk: effectiveRisk,
-      humanGate: effectiveRisk === "high",
+      lane,
+      humanGate: effectiveRisk === "high" || requiresHumanGate({
+        goal: contract.goal,
+        allowedFiles: allowedFileScope,
+        lane
+      }),
       roleSequence: intendedRoleSequence,
       packets
     }

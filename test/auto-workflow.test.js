@@ -131,6 +131,30 @@ function buildContextBudgetFixture(overrides = {}) {
   };
 }
 
+function buildReconFixture(overrides = {}) {
+  return {
+    artifactType: "recon_result",
+    readOnly: true,
+    proposedScope: ["src/helpers.js"],
+    includedContextFiles: [
+      {
+        path: "README.md",
+        reason: "operator supplied context"
+      }
+    ],
+    excludedRelevantFiles: [
+      {
+        path: "docs/OPERATING-GUIDE.md",
+        reason: "relevant background but not needed for this patch"
+      }
+    ],
+    expectedValidationCommands: ["node --test test/auto-workflow.test.js"],
+    openQuestions: ["Confirm whether broader workflow tests are needed."],
+    recommendation: "go",
+    ...overrides
+  };
+}
+
 function setSinglePacketContextFileReference(fixture, reference) {
   fixture.packetContextFiles = [reference];
   fixture.contextManifest = fixture.contextManifest.map((entry) => (
@@ -153,6 +177,7 @@ function normalizeRepairLoopFixtureForExistingPaths(fixture) {
     "src/contracts.js",
     "README.md"
   ];
+  fixture.input.approvedHighRisk = true;
   fixture.script[1].result.changedFiles = ["src/auto-workflow.js"];
   fixture.script[3].result.changedFiles = ["src/auto-workflow.js"];
 }
@@ -312,6 +337,151 @@ test("runPlannedWorkflow tolerates non-cloneable context values", async () => {
       && entry.reason === "execution_history"
       && entry.reference === calls[0].packet.id;
   }));
+});
+
+test("runPlannedWorkflow forwards read-only recon before implementer without widening packet scope", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Refactor auth flow to support a new provider",
+    allowedFiles: ["platform/src/auth/flow.js", "platform/src/auth/provider.js"],
+    contextFiles: ["README.md"]
+  });
+  const implementerPacket = workflow.packets.find((packet) => packet.role === "implementer");
+  const recon = buildReconFixture({
+    proposedScope: ["platform/src/auth/flow.js", "platform/src/auth/new-provider.js"],
+    includedContextFiles: [
+      {
+        path: "README.md",
+        reason: "operator supplied context"
+      },
+      {
+        path: "platform/src/auth/flow.js",
+        reason: "allowed implementation target"
+      }
+    ],
+    excludedRelevantFiles: [
+      {
+        path: "platform/src/auth/provider.js",
+        reason: "related target but not required for the first implementation pass"
+      }
+    ],
+    expectedValidationCommands: ["node --test test/auth-flow.test.js"],
+    openQuestions: ["Confirm provider fixture coverage before widening tests."],
+    recommendation: "no_go"
+  });
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "explorer",
+      result: {
+        status: "success",
+        summary: "Mapped implementation scope.",
+        changedFiles: [],
+        commandsRun: ["rg --files platform/src/auth"],
+        evidence: ["Auth flow entry point identified."],
+        openQuestions: [],
+        recon
+      }
+    },
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Applied scoped auth flow update.",
+        changedFiles: ["platform/src/auth/flow.js"],
+        commandsRun: ["node --check platform/src/auth/flow.js"],
+        evidence: ["Implementation check passed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "reviewer",
+      result: {
+        status: "success",
+        summary: "Review passed.",
+        changedFiles: [],
+        commandsRun: ["git diff -- platform/src/auth/flow.js"],
+        evidence: ["Scoped diff reviewed."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verification passed.",
+        changedFiles: [],
+        commandsRun: ["node --check platform/src/auth/flow.js"],
+        evidence: ["Verification command passed."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow,
+    approvedHighRisk: true
+  }, { runner });
+  const calls = runner.getCalls();
+  const implementerContext = calls[1].context;
+  const forwardedRecon = implementerContext.priorResults[0].recon;
+  const reconManifestEntry = implementerContext.contextManifest.find((entry) => (
+    entry.kind === "prior_result" && entry.reference === calls[0].packet.id
+  ));
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(calls[1].packet.allowedFiles, implementerPacket.allowedFiles);
+  assert.equal(calls[1].packet.allowedFiles.includes("platform/src/auth/new-provider.js"), false);
+  assert.deepEqual(forwardedRecon.includedContextFiles, recon.includedContextFiles);
+  assert.deepEqual(forwardedRecon.excludedRelevantFiles, recon.excludedRelevantFiles);
+  assert.deepEqual(forwardedRecon.expectedValidationCommands, recon.expectedValidationCommands);
+  assert.deepEqual(forwardedRecon.openQuestions, recon.openQuestions);
+  assert.equal(forwardedRecon.recommendation, "no_go");
+  assert.equal(reconManifestEntry.reason, "execution_history");
+  assert.deepEqual(reconManifestEntry.metadata, {
+    role: "explorer",
+    status: "success",
+    hasRecon: true
+  });
+});
+
+test("runPlannedWorkflow rejects recon reported from write-capable packets", async () => {
+  const workflow = createInitialWorkflow({
+    goal: "Rename one helper in a local file",
+    allowedFiles: ["src/helpers.js"]
+  });
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Tried to report reconnaissance from a write-capable packet.",
+        changedFiles: [],
+        commandsRun: ["rg --files src"],
+        evidence: ["Recon collected."],
+        openQuestions: [],
+        recon: buildReconFixture()
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Should not run.",
+        changedFiles: [],
+        commandsRun: [],
+        evidence: ["Verifier unexpectedly ran."],
+        openQuestions: []
+      }
+    }
+  ]);
+
+  const execution = await runPlannedWorkflow({
+    workflow
+  }, { runner });
+
+  assert.equal(execution.status, "failed");
+  assert.equal(execution.runs.length, 1);
+  assert.match(execution.runs[0].result.summary, /recon artifacts are read-only/i);
+  assert.equal(runner.getPendingStepCount(), 1);
 });
 
 test("runPlannedWorkflow redacts absolute paths in forwarded priorResults context", async () => {
@@ -527,6 +697,54 @@ test("validateRunContext accepts matching runtime payloads and context_file pack
       contextBudget: buildContextBudgetFixture()
     });
   });
+});
+
+test("validateRunContext fails closed on malformed or drifted context metadata", () => {
+  const fixture = buildRuntimeContextFixture();
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest.map((entry) => (
+        entry.kind === "prior_result"
+          ? {
+            ...entry,
+            metadata: {
+              policyClaim: "safe"
+            }
+          }
+          : entry
+      )),
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /metadata\.policyClaim is not supported context manifest metadata/i
+  );
+
+  assert.throws(
+    () => validateRunContext({
+      packetContextFiles: fixture.packetContextFiles,
+      contextManifest: fixture.contextManifest.map((entry) => (
+        entry.kind === "prior_result"
+          ? {
+            ...entry,
+            metadata: {
+              role: "reviewer",
+              status: "success",
+              hasRecon: false
+            }
+          }
+          : entry
+      )),
+      priorResults: fixture.priorResults,
+      reviewResult: fixture.reviewResult,
+      changedSurfaceContext: fixture.changedSurfaceContext,
+      contextBudget: buildContextBudgetFixture()
+    }),
+    /metadata\.role must match prior_result/i
+  );
 });
 
 test("validateRunContext fails closed when packetContextFiles references a missing context file", () => {
@@ -1299,6 +1517,7 @@ test("repair packets preserve original guard rails and context files", async () 
 
   const execution = await runPlannedWorkflow({
     workflow,
+    approvedHighRisk: true,
     maxRepairLoops: 1
   }, { runner });
   const repairImplementerPacket = runner.getCalls()[3].packet;
@@ -1327,6 +1546,73 @@ test("repair packets preserve original guard rails and context files", async () 
     repairReviewerPacket.acceptanceChecks.includes("Original acceptance check must survive repair."),
     true
   );
+});
+
+test("reviewer finding produces a scoped repair packet", async () => {
+  const fixture = loadFixture("repair-loop.json");
+  normalizeRepairLoopFixtureForExistingPaths(fixture);
+  fixture.script[2].result.reviewFindings = [
+    {
+      kind: "issue",
+      severity: "high",
+      message: "Empty formatter input is still unhandled.",
+      path: "src/auto-workflow.js"
+    }
+  ];
+  fixture.script[2].result.commandsRun = ["git diff -- src/auto-workflow.js"];
+  fixture.script[3].result.changedFiles = ["src/auto-workflow.js"];
+  const runner = createScriptedWorkerRunner(fixture.script);
+
+  const execution = await runAutoWorkflow(fixture.input, { runner });
+  const repairPacket = runner.getCalls()[3].packet;
+  const [repairContract] = repairPacket.repairContracts;
+
+  assert.equal(execution.status, "success");
+  assert.deepEqual(repairPacket.allowedFiles, ["src/auto-workflow.js"]);
+  assert.equal(repairContract.findingId, `${runner.getCalls()[2].packet.id}-repair-1-finding-1`);
+  assert.deepEqual(repairContract.targetFiles, ["src/auto-workflow.js"]);
+  assert.equal(repairContract.requiredCorrection, "Empty formatter input is still unhandled.");
+  assert.equal(
+    repairContract.forbiddenChanges.some((entry) => entry.includes("outside the repair packet allowedFiles")),
+    true
+  );
+  assert.equal(
+    repairContract.expectedVerification.includes("git diff -- src/auto-workflow.js"),
+    true
+  );
+  assert.equal(
+    repairPacket.acceptanceChecks.some((entry) => entry.includes(repairContract.findingId)),
+    true
+  );
+  assert.equal(
+    repairPacket.nonGoals.some((entry) => entry.includes(repairContract.findingId)),
+    true
+  );
+});
+
+test("repair packet cannot widen scope beyond the original allowlist", async () => {
+  const fixture = loadFixture("repair-loop.json");
+  normalizeRepairLoopFixtureForExistingPaths(fixture);
+  fixture.script[2].result.reviewFindings = [
+    {
+      kind: "issue",
+      severity: "high",
+      message: "Reviewer pointed at an adjacent file outside the approved repair scope.",
+      path: "src/outside-scope.js"
+    }
+  ];
+  fixture.script[3].result.changedFiles = ["src/auto-workflow.js"];
+  const runner = createScriptedWorkerRunner(fixture.script);
+
+  const execution = await runAutoWorkflow(fixture.input, { runner });
+  const repairPacket = runner.getCalls()[3].packet;
+
+  assert.equal(execution.status, "success");
+  assert.equal(repairPacket.allowedFiles.includes("src/outside-scope.js"), false);
+  assert.deepEqual(repairPacket.repairContracts[0].targetFiles, []);
+  for (const allowedFile of repairPacket.allowedFiles) {
+    assert.equal(fixture.input.allowedFiles.includes(allowedFile), true);
+  }
 });
 
 test("runPlannedWorkflow keeps legacy packets without contextManifest compatible", async () => {
@@ -1771,6 +2057,40 @@ test("auto workflow stops before execution when a human gate is required", async
   assert.equal(execution.runs.length, 0);
   assert.equal(runner.getCalls().length, 0);
   assert.match(execution.stopReason, /Human approval is required/i);
+});
+
+test("auto workflow does not bypass human gates for review-gated lanes", async () => {
+  const runner = createScriptedWorkerRunner([]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Adjust task lane handling",
+    allowedFiles: ["src/policies.js"]
+  }, { runner });
+
+  assert.equal(execution.workflow.risk, "low");
+  assert.equal(execution.workflow.lane, "policy_or_harness_change");
+  assert.equal(execution.workflow.humanGate, true);
+  assert.deepEqual(execution.workflow.roleSequence, ["explorer", "implementer", "reviewer", "verifier"]);
+  assert.equal(execution.status, "human_gate_required");
+  assert.equal(execution.runs.length, 0);
+  assert.equal(runner.getCalls().length, 0);
+});
+
+test("planned workflows cannot suppress human gates for review-gated lanes", async () => {
+  const runner = createScriptedWorkerRunner([]);
+  const workflow = createInitialWorkflow({
+    goal: "Adjust task lane handling",
+    allowedFiles: ["src/policies.js"]
+  });
+  workflow.humanGate = false;
+
+  await assert.rejects(
+    () => runPlannedWorkflow({
+      workflow,
+      approvedHighRisk: true
+    }, { runner }),
+    /workflow\.humanGate must be true for human-gated task lanes/u
+  );
 });
 
 test("auto workflow treats approvedHighRisk string false as no approval", async () => {

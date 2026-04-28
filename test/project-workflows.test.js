@@ -70,19 +70,22 @@ test("blueprint freezes repository layout and execution profile", () => {
     "src/path-scopes.js",
     "src/policies.js",
     "src/policy-profiles.js",
+    "src/preflight.js",
     "src/program-compiler.js",
     "src/program-contract-executor.js",
     "src/program-runner.js",
     "src/project-contracts.js",
     "src/project-workflows.js",
     "src/redaction.js",
+    "src/typed-claim-redaction.js",
     "src/auto-workflow.js",
     "src/build-session-store.js",
     "src/run-evidence.js",
     "src/run-store.js",
     "src/safe-clone.js",
     "src/schema.js",
-    "src/skill-governance.js"
+    "src/skill-governance.js",
+    "src/verification-planner.js"
   ]);
   assert.deepEqual(modulePathsById["pi-adapter"], [
     "src/operator-formatters.js",

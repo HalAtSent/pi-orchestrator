@@ -10,6 +10,7 @@ import {
   createProcessWorkerBackend as createRawProcessWorkerBackend,
   PROCESS_WORKER_SANDBOX_POLICIES
 } from "../src/process-worker-backend.js";
+import { normalizeReviewability } from "../src/run-evidence.js";
 import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
 
 function buildLowRiskContract(overrides = {}) {
@@ -138,6 +139,89 @@ test("default program contract executor can succeed with a scripted worker runne
   assert.equal(runner.getPendingStepCount(), 0);
 });
 
+test("program contract executor derives proven acceptance claims from verifier and changed-surface evidence", async () => {
+  const runner = createLocalWorkerRunner();
+  const executeContract = createProgramContractExecutor({
+    runner,
+    executePlannedWorkflow: async ({ workflow }) => ({
+      status: "success",
+      stopReason: null,
+      runs: [
+        {
+          packet: {
+            id: `${workflow.workflowId}-implementer`,
+            role: "implementer"
+          },
+          iteration: 0,
+          result: {
+            status: "success",
+            summary: "Applied scoped helper update.",
+            changedFiles: ["src/helpers.js"],
+            commandsRun: ["node --check src/helpers.js"],
+            evidence: ["repository_changes_applied: true"],
+            openQuestions: [],
+            changedSurfaceObservation: {
+              capture: "complete",
+              paths: ["src/helpers.js"]
+            },
+            providerModelSelection: {
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          },
+          provenance: {
+            changedSurfaceObservationTrusted: true,
+            providerModelSelectionTrusted: true
+          }
+        },
+        {
+          packet: {
+            id: `${workflow.workflowId}-verifier`,
+            role: "verifier"
+          },
+          iteration: 0,
+          result: {
+            status: "success",
+            summary: "Verified scoped helper behavior.",
+            changedFiles: [],
+            commandsRun: ["node --test --test-name-pattern helpers"],
+            evidence: ["Verification command passed."],
+            openQuestions: []
+          },
+          provenance: {}
+        }
+      ]
+    })
+  });
+
+  const result = await executeContract(buildLowRiskContract({
+    successCriteria: ["The helper behavior stays stable."],
+    verificationPlan: ["node --test --test-name-pattern helpers"]
+  }));
+
+  assert.equal(result.status, "success");
+  assert.equal(result.acceptanceArtifact.status, "satisfied");
+  assert.deepEqual(
+    result.claimLedger.map((claim) => [claim.type, claim.status]),
+    [
+      ["terminal_state", "proven"],
+      ["success_criterion", "proven"],
+      ["acceptance_check", "proven"],
+      ["verification", "proven"],
+      ["non_goal", "proven"]
+    ]
+  );
+  assert.deepEqual(result.changedSurface, {
+    capture: "complete",
+    paths: ["src/helpers.js"]
+  });
+  assert.equal(result.traceability.requirementChecks.every((entry) => entry.validationEvidenceKnown), true);
+  assert.equal(result.traceability.requirementChecks.every((entry) => entry.changedFilesKnown), true);
+  assert.deepEqual(result.traceability.nonGoals.map((entry) => entry.preservationStatus), ["preserved"]);
+});
+
 test("program contract executor blocks success when verificationPlan commands are not reported", async () => {
   const requiredCommand = "uv run pytest tests/test_critical.py";
   const runner = createScriptedWorkerRunner([
@@ -175,7 +259,172 @@ test("program contract executor blocks success when verificationPlan commands ar
   assert.match(result.summary, /verificationPlan command/i);
   assert.equal(result.evidence.includes(`required verification command: ${requiredCommand}`), true);
   assert.equal(result.evidence.includes(`missing_verification_commands: ${requiredCommand}`), true);
+  assert.equal(result.evidence.includes(`verification_required_not_run: ${requiredCommand}`), true);
+  assert.deepEqual(result.verificationPlanEvidence.requiredChecksNotRun.map((check) => check.command), [requiredCommand]);
   assert.equal(verifierCall.packet.commands.includes(requiredCommand), true);
+  assert.equal(result.acceptanceArtifact.status, "unsatisfied");
+  assert.equal(
+    result.claimLedger.some((claim) => (
+      claim.type === "verification" &&
+      claim.status === "unproven" &&
+      /required verificationPlan command/i.test(claim.reason)
+    )),
+    true
+  );
+});
+
+test("program contract executor records possible drift as an unproven required claim", async () => {
+  const runner = createLocalWorkerRunner();
+  const requiredCommand = "node --test --test-name-pattern helpers";
+  const executeContract = createProgramContractExecutor({
+    runner,
+    executePlannedWorkflow: async ({ workflow }) => ({
+      status: "success",
+      stopReason: null,
+      runs: [
+        {
+          packet: {
+            id: `${workflow.workflowId}-implementer`,
+            role: "implementer"
+          },
+          iteration: 0,
+          result: {
+            status: "success",
+            summary: "Changed src/outside.js while renaming the helper.",
+            changedFiles: ["src/outside.js"],
+            commandsRun: ["node --check src/outside.js"],
+            evidence: ["Updated src/outside.js"],
+            openQuestions: [],
+            changedSurfaceObservation: {
+              capture: "complete",
+              paths: ["src/outside.js"]
+            },
+            providerModelSelection: {
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          },
+          provenance: {
+            changedSurfaceObservationTrusted: true,
+            providerModelSelectionTrusted: true
+          }
+        },
+        {
+          packet: {
+            id: `${workflow.workflowId}-verifier`,
+            role: "verifier"
+          },
+          iteration: 0,
+          result: {
+            status: "success",
+            summary: "Verified helper behavior.",
+            changedFiles: [],
+            commandsRun: [requiredCommand],
+            evidence: ["Verification command passed."],
+            openQuestions: [],
+            providerModelSelection: {
+              requestedProvider: "openai-codex",
+              requestedModel: "gpt-5.4",
+              selectedProvider: "openai-codex",
+              selectedModel: "gpt-5.4"
+            }
+          },
+          provenance: {
+            providerModelSelectionTrusted: true
+          }
+        }
+      ]
+    })
+  });
+
+  const result = await executeContract(buildLowRiskContract({
+    verificationPlan: [requiredCommand]
+  }));
+
+  assert.equal(result.status, "success");
+  assert.equal(result.specDrift.outcome, "possible_drift");
+  assert.equal(result.evidence.includes("spec_drift_outcome: possible_drift"), true);
+  assert.equal(
+    result.claimLedger.some((claim) => (
+      claim.id.endsWith(":verification:spec-drift") &&
+      claim.status === "unproven" &&
+      /possible_drift/u.test(claim.reason)
+    )),
+    true
+  );
+  assert.deepEqual(
+    normalizeReviewability(null, {
+      status: "success",
+      stopReason: null,
+      stopReasonCode: null,
+      validationArtifacts: [
+        {
+          artifactType: "validation_artifact",
+          reference: "test-run:node --test --test-name-pattern helpers",
+          status: "captured"
+        }
+      ],
+      contractRuns: [
+        {
+          status: "success",
+          providerModelEvidenceRequirement: result.providerModelEvidenceRequirement,
+          providerModelSelections: result.providerModelSelections,
+          claimLedger: result.claimLedger
+        }
+      ]
+    }),
+    {
+      status: "not_reviewable",
+      reasons: ["required_claims_unproven"]
+    }
+  );
+});
+
+test("program contract executor reports unproven required claims for failed executions", async () => {
+  const runner = createLocalWorkerRunner();
+  const executeContract = createProgramContractExecutor({
+    runner,
+    executePlannedWorkflow: async () => ({
+      status: "failed",
+      stopReason: "Verifier command failed.",
+      runs: [
+        {
+          packet: {
+            id: "contract-low-risk-verifier",
+            role: "verifier"
+          },
+          iteration: 0,
+          result: {
+            status: "failed",
+            summary: "Helper test failed.",
+            changedFiles: [],
+            commandsRun: ["node --test --test-name-pattern helpers"],
+            evidence: ["Test exited non-zero."],
+            openQuestions: ["Fix the failing helper behavior."]
+          },
+          provenance: {}
+        }
+      ]
+    })
+  });
+
+  const result = await executeContract(buildLowRiskContract({
+    successCriteria: ["The helper behavior stays stable."],
+    verificationPlan: ["node --test --test-name-pattern helpers"]
+  }));
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.acceptanceArtifact.status, "unsatisfied");
+  assert.equal(
+    result.claimLedger.filter((claim) => claim.status === "unproven").length >= 3,
+    true
+  );
+  assert.equal(
+    result.claimLedger.some((claim) => claim.type === "terminal_state" && /failed/.test(claim.reason)),
+    true
+  );
 });
 
 test("program contract executor persists bounded worker evidence from workflow runs", async () => {

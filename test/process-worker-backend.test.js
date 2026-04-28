@@ -3114,6 +3114,7 @@ test("process implementer sees review findings during a planned repair loop", as
     const execution = await runPlannedWorkflow({
       workflow,
       context: {},
+      approvedHighRisk: true,
       maxRepairLoops: 1
     }, {
       runner

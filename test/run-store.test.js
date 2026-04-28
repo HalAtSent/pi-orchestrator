@@ -332,6 +332,103 @@ test("run store redacts absolute paths in persisted contract-run narrative field
   });
 });
 
+test("run store redacts typed claim surfaces in persisted contract runs", async () => {
+  await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePath = join(rootDir, "src", "claim-surface.js");
+    const externalAbsolutePath = process.platform === "win32"
+      ? "D:\\outside\\claim-surface.txt"
+      : "/opt/outside/claim-surface.txt";
+
+    const saved = await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "blocked",
+        stopReason: "waiting for dependency",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "success",
+            summary: "Executed typed claim surfaces.",
+            evidence: [],
+            acceptanceArtifact: {
+              status: "satisfied",
+              items: [
+                {
+                  id: "contract-1:acceptance_check:1",
+                  type: "acceptance_check",
+                  text: `Acceptance reviewed ${repoAbsolutePath}.`,
+                  required: true
+                }
+              ]
+            },
+            claimLedger: [
+              {
+                id: "contract-1:acceptance_check:1",
+                type: "acceptance_check",
+                text: `Claim references ${repoAbsolutePath}.`,
+                status: "proven",
+                evidenceSummary: `Evidence references ${externalAbsolutePath}.`
+              },
+              {
+                id: "contract-1:non_goal:1",
+                type: "non_goal",
+                text: `Non-goal references ${repoAbsolutePath}.`,
+                status: "unproven",
+                reason: `Capture did not include ${externalAbsolutePath}.`
+              }
+            ],
+            traceability: {
+              requirementChecks: [
+                {
+                  id: "contract-1:acceptance_check:1",
+                  type: "acceptance_check",
+                  text: `Traceability reviewed ${repoAbsolutePath}.`,
+                  claimIds: ["contract-1:acceptance_check:1"],
+                  changedFilesKnown: true,
+                  changedFiles: ["src/helpers.js"],
+                  validationEvidenceKnown: true,
+                  validationEvidenceRefs: ["run:verifier:commandsRun[0]"]
+                }
+              ],
+              nonGoals: [
+                {
+                  id: "contract-1:non_goal:1",
+                  text: `Non-goal traceability reviewed ${repoAbsolutePath}.`,
+                  preservationStatus: "unproven",
+                  claimIds: ["contract-1:non_goal:1"],
+                  changedFiles: ["src/helpers.js"],
+                  evidenceRefs: [],
+                  reason: `Confirm ${externalAbsolutePath}.`
+                }
+              ]
+            },
+            openQuestions: []
+          }
+        ],
+        completedContractIds: [program.contracts[0].id],
+        pendingContractIds: program.contracts.slice(1).map((contract) => contract.id)
+      }
+    });
+
+    const typedSurfaces = JSON.stringify({
+      acceptanceArtifact: saved.runJournal.contractRuns[0].acceptanceArtifact,
+      claimLedger: saved.runJournal.contractRuns[0].claimLedger,
+      traceability: saved.runJournal.contractRuns[0].traceability
+    });
+    assert.equal(typedSurfaces.includes(repoAbsolutePath), false);
+    assert.equal(typedSurfaces.includes(externalAbsolutePath), false);
+    assert.equal(typedSurfaces.includes("src/claim-surface.js"), true);
+    assert.equal(typedSurfaces.includes("<absolute_path>"), true);
+    assert.equal(saved.runJournal.contractRuns[0].redaction.applied, true);
+    assert.equal(saved.runJournal.contractRuns[0].redaction.repoPathRewrites > 0, true);
+    assert.equal(saved.runJournal.contractRuns[0].redaction.externalPathRewrites > 0, true);
+  });
+});
+
 test("run store save rejects fabricated present redaction metadata on relative-only narrative fields", async () => {
   await withTempDir("pi-orchestrator-run-store-", async (rootDir) => {
     const program = buildProgram();

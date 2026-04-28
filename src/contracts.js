@@ -6,6 +6,7 @@ import {
 } from "./run-evidence.js";
 import { resolvePacketContextManifest } from "./context-manifest.js";
 import { normalizeRelativeScopePath } from "./path-scopes.js";
+import { validateTaskLane } from "./policies.js";
 import { normalizeRedactionMetadata } from "./redaction.js";
 
 export const ROLE_TYPES = Object.freeze([
@@ -72,6 +73,11 @@ export function validateTaskPacket(packet) {
   assertString("packet.id", packet.id);
   assert(ROLE_TYPES.includes(packet.role), `packet.role must be one of: ${ROLE_TYPES.join(", ")}`);
   assert(RISK_LEVELS.includes(packet.risk), `packet.risk must be one of: ${RISK_LEVELS.join(", ")}`);
+  if (Object.prototype.hasOwnProperty.call(packet, "lane")) {
+    packet.lane = validateTaskLane(packet.lane, {
+      fieldName: "packet.lane"
+    });
+  }
   assertString("packet.goal", packet.goal);
   assertStringArray("packet.nonGoals", packet.nonGoals);
   packet.allowedFiles = normalizeScopePathArray("packet.allowedFiles", packet.allowedFiles);

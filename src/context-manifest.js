@@ -3,6 +3,7 @@ import { posix, relative, resolve, win32 } from "node:path";
 import {
   assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
+  mergeRedactionMetadata,
   normalizeRedactionMetadata
 } from "./redaction.js";
 import { normalizeScopedPath } from "./path-scopes.js";
@@ -35,6 +36,29 @@ export const CONTEXT_MANIFEST_REASONS = Object.freeze(Object.values(CONTEXT_MANI
 const CONTEXT_MANIFEST_KIND_SET = new Set(CONTEXT_MANIFEST_KINDS);
 const CONTEXT_MANIFEST_SOURCE_SET = new Set(CONTEXT_MANIFEST_SOURCES);
 const CONTEXT_MANIFEST_REASON_SET = new Set(CONTEXT_MANIFEST_REASONS);
+const CONTEXT_MANIFEST_METADATA_KEYS_BY_KIND = Object.freeze({
+  [CONTEXT_MANIFEST_KIND.CONTEXT_FILE]: Object.freeze(["inputIndex"]),
+  [CONTEXT_MANIFEST_KIND.PRIOR_RESULT]: Object.freeze(["role", "status", "hasRecon"]),
+  [CONTEXT_MANIFEST_KIND.REVIEW_RESULT]: Object.freeze(["status"]),
+  [CONTEXT_MANIFEST_KIND.CHANGED_SURFACE]: Object.freeze(["role", "pathCount"])
+});
+const CONTEXT_RESULT_STATUSES = Object.freeze(["success", "blocked", "failed", "repair_required"]);
+const CONTEXT_RESULT_STATUS_SET = new Set(CONTEXT_RESULT_STATUSES);
+const RECON_READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
+const RECON_ARTIFACT_TYPE = "recon_result";
+const RECON_RECOMMENDATIONS = Object.freeze(["go", "no_go"]);
+const RECON_RECOMMENDATION_SET = new Set(RECON_RECOMMENDATIONS);
+const RECON_ARTIFACT_KEYS = Object.freeze([
+  "artifactType",
+  "readOnly",
+  "proposedScope",
+  "includedContextFiles",
+  "excludedRelevantFiles",
+  "expectedValidationCommands",
+  "openQuestions",
+  "recommendation"
+]);
+const RECON_FILE_REASON_KEYS = Object.freeze(["path", "reason"]);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
 const TRUSTED_FORWARDED_REDACTION_METADATA_BY_CONTEXT = new WeakMap();
 const TRUSTED_RUNTIME_REPOSITORY_ROOT_BY_CONTEXT = new WeakMap();
@@ -75,6 +99,124 @@ function normalizeContextFileReference(fieldName, value) {
   const normalizedReference = normalizeScopedPath(normalizeReference(fieldName, value));
   assert(normalizedReference.length > 0, `${fieldName} must resolve to a non-empty scoped path`);
   return normalizedReference;
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeOptionalMetadataString(fieldName, value, {
+  allowedValues,
+  allowedValueSet
+} = {}) {
+  const normalized = normalizeReference(fieldName, value);
+  if (allowedValues) {
+    assert(
+      allowedValueSet.has(normalized),
+      `${fieldName} must be one of: ${allowedValues.join(", ")}`
+    );
+  }
+  return normalized;
+}
+
+function normalizeOptionalMetadataBoolean(fieldName, value) {
+  assert(typeof value === "boolean", `${fieldName} must be a boolean`);
+  return value;
+}
+
+function normalizeMetadataNonNegativeInteger(fieldName, value) {
+  assert(Number.isInteger(value) && value >= 0, `${fieldName} must be a non-negative integer`);
+  return value;
+}
+
+function assertNoUnsupportedMetadataKeys(metadata, {
+  allowedKeys,
+  fieldName
+}) {
+  const allowedKeySet = new Set(allowedKeys);
+  for (const key of Object.keys(metadata)) {
+    assert(
+      allowedKeySet.has(key),
+      `${fieldName}.${key} is not supported context manifest metadata`
+    );
+  }
+}
+
+function assertNoUnsupportedObjectKeys(value, {
+  allowedKeys,
+  fieldName
+}) {
+  const allowedKeySet = new Set(allowedKeys);
+  for (const key of Object.keys(value)) {
+    assert(
+      allowedKeySet.has(key),
+      `${fieldName}.${key} is not supported`
+    );
+  }
+}
+
+function normalizeContextManifestMetadata(kind, metadata, {
+  fieldName
+} = {}) {
+  if (metadata === undefined) {
+    return undefined;
+  }
+
+  assert(
+    metadata && typeof metadata === "object" && !Array.isArray(metadata),
+    `${fieldName} must be an object`
+  );
+  const allowedKeys = CONTEXT_MANIFEST_METADATA_KEYS_BY_KIND[kind] ?? [];
+  assertNoUnsupportedMetadataKeys(metadata, {
+    allowedKeys,
+    fieldName
+  });
+
+  const normalized = {};
+  if (kind === CONTEXT_MANIFEST_KIND.CONTEXT_FILE) {
+    if (hasOwn(metadata, "inputIndex")) {
+      normalized.inputIndex = normalizeMetadataNonNegativeInteger(
+        `${fieldName}.inputIndex`,
+        metadata.inputIndex
+      );
+    }
+  } else if (kind === CONTEXT_MANIFEST_KIND.PRIOR_RESULT) {
+    if (hasOwn(metadata, "role")) {
+      normalized.role = normalizeOptionalMetadataString(`${fieldName}.role`, metadata.role);
+    }
+    if (hasOwn(metadata, "status")) {
+      normalized.status = normalizeOptionalMetadataString(`${fieldName}.status`, metadata.status, {
+        allowedValues: CONTEXT_RESULT_STATUSES,
+        allowedValueSet: CONTEXT_RESULT_STATUS_SET
+      });
+    }
+    if (hasOwn(metadata, "hasRecon")) {
+      normalized.hasRecon = normalizeOptionalMetadataBoolean(`${fieldName}.hasRecon`, metadata.hasRecon);
+    }
+  } else if (kind === CONTEXT_MANIFEST_KIND.REVIEW_RESULT) {
+    if (hasOwn(metadata, "status")) {
+      normalized.status = normalizeOptionalMetadataString(`${fieldName}.status`, metadata.status, {
+        allowedValues: CONTEXT_RESULT_STATUSES,
+        allowedValueSet: CONTEXT_RESULT_STATUS_SET
+      });
+    }
+  } else if (kind === CONTEXT_MANIFEST_KIND.CHANGED_SURFACE) {
+    if (hasOwn(metadata, "role")) {
+      normalized.role = normalizeOptionalMetadataString(`${fieldName}.role`, metadata.role);
+    }
+    if (hasOwn(metadata, "pathCount")) {
+      normalized.pathCount = normalizeMetadataNonNegativeInteger(
+        `${fieldName}.pathCount`,
+        metadata.pathCount
+      );
+    }
+  }
+
+  assert(
+    Object.keys(normalized).length > 0,
+    `${fieldName} must contain at least one deterministic metadata field`
+  );
+  return normalized;
 }
 
 function normalizePacketContextFileReferences(contextFiles, {
@@ -222,6 +364,149 @@ function normalizeStringArray(fieldName, value, { allowMissing = false } = {}) {
   return value.map((entry, index) => normalizeReference(`${fieldName}[${index}]`, entry));
 }
 
+function normalizeScopedPathArray(fieldName, value) {
+  assert(Array.isArray(value), `${fieldName} must be an array`);
+  return value.map((entry, index) => normalizeContextFileReference(`${fieldName}[${index}]`, entry));
+}
+
+function normalizeReconFileReasonEntries(fieldName, value) {
+  assert(Array.isArray(value), `${fieldName} must be an array`);
+  return value.map((entry, index) => {
+    assert(
+      entry && typeof entry === "object" && !Array.isArray(entry),
+      `${fieldName}[${index}] must be an object`
+    );
+    assertNoUnsupportedObjectKeys(entry, {
+      allowedKeys: RECON_FILE_REASON_KEYS,
+      fieldName: `${fieldName}[${index}]`
+    });
+
+    return {
+      path: normalizeContextFileReference(`${fieldName}[${index}].path`, entry.path),
+      reason: normalizeReference(`${fieldName}[${index}].reason`, entry.reason)
+    };
+  });
+}
+
+export function normalizeReconArtifact(recon, {
+  fieldName = "recon"
+} = {}) {
+  if (recon === undefined) {
+    return undefined;
+  }
+
+  assert(
+    recon && typeof recon === "object" && !Array.isArray(recon),
+    `${fieldName} must be an object`
+  );
+  assertNoUnsupportedObjectKeys(recon, {
+    allowedKeys: RECON_ARTIFACT_KEYS,
+    fieldName
+  });
+  assert(
+    recon.artifactType === RECON_ARTIFACT_TYPE,
+    `${fieldName}.artifactType must be ${RECON_ARTIFACT_TYPE}`
+  );
+  assert(recon.readOnly === true, `${fieldName}.readOnly must be true`);
+  const recommendation = normalizeEnumValue({
+    fieldName: `${fieldName}.recommendation`,
+    value: recon.recommendation,
+    allowedValues: RECON_RECOMMENDATIONS,
+    allowedValueSet: RECON_RECOMMENDATION_SET
+  });
+
+  return {
+    artifactType: RECON_ARTIFACT_TYPE,
+    readOnly: true,
+    proposedScope: normalizeScopedPathArray(`${fieldName}.proposedScope`, recon.proposedScope),
+    includedContextFiles: normalizeReconFileReasonEntries(
+      `${fieldName}.includedContextFiles`,
+      recon.includedContextFiles
+    ),
+    excludedRelevantFiles: normalizeReconFileReasonEntries(
+      `${fieldName}.excludedRelevantFiles`,
+      recon.excludedRelevantFiles
+    ),
+    expectedValidationCommands: normalizeStringArray(
+      `${fieldName}.expectedValidationCommands`,
+      recon.expectedValidationCommands
+    ),
+    openQuestions: normalizeStringArray(`${fieldName}.openQuestions`, recon.openQuestions),
+    recommendation
+  };
+}
+
+export function sanitizeReconArtifactForBoundary(recon, {
+  redactor,
+  fieldName = "recon"
+} = {}) {
+  const normalizedRecon = normalizeReconArtifact(recon, {
+    fieldName
+  });
+  if (normalizedRecon === undefined) {
+    return {
+      recon: undefined,
+      redaction: undefined
+    };
+  }
+  assert(redactor && typeof redactor.redactString === "function", "redactor.redactString(value) is required");
+  assert(
+    typeof redactor.redactStringArray === "function",
+    "redactor.redactStringArray(values) is required"
+  );
+
+  const includedContextFiles = [];
+  const excludedRelevantFiles = [];
+  const redactions = [];
+
+  for (const [index, entry] of normalizedRecon.includedContextFiles.entries()) {
+    const reason = redactor.redactString(entry.reason, {
+      fieldName: `${fieldName}.includedContextFiles[${index}].reason`
+    });
+    redactions.push(reason.redaction);
+    includedContextFiles.push({
+      ...entry,
+      reason: reason.value
+    });
+  }
+
+  for (const [index, entry] of normalizedRecon.excludedRelevantFiles.entries()) {
+    const reason = redactor.redactString(entry.reason, {
+      fieldName: `${fieldName}.excludedRelevantFiles[${index}].reason`
+    });
+    redactions.push(reason.redaction);
+    excludedRelevantFiles.push({
+      ...entry,
+      reason: reason.value
+    });
+  }
+
+  const expectedValidationCommands = redactor.redactStringArray(
+    normalizedRecon.expectedValidationCommands,
+    {
+      fieldName: `${fieldName}.expectedValidationCommands`
+    }
+  );
+  const openQuestions = redactor.redactStringArray(normalizedRecon.openQuestions, {
+    fieldName: `${fieldName}.openQuestions`
+  });
+
+  return {
+    recon: {
+      ...normalizedRecon,
+      includedContextFiles,
+      excludedRelevantFiles,
+      expectedValidationCommands: expectedValidationCommands.values,
+      openQuestions: openQuestions.values
+    },
+    redaction: mergeRedactionMetadata(
+      ...redactions,
+      expectedValidationCommands.redaction,
+      openQuestions.redaction
+    )
+  };
+}
+
 function contextManifestEntryKey(entry) {
   return `${entry.kind}::${entry.source}::${entry.reference}::${entry.reason}`;
 }
@@ -260,6 +545,10 @@ function assertPacketContextManifestEntry(entry, { fieldName }) {
     entry.reason === CONTEXT_MANIFEST_REASON.EXPLICIT_REQUEST,
     `${fieldName}.reason must be ${CONTEXT_MANIFEST_REASON.EXPLICIT_REQUEST} for packet-level context manifests`
   );
+  assert(
+    entry.metadata === undefined,
+    `${fieldName}.metadata is runtime-only and must not be supplied on packet-level context manifests`
+  );
 }
 
 function assertCanonicalPacketManifestMatch({
@@ -283,14 +572,14 @@ function assertCanonicalPacketManifestMatch({
 
 export function createContextManifestEntry(entry, { fieldName = "contextManifestEntry" } = {}) {
   assert(entry && typeof entry === "object" && !Array.isArray(entry), `${fieldName} must be an object`);
-
-  return {
-    kind: normalizeEnumValue({
-      fieldName: `${fieldName}.kind`,
-      value: entry.kind,
-      allowedValues: CONTEXT_MANIFEST_KINDS,
-      allowedValueSet: CONTEXT_MANIFEST_KIND_SET
-    }),
+  const kind = normalizeEnumValue({
+    fieldName: `${fieldName}.kind`,
+    value: entry.kind,
+    allowedValues: CONTEXT_MANIFEST_KINDS,
+    allowedValueSet: CONTEXT_MANIFEST_KIND_SET
+  });
+  const normalized = {
+    kind,
     source: normalizeEnumValue({
       fieldName: `${fieldName}.source`,
       value: entry.source,
@@ -305,6 +594,15 @@ export function createContextManifestEntry(entry, { fieldName = "contextManifest
       allowedValueSet: CONTEXT_MANIFEST_REASON_SET
     })
   };
+
+  const metadata = normalizeContextManifestMetadata(kind, entry.metadata, {
+    fieldName: `${fieldName}.metadata`
+  });
+  if (metadata !== undefined) {
+    normalized.metadata = metadata;
+  }
+
+  return normalized;
 }
 
 export function normalizeContextManifest(manifest, {
@@ -820,6 +1118,24 @@ function normalizePriorResultReferences(priorResults, fieldName, {
       });
     }
     const packetId = normalizeReference(`${fieldName}[${index}].packetId`, priorResult.packetId);
+    if (hasOwn(priorResult, "recon")) {
+      priorResult.recon = normalizeReconArtifact(priorResult.recon, {
+        fieldName: `${fieldName}[${index}].recon`
+      });
+      const priorResultRole = normalizeReference(`${fieldName}[${index}].role`, priorResult.role);
+      assert(
+        RECON_READ_ONLY_ROLES.has(priorResultRole),
+        `${fieldName}[${index}].recon may only be forwarded from read-only roles`
+      );
+      assert(
+        Array.isArray(priorResult.changedFiles),
+        `${fieldName}[${index}].changedFiles must be an array when recon is present`
+      );
+      assert(
+        priorResult.changedFiles.length === 0,
+        `${fieldName}[${index}].recon is read-only and requires changedFiles to be empty`
+      );
+    }
     const firstIndex = seenPacketIds.get(packetId);
     assert(
       firstIndex === undefined,
@@ -919,6 +1235,149 @@ function normalizeChangedSurfaceReferences(changedSurfaceContext, fieldName) {
   }
 
   return references;
+}
+
+function metadataReferenceKey(kind, reference) {
+  return `${kind}::${reference}`;
+}
+
+function buildContextFileMetadataByReference(normalizedPacketContextFiles) {
+  const metadataByReference = new Map();
+  normalizedPacketContextFiles.forEach((reference, index) => {
+    if (!metadataByReference.has(reference)) {
+      metadataByReference.set(reference, {
+        inputIndex: index
+      });
+    }
+  });
+  return metadataByReference;
+}
+
+function buildPriorResultMetadataByReference(priorResults) {
+  const metadataByReference = new Map();
+  for (const priorResult of priorResults) {
+    if (!priorResult || typeof priorResult !== "object" || Array.isArray(priorResult)) {
+      continue;
+    }
+    const packetId = typeof priorResult.packetId === "string" && priorResult.packetId.trim().length > 0
+      ? priorResult.packetId.trim()
+      : null;
+    if (!packetId) {
+      continue;
+    }
+
+    const metadata = {};
+    if (typeof priorResult.role === "string" && priorResult.role.trim().length > 0) {
+      metadata.role = priorResult.role.trim();
+    }
+    if (
+      typeof priorResult.status === "string"
+      && CONTEXT_RESULT_STATUS_SET.has(priorResult.status.trim())
+    ) {
+      metadata.status = priorResult.status.trim();
+    }
+    metadata.hasRecon = hasOwn(priorResult, "recon") && priorResult.recon !== undefined;
+    metadataByReference.set(packetId, metadata);
+  }
+  return metadataByReference;
+}
+
+function buildReviewResultMetadata(reviewResult) {
+  if (!reviewResult || typeof reviewResult !== "object" || Array.isArray(reviewResult)) {
+    return new Map();
+  }
+
+  const metadata = {};
+  if (
+    typeof reviewResult.status === "string"
+    && CONTEXT_RESULT_STATUS_SET.has(reviewResult.status.trim())
+  ) {
+    metadata.status = reviewResult.status.trim();
+  }
+
+  return new Map([
+    ["review_result", metadata]
+  ]);
+}
+
+function buildChangedSurfaceMetadataByReference(changedSurfaceContext) {
+  const metadataByReference = new Map();
+  for (const entry of changedSurfaceContext) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      continue;
+    }
+    const packetId = typeof entry.packetId === "string" && entry.packetId.trim().length > 0
+      ? entry.packetId.trim()
+      : null;
+    const role = typeof entry.role === "string" && entry.role.trim().length > 0
+      ? entry.role.trim()
+      : null;
+    if (!packetId || !role) {
+      continue;
+    }
+    const paths = Array.isArray(entry.paths) ? entry.paths : [];
+    metadataByReference.set(`${packetId}:${role}`, {
+      role,
+      pathCount: paths.length
+    });
+  }
+  return metadataByReference;
+}
+
+function assertEntryMetadataMatchesExpected(entry, expectedMetadata, {
+  fieldName
+} = {}) {
+  if (entry.metadata === undefined) {
+    return;
+  }
+  assert(
+    expectedMetadata && typeof expectedMetadata === "object",
+    `${fieldName}.metadata references payload metadata that is not present`
+  );
+
+  for (const [key, value] of Object.entries(entry.metadata)) {
+    assert(
+      hasOwn(expectedMetadata, key),
+      `${fieldName}.metadata.${key} is not available for ${entry.kind}:${entry.reference}`
+    );
+    assert(
+      expectedMetadata[key] === value,
+      `${fieldName}.metadata.${key} must match ${entry.kind}:${entry.reference} payload metadata`
+    );
+  }
+}
+
+function assertContextManifestMetadataMatchesPayload({
+  normalizedManifest,
+  normalizedPacketContextFiles,
+  priorResults,
+  reviewResult,
+  changedSurfaceContext,
+  fieldName
+}) {
+  const metadataByKindReference = new Map();
+  for (const [reference, metadata] of buildContextFileMetadataByReference(normalizedPacketContextFiles)) {
+    metadataByKindReference.set(metadataReferenceKey(CONTEXT_MANIFEST_KIND.CONTEXT_FILE, reference), metadata);
+  }
+  for (const [reference, metadata] of buildPriorResultMetadataByReference(priorResults)) {
+    metadataByKindReference.set(metadataReferenceKey(CONTEXT_MANIFEST_KIND.PRIOR_RESULT, reference), metadata);
+  }
+  for (const [reference, metadata] of buildReviewResultMetadata(reviewResult)) {
+    metadataByKindReference.set(metadataReferenceKey(CONTEXT_MANIFEST_KIND.REVIEW_RESULT, reference), metadata);
+  }
+  for (const [reference, metadata] of buildChangedSurfaceMetadataByReference(changedSurfaceContext)) {
+    metadataByKindReference.set(metadataReferenceKey(CONTEXT_MANIFEST_KIND.CHANGED_SURFACE, reference), metadata);
+  }
+
+  normalizedManifest.forEach((entry, index) => {
+    assertEntryMetadataMatchesExpected(
+      entry,
+      metadataByKindReference.get(metadataReferenceKey(entry.kind, entry.reference)),
+      {
+        fieldName: `${fieldName}[${index}]`
+      }
+    );
+  });
 }
 
 function assertContextPayloadWithinBudgetCaps({
@@ -1261,6 +1720,14 @@ export function validateRunContext({
     repositoryRoot: normalizedRepositoryRoot,
     fieldName: `${fieldName}.packetContextFiles`
   });
+  assertContextManifestMetadataMatchesPayload({
+    normalizedManifest,
+    normalizedPacketContextFiles,
+    priorResults,
+    reviewResult: normalizedReviewResult,
+    changedSurfaceContext,
+    fieldName: `${fieldName}.contextManifest`
+  });
   const expectedContextFileEntries = buildPacketContextManifest(normalizedPacketContextFiles);
   const expectedPriorResultEntries = buildPriorResultContextManifest(
     priorResultReferences.map((packetId) => ({ packetId }))
@@ -1297,15 +1764,24 @@ export function validateRunContext({
   };
 }
 
-export function buildPacketContextManifest(contextFiles = []) {
+export function buildPacketContextManifest(contextFiles = [], {
+  includeMetadata = false
+} = {}) {
   const entries = normalizePacketContextFileReferences(contextFiles, {
     fieldName: "contextFiles"
   })
-    .map((reference) => ({
+    .map((reference, index) => ({
       kind: CONTEXT_MANIFEST_KIND.CONTEXT_FILE,
       source: CONTEXT_MANIFEST_SOURCE.PACKET_CONTEXT_FILES,
       reference,
-      reason: CONTEXT_MANIFEST_REASON.EXPLICIT_REQUEST
+      reason: CONTEXT_MANIFEST_REASON.EXPLICIT_REQUEST,
+      ...(includeMetadata
+        ? {
+          metadata: {
+            inputIndex: index
+          }
+        }
+        : {})
     }));
 
   return mergeContextManifestEntries(entries);
@@ -1344,25 +1820,48 @@ export function resolvePacketContextManifest({
   return canonicalEntries;
 }
 
-export function buildPriorResultContextManifest(priorResults = []) {
+function buildPriorResultManifestMetadata(priorResult) {
+  const metadata = {};
+  if (typeof priorResult?.role === "string" && priorResult.role.trim().length > 0) {
+    metadata.role = priorResult.role.trim();
+  }
+  if (
+    typeof priorResult?.status === "string"
+    && CONTEXT_RESULT_STATUS_SET.has(priorResult.status.trim())
+  ) {
+    metadata.status = priorResult.status.trim();
+  }
+  metadata.hasRecon = hasOwn(priorResult ?? {}, "recon") && priorResult.recon !== undefined;
+  return metadata;
+}
+
+export function buildPriorResultContextManifest(priorResults = [], {
+  includeMetadata = false
+} = {}) {
   if (!Array.isArray(priorResults)) {
     return [];
   }
 
   const entries = priorResults
-    .map((priorResult) => priorResult?.packetId)
-    .filter((packetId) => typeof packetId === "string" && packetId.trim().length > 0)
-    .map((packetId) => ({
+    .filter((priorResult) => typeof priorResult?.packetId === "string" && priorResult.packetId.trim().length > 0)
+    .map((priorResult) => ({
       kind: CONTEXT_MANIFEST_KIND.PRIOR_RESULT,
       source: CONTEXT_MANIFEST_SOURCE.WORKFLOW_PRIOR_RUNS,
-      reference: packetId,
-      reason: CONTEXT_MANIFEST_REASON.EXECUTION_HISTORY
+      reference: priorResult.packetId,
+      reason: CONTEXT_MANIFEST_REASON.EXECUTION_HISTORY,
+      ...(includeMetadata
+        ? {
+          metadata: buildPriorResultManifestMetadata(priorResult)
+        }
+        : {})
     }));
 
   return mergeContextManifestEntries(entries);
 }
 
-export function buildReviewResultContextManifest(reviewResult) {
+export function buildReviewResultContextManifest(reviewResult, {
+  includeMetadata = false
+} = {}) {
   if (!reviewResult) {
     return [];
   }
@@ -1372,23 +1871,69 @@ export function buildReviewResultContextManifest(reviewResult) {
       kind: CONTEXT_MANIFEST_KIND.REVIEW_RESULT,
       source: CONTEXT_MANIFEST_SOURCE.REPAIR_REVIEW,
       reference: "review_result",
-      reason: CONTEXT_MANIFEST_REASON.REPAIR_CONTEXT
+      reason: CONTEXT_MANIFEST_REASON.REPAIR_CONTEXT,
+      ...(includeMetadata && typeof reviewResult.status === "string"
+        ? {
+          metadata: {
+            status: reviewResult.status
+          }
+        }
+        : {})
     }
   ]);
 }
 
-export function buildChangedSurfaceContextManifest(changedSurfaceReferences = []) {
+function normalizeChangedSurfaceManifestInput(entry) {
+  if (typeof entry === "string" && entry.trim().length > 0) {
+    return {
+      reference: entry.trim(),
+      metadata: undefined
+    };
+  }
+
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+    return null;
+  }
+
+  const packetId = typeof entry.packetId === "string" && entry.packetId.trim().length > 0
+    ? entry.packetId.trim()
+    : null;
+  const role = typeof entry.role === "string" && entry.role.trim().length > 0
+    ? entry.role.trim()
+    : null;
+  if (!packetId || !role) {
+    return null;
+  }
+
+  return {
+    reference: `${packetId}:${role}`,
+    metadata: {
+      role,
+      pathCount: Array.isArray(entry.paths) ? entry.paths.length : 0
+    }
+  };
+}
+
+export function buildChangedSurfaceContextManifest(changedSurfaceReferences = [], {
+  includeMetadata = false
+} = {}) {
   if (!Array.isArray(changedSurfaceReferences)) {
     return [];
   }
 
   const entries = changedSurfaceReferences
-    .filter((reference) => typeof reference === "string" && reference.trim().length > 0)
-    .map((reference) => ({
+    .map((entry) => normalizeChangedSurfaceManifestInput(entry))
+    .filter(Boolean)
+    .map((entry) => ({
       kind: CONTEXT_MANIFEST_KIND.CHANGED_SURFACE,
       source: CONTEXT_MANIFEST_SOURCE.TRUSTED_CHANGED_SURFACE,
-      reference,
-      reason: CONTEXT_MANIFEST_REASON.CHANGED_SCOPE_CARRY_FORWARD
+      reference: entry.reference,
+      reason: CONTEXT_MANIFEST_REASON.CHANGED_SCOPE_CARRY_FORWARD,
+      ...(includeMetadata && entry.metadata
+        ? {
+          metadata: entry.metadata
+        }
+        : {})
     }));
 
   return mergeContextManifestEntries(entries);

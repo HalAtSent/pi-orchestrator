@@ -145,6 +145,67 @@ function collectValidationArtifacts(buildSession) {
   return Array.isArray(validationArtifacts) ? validationArtifacts : [];
 }
 
+function collectContractRunEvidenceEntries(runJournal) {
+  const runEntries = Array.isArray(runJournal?.contractRuns) ? runJournal.contractRuns : [];
+  return runEntries.flatMap((runEntry) => (
+    Array.isArray(runEntry?.evidence) ? runEntry.evidence : []
+  )).map((entry) => normalizeNonEmptyString(entry)).filter(Boolean);
+}
+
+function collectVerificationPlanningEvidence(runJournal) {
+  const evidenceEntries = collectContractRunEvidenceEntries(runJournal);
+  const selectedChecks = [];
+  const skippedCandidates = [];
+  const requiredNotRun = [];
+  const confidence = [];
+
+  for (const entry of evidenceEntries) {
+    if (entry.startsWith("verification_selected_check:")) {
+      selectedChecks.push(entry.slice("verification_selected_check:".length).trim());
+      continue;
+    }
+    if (entry.startsWith("verification_skipped_candidate:")) {
+      skippedCandidates.push(entry.slice("verification_skipped_candidate:".length).trim());
+      continue;
+    }
+    if (entry.startsWith("verification_required_not_run:")) {
+      requiredNotRun.push(entry.slice("verification_required_not_run:".length).trim());
+      continue;
+    }
+    if (entry.startsWith("verification_plan_confidence:")) {
+      confidence.push(entry.slice("verification_plan_confidence:".length).trim());
+    }
+  }
+
+  return {
+    selectedChecks: uniqueStrings(selectedChecks),
+    skippedCandidates: uniqueStrings(skippedCandidates),
+    requiredNotRun: uniqueStrings(requiredNotRun),
+    confidence: uniqueStrings(confidence)
+  };
+}
+
+function collectSpecDriftEvidence(runJournal) {
+  const evidenceEntries = collectContractRunEvidenceEntries(runJournal);
+  const outcomes = [];
+  const signals = [];
+
+  for (const entry of evidenceEntries) {
+    if (entry.startsWith("spec_drift_outcome:")) {
+      outcomes.push(entry.slice("spec_drift_outcome:".length).trim());
+      continue;
+    }
+    if (entry.startsWith("spec_drift_signal:")) {
+      signals.push(entry.slice("spec_drift_signal:".length).trim());
+    }
+  }
+
+  return {
+    outcomes: uniqueStrings(outcomes),
+    signals: uniqueStrings(signals)
+  };
+}
+
 function collectRunOpenQuestions(runJournal) {
   if (!runJournal || !Array.isArray(runJournal.contractRuns)) {
     return [];
@@ -318,6 +379,22 @@ function formatProofCollected(buildSession, runJournal) {
     }
   }
 
+  const verificationPlanning = collectVerificationPlanningEvidence(runJournal);
+  if (
+    verificationPlanning.selectedChecks.length > 0 ||
+    verificationPlanning.skippedCandidates.length > 0 ||
+    verificationPlanning.confidence.length > 0
+  ) {
+    proofNotes.push(
+      `Verification planning recorded ${verificationPlanning.selectedChecks.length} selected check(s), ${verificationPlanning.skippedCandidates.length} skipped candidate(s), confidence ${formatListPreview(verificationPlanning.confidence, { fallback: "unknown" })}.`
+    );
+  }
+
+  const specDrift = collectSpecDriftEvidence(runJournal);
+  if (specDrift.outcomes.length > 0) {
+    proofNotes.push(`Spec drift check outcome: ${formatListPreview(specDrift.outcomes)}.`);
+  }
+
   const validationArtifacts = collectValidationArtifacts(buildSession);
   if (validationArtifacts.length === 0) {
     proofNotes.push("No validation artifacts are persisted.");
@@ -380,6 +457,21 @@ function formatUnprovenClaims(buildSession, runJournal) {
     );
   }
 
+  const verificationPlanning = collectVerificationPlanningEvidence(runJournal);
+  if (verificationPlanning.requiredNotRun.length > 0) {
+    claims.push(
+      `Required verification checks were not run: ${formatListPreview(verificationPlanning.requiredNotRun, { max: 4 })}.`
+    );
+  }
+
+  const specDrift = collectSpecDriftEvidence(runJournal);
+  const nonCleanDriftOutcomes = specDrift.outcomes.filter((outcome) => outcome !== "none_detected");
+  if (nonCleanDriftOutcomes.length > 0) {
+    claims.push(
+      `Spec drift outcome is ${formatListPreview(nonCleanDriftOutcomes, { max: 3 })}; reviewability is blocked until this is reconciled.`
+    );
+  }
+
   const runEntries = Array.isArray(runJournal?.contractRuns) ? runJournal.contractRuns : [];
   if (runEntries.length === 0 && (
     executionStatus === "running"
@@ -426,6 +518,133 @@ function formatUnprovenClaims(buildSession, runJournal) {
   }
 
   return claims.join(" ");
+}
+
+function collectReviewPackChangedFiles(buildSession, runJournal) {
+  const changedSurfaceEvidence = collectRunChangedSurfaceEvidence(runJournal);
+  if (changedSurfaceEvidence.observedPaths.length > 0) {
+    const qualifier = changedSurfaceEvidence.allComplete ? "observed" : "partially observed";
+    return `${qualifier}: ${formatListPreview(changedSurfaceEvidence.observedPaths)}`;
+  }
+
+  const plannedScopePaths = collectContractScopePaths(collectExecutionProgramContracts(buildSession));
+  if (plannedScopePaths.length > 0) {
+    return `not captured; planned scope: ${formatListPreview(plannedScopePaths)}`;
+  }
+
+  return "not captured";
+}
+
+function extractLegacyCommandEvidence(evidenceEntry) {
+  const normalized = normalizeNonEmptyString(evidenceEntry);
+  if (!normalized) {
+    return null;
+  }
+
+  const match = /^run\s+[^:]+\s+command:\s*(.+)$/iu.exec(normalized);
+  if (!match) {
+    return null;
+  }
+
+  return normalizeNonEmptyString(match[1]);
+}
+
+function collectReviewPackCommands(runJournal) {
+  const entries = Array.isArray(runJournal?.contractRuns) ? runJournal.contractRuns : [];
+  const commands = [];
+
+  for (const entry of entries) {
+    if (Array.isArray(entry?.commandObservations)) {
+      for (const observation of entry.commandObservations) {
+        const command = normalizeNonEmptyString(observation?.command);
+        if (command) {
+          commands.push(command);
+        }
+      }
+      continue;
+    }
+
+    const evidence = Array.isArray(entry?.evidence) ? entry.evidence : [];
+    for (const evidenceEntry of evidence) {
+      const command = extractLegacyCommandEvidence(evidenceEntry);
+      if (command) {
+        commands.push(command);
+      }
+    }
+  }
+
+  return uniqueStrings(commands);
+}
+
+function collectReviewPackClaims(runJournal) {
+  const entries = Array.isArray(runJournal?.contractRuns) ? runJournal.contractRuns : [];
+  const claims = entries.flatMap((entry) => (
+    Array.isArray(entry?.claimLedger) ? entry.claimLedger : []
+  ));
+  const proven = claims.filter((claim) => normalizeNonEmptyString(claim?.status) === "proven");
+  const unproven = claims.filter((claim) => {
+    const status = normalizeNonEmptyString(claim?.status);
+    return status === "partial" || status === "unproven";
+  });
+
+  return {
+    hasLedger: claims.length > 0,
+    proven,
+    unproven
+  };
+}
+
+function formatClaimPreview(claims, { fallback }) {
+  if (!Array.isArray(claims) || claims.length === 0) {
+    return fallback;
+  }
+
+  const labels = claims.map((claim) => {
+    const id = normalizeNonEmptyString(claim?.id) ?? "unknown-claim";
+    const status = normalizeNonEmptyString(claim?.status);
+    const reason = normalizeNonEmptyString(claim?.reason);
+    if (reason && status !== "proven") {
+      return `${id} (${status}: ${reason})`;
+    }
+    return id;
+  });
+
+  return formatListPreview(labels, {
+    max: 5,
+    fallback
+  });
+}
+
+function collectReviewabilityStatus(buildSession, runJournal) {
+  const reviewability = runJournal?.reviewability ?? buildSession?.execution?.reviewability ?? null;
+  const status = normalizeNonEmptyString(reviewability?.status);
+  const reasons = Array.isArray(reviewability?.reasons)
+    ? uniqueStrings(reviewability.reasons.map((reason) => normalizeNonEmptyString(reason)).filter(Boolean))
+    : [];
+  if (!status) {
+    return "not captured";
+  }
+  return reasons.length > 0
+    ? `${status} (${formatListPreview(reasons, { max: 4 })})`
+    : status;
+}
+
+export function formatCompactReviewPack(buildSession, { runJournal = null } = {}) {
+  const commands = collectReviewPackCommands(runJournal);
+  const claimSummary = collectReviewPackClaims(runJournal);
+  const unprovenFallback = claimSummary.hasLedger
+    ? "none"
+    : formatUnprovenClaims(buildSession, runJournal);
+
+  return [
+    "Compact Review Pack",
+    `Changed files: ${collectReviewPackChangedFiles(buildSession, runJournal)}`,
+    `Commands run: ${formatListPreview(commands, { fallback: "none captured" })}`,
+    `Proven claims: ${formatClaimPreview(claimSummary.proven, { fallback: claimSummary.hasLedger ? "none" : "no typed claim ledger captured" })}`,
+    `Unproven claims: ${formatClaimPreview(claimSummary.unproven, { fallback: unprovenFallback })}`,
+    `Reviewability status: ${collectReviewabilityStatus(buildSession, runJournal)}`,
+    `Next human decision: ${formatBuildSessionNextAction(buildSession)}`
+  ].join("\n");
 }
 
 function formatRequestedOutcome(buildSession) {
@@ -515,7 +734,8 @@ const REVIEWABILITY_REASON_LABELS = Object.freeze({
   missing_stop_reason: "Terminal stop reason is missing.",
   missing_stop_reason_code: "Terminal stop reason code is missing.",
   provider_model_evidence_missing: "Provider/model evidence is incomplete for a model-backed success path.",
-  provider_model_evidence_requirement_unknown: "Current code cannot decide whether provider/model evidence was required."
+  provider_model_evidence_requirement_unknown: "Current code cannot decide whether provider/model evidence was required.",
+  required_claims_unproven: "At least one required typed claim is partial or unproven."
 });
 
 function formatReviewability(buildSession, runJournal) {
@@ -693,6 +913,7 @@ export function formatOperatorBuildSessionStatus(buildSession, { runJournal = nu
   const actualOutcome = formatActualOutcome(buildSession, runJournal);
   const unprovenClaims = formatUnprovenClaims(buildSession, runJournal);
   const nextStep = formatBuildSessionNextAction(buildSession);
+  const compactReviewPack = formatCompactReviewPack(buildSession, { runJournal });
 
   return [
     "Build Session",
@@ -706,6 +927,7 @@ export function formatOperatorBuildSessionStatus(buildSession, { runJournal = nu
         ...(nextStep ? [`next step: ${nextStep}`] : [])
       ]
       : []),
+    compactReviewPack,
     `Goal: ${buildSession.intake.goal}`,
     `Approval: ${formatApprovalState(buildSession.approval)}`,
     `Plan fingerprint: ${buildSession.planFingerprint ?? "not captured"}`,

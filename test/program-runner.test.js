@@ -67,6 +67,12 @@ function trustProcessBackend(backend) {
   };
 }
 
+const REQUIRED_FIXTURE_VERIFICATION_COMMANDS = Object.freeze([
+  "Review the changed files against the declared scope paths.",
+  "Run the smallest targeted verification commands that exercise the contract outputs.",
+  "Record any remaining uncertainty explicitly."
+]);
+
 function createPersistedRunJournal(program, {
   status,
   stopReason,
@@ -199,6 +205,97 @@ test("runExecutionProgram blocks protected contract scope paths before contract 
       assert.match(journal.stopReason, /protected path/i);
       assert.equal(executedContracts, 0);
     }
+  });
+});
+
+test("terminal blocked and failed journals persist deterministic failure classes", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const cases = [
+      {
+        status: "blocked",
+        summary: "Approval required before running the local command.",
+        expectedFailureClass: "approval_required",
+        expectFixtureRecommendation: false
+      },
+      {
+        status: "failed",
+        summary: "process worker failed: launcher timed out",
+        expectedFailureClass: "model_or_runtime_unavailable",
+        expectFixtureRecommendation: true
+      }
+    ];
+
+    for (const testCase of cases) {
+      const sourceProgram = buildProgram();
+      const program = {
+        ...sourceProgram,
+        id: `${sourceProgram.id}-${testCase.expectedFailureClass}`,
+        contracts: [sourceProgram.contracts[0]]
+      };
+      const runStore = createRunStore({ rootDir });
+
+      const journal = await runExecutionProgram(program, {
+        contractExecutor: async () => ({
+          status: testCase.status,
+          summary: testCase.summary,
+          evidence: [],
+          openQuestions: []
+        }),
+        runStore
+      });
+
+      assert.equal(journal.status, testCase.status);
+      assert.equal(journal.failureClass, testCase.expectedFailureClass);
+      assert.equal(journal.contractRuns[0].failureClass, testCase.expectedFailureClass);
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(journal, "fixtureRecommendation"),
+        testCase.expectFixtureRecommendation
+      );
+      if (testCase.expectFixtureRecommendation) {
+        assert.equal(journal.fixtureRecommendation.autoCreate, false);
+        assert.equal(journal.fixtureRecommendation.targetDirectory, "test/fixtures");
+      }
+
+      const persisted = await runStore.loadRun(program.id);
+      assert.equal(persisted.failureClass, testCase.expectedFailureClass);
+      assert.equal(persisted.runJournal.failureClass, testCase.expectedFailureClass);
+      assert.equal(persisted.runJournal.contractRuns[0].failureClass, testCase.expectedFailureClass);
+    }
+  });
+});
+
+test("legacy records without failure class still load with inferred classification", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const sourceProgram = buildProgram();
+    const program = {
+      ...sourceProgram,
+      contracts: [sourceProgram.contracts[0]]
+    };
+    const runStore = createRunStore({ rootDir });
+
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: createPersistedRunJournal(program, {
+        status: "blocked",
+        stopReason: "Contract executor returned an invalid result: malformed output",
+        contractRuns: [
+          {
+            contractId: program.contracts[0].id,
+            status: "blocked",
+            summary: "Contract executor returned an invalid result: malformed output",
+            evidence: [],
+            openQuestions: []
+          }
+        ],
+        completedContractIds: []
+      })
+    });
+
+    const loaded = await runStore.loadRun(program.id);
+    assert.equal(loaded.failureClass, "worker_output_invalid");
+    assert.equal(loaded.runJournal.failureClass, "worker_output_invalid");
+    assert.equal(loaded.runJournal.contractRuns[0].failureClass, "worker_output_invalid");
   });
 });
 
@@ -526,6 +623,102 @@ test("runExecutionProgram redacts absolute paths in persisted review-finding mes
     assert.equal(persistedFindingMessage.includes(externalAbsolutePath), false);
     assert.equal(persistedFindingMessage.includes("<absolute_path>"), true);
     assert.equal(persisted.runJournal.contractRuns[0].reviewFindings[0].path, "src/helpers.js");
+  });
+});
+
+test("runExecutionProgram redacts typed claim surfaces before persistence", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    const repoAbsolutePath = join(rootDir, "src", "typed-claim.js");
+    const externalAbsolutePath = process.platform === "win32"
+      ? "D:\\outside\\typed-claim.txt"
+      : "/opt/outside/typed-claim.txt";
+
+    const journal = await runExecutionProgram(program, {
+      contractExecutor: async (contract) => ({
+        status: "success",
+        summary: `Executed ${contract.id}.`,
+        evidence: [],
+        acceptanceArtifact: {
+          status: "satisfied",
+          items: [
+            {
+              id: `${contract.id}:acceptance_check:1`,
+              type: "acceptance_check",
+              text: `Accepted after inspecting ${repoAbsolutePath}.`,
+              required: true
+            }
+          ]
+        },
+        claimLedger: [
+          {
+            id: `${contract.id}:acceptance_check:1`,
+            type: "acceptance_check",
+            text: `Scoped behavior in ${repoAbsolutePath} is verified.`,
+            status: "proven",
+            evidenceSummary: `Verification read ${externalAbsolutePath}.`
+          },
+          {
+            id: `${contract.id}:non_goal:1`,
+            type: "non_goal",
+            text: `No edits were made outside ${repoAbsolutePath}.`,
+            status: "unproven",
+            reason: `Changed-file capture did not include ${externalAbsolutePath}.`
+          }
+        ],
+        traceability: {
+          requirementChecks: [
+            {
+              id: `${contract.id}:acceptance_check:1`,
+              type: "acceptance_check",
+              text: `Traceability references ${repoAbsolutePath}.`,
+              claimIds: [`${contract.id}:acceptance_check:1`],
+              changedFilesKnown: true,
+              changedFiles: ["src/helpers.js"],
+              validationEvidenceKnown: true,
+              validationEvidenceRefs: ["run:verifier:commandsRun[0]"]
+            }
+          ],
+          nonGoals: [
+            {
+              id: `${contract.id}:non_goal:1`,
+              text: `Non-goal evidence mentions ${repoAbsolutePath}.`,
+              preservationStatus: "unproven",
+              claimIds: [`${contract.id}:non_goal:1`],
+              changedFiles: ["src/helpers.js"],
+              evidenceRefs: [],
+              reason: `Review ${externalAbsolutePath} before release.`
+            }
+          ]
+        },
+        openQuestions: []
+      }),
+      runStore
+    });
+
+    const firstJournalEntry = journal.contractRuns[0];
+    const typedSurfaces = JSON.stringify({
+      acceptanceArtifact: firstJournalEntry.acceptanceArtifact,
+      claimLedger: firstJournalEntry.claimLedger,
+      traceability: firstJournalEntry.traceability
+    });
+    assert.equal(typedSurfaces.includes(repoAbsolutePath), false);
+    assert.equal(typedSurfaces.includes(externalAbsolutePath), false);
+    assert.equal(typedSurfaces.includes("src/typed-claim.js"), true);
+    assert.equal(typedSurfaces.includes("<absolute_path>"), true);
+    assert.equal(firstJournalEntry.redaction.applied, true);
+    assert.equal(firstJournalEntry.redaction.repoPathRewrites > 0, true);
+    assert.equal(firstJournalEntry.redaction.externalPathRewrites > 0, true);
+
+    const persisted = await runStore.loadRun(program.id);
+    const persistedTypedSurfaces = JSON.stringify({
+      acceptanceArtifact: persisted.runJournal.contractRuns[0].acceptanceArtifact,
+      claimLedger: persisted.runJournal.contractRuns[0].claimLedger,
+      traceability: persisted.runJournal.contractRuns[0].traceability
+    });
+    assert.equal(persistedTypedSurfaces.includes(repoAbsolutePath), false);
+    assert.equal(persistedTypedSurfaces.includes(externalAbsolutePath), false);
   });
 });
 
@@ -879,7 +1072,7 @@ test("runExecutionProgram does not persist provider/model trust from self-attest
           status: "success",
           summary: "Verifier step completed.",
           changedFiles: [],
-          commandsRun: ["node --test"],
+          commandsRun: [...REQUIRED_FIXTURE_VERIFICATION_COMMANDS],
           evidence: ["verifier succeeded"],
           openQuestions: [],
           providerModelSelection: {
@@ -896,7 +1089,10 @@ test("runExecutionProgram does not persist provider/model trust from self-attest
       processBackend,
       mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
     });
-    const contractExecutor = createProgramContractExecutor({ runner });
+    const contractExecutor = createProgramContractExecutor({
+      runner,
+      approvedHighRisk: true
+    });
 
     const journal = await runExecutionProgram(program, {
       contractExecutor,
@@ -979,7 +1175,7 @@ test("runExecutionProgram keeps scope ownership unknown for self-attested change
           status: "success",
           summary: "Verifier step completed.",
           changedFiles: [],
-          commandsRun: ["node --test"],
+          commandsRun: [...REQUIRED_FIXTURE_VERIFICATION_COMMANDS],
           evidence: ["verifier succeeded"],
           openQuestions: []
         })
@@ -990,7 +1186,10 @@ test("runExecutionProgram keeps scope ownership unknown for self-attested change
       processBackend,
       mode: AUTO_BACKEND_MODES.PROCESS_SUBAGENTS
     });
-    const contractExecutor = createProgramContractExecutor({ runner });
+    const contractExecutor = createProgramContractExecutor({
+      runner,
+      approvedHighRisk: true
+    });
 
     const journal = await runExecutionProgram(program, {
       contractExecutor,

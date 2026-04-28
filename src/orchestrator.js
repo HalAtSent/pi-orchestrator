@@ -5,7 +5,9 @@ import {
   defaultAcceptanceChecks,
   defaultStopConditions,
   isProtectedPath,
-  requiresHumanGate
+  laneRequiresIndependentReview,
+  requiresHumanGate,
+  resolveTaskLane
 } from "./policies.js";
 import { buildPacketContextManifest } from "./context-manifest.js";
 
@@ -53,7 +55,11 @@ function validateScopeConfig({ allowedFiles = [], forbiddenFiles = [] }) {
   }
 }
 
-export function makeRoleSequence(risk) {
+export function makeRoleSequence(risk, lane = null) {
+  if (lane !== null && laneRequiresIndependentReview(lane)) {
+    return ["explorer", "implementer", "reviewer", "verifier"];
+  }
+
   if (risk === "high") {
     return ["explorer", "implementer", "reviewer", "verifier"];
   }
@@ -69,6 +75,7 @@ function roleNonGoals(role) {
   if (role === "explorer") {
     return [
       "Do not edit files.",
+      "Do not treat reconnaissance as permission to widen scope.",
       "Do not propose broad refactors.",
       "Do not speculate when the code does not support a claim."
     ];
@@ -115,7 +122,7 @@ function roleCommands(role) {
 
 function roleGoal(goal, role) {
   if (role === "explorer") {
-    return `Inspect the scoped codebase context for this task and report what the implementer should change: ${goal}`;
+    return `Inspect the scoped codebase context for this task, produce read-only reconnaissance, and report what the implementer should change: ${goal}`;
   }
 
   if (role === "reviewer") {
@@ -129,18 +136,25 @@ function roleGoal(goal, role) {
   return goal;
 }
 
-export function buildTaskPacket({
-  goal,
-  role,
-  allowedFiles = [],
-  forbiddenFiles = [],
-  parentTaskId,
-  risk,
-  contextFiles = []
-}) {
+export function buildTaskPacket(input) {
+  const {
+    goal,
+    role,
+    allowedFiles = [],
+    forbiddenFiles = [],
+    parentTaskId,
+    risk,
+    contextFiles = []
+  } = input;
   const normalizedAllowedFiles = unique(normalizeFiles(allowedFiles));
   const normalizedForbiddenFiles = unique(normalizeFiles(forbiddenFiles));
   const normalizedContextFiles = normalizeFiles(contextFiles);
+  const lane = resolveTaskLane({
+    goal,
+    allowedFiles: normalizedAllowedFiles,
+    lane: input.lane,
+    hasUserSuppliedLane: Object.prototype.hasOwnProperty.call(input, "lane")
+  });
   validateScopeConfig({
     allowedFiles: normalizedAllowedFiles,
     forbiddenFiles: normalizedForbiddenFiles
@@ -152,24 +166,26 @@ export function buildTaskPacket({
     parentTaskId,
     role,
     risk,
+    lane,
     goal: roleGoal(goal, role),
     nonGoals: roleNonGoals(role),
     allowedFiles: normalizedAllowedFiles,
     forbiddenFiles: normalizedForbiddenFiles,
-    acceptanceChecks: defaultAcceptanceChecks(risk),
-    stopConditions: defaultStopConditions(risk),
+    acceptanceChecks: defaultAcceptanceChecks(risk, lane),
+    stopConditions: defaultStopConditions(risk, lane),
     contextFiles: normalizedContextFiles,
     contextManifest: buildPacketContextManifest(normalizedContextFiles),
     commands: roleCommands(role)
   });
 }
 
-export function createInitialWorkflow({
-  goal,
-  allowedFiles = [],
-  forbiddenFiles = [],
-  contextFiles = []
-}) {
+export function createInitialWorkflow(input) {
+  const {
+    goal,
+    allowedFiles = [],
+    forbiddenFiles = [],
+    contextFiles = []
+  } = input;
   const normalizedAllowedFiles = unique(normalizeFiles(allowedFiles));
   const normalizedForbiddenFiles = unique(normalizeFiles(forbiddenFiles));
   validateScopeConfig({
@@ -177,8 +193,14 @@ export function createInitialWorkflow({
     forbiddenFiles: normalizedForbiddenFiles
   });
   const risk = classifyRisk({ goal, allowedFiles: normalizedAllowedFiles });
-  const roleSequence = makeRoleSequence(risk);
-  const humanGate = requiresHumanGate({ goal, allowedFiles: normalizedAllowedFiles });
+  const lane = resolveTaskLane({
+    goal,
+    allowedFiles: normalizedAllowedFiles,
+    lane: input.lane,
+    hasUserSuppliedLane: Object.prototype.hasOwnProperty.call(input, "lane")
+  });
+  const roleSequence = makeRoleSequence(risk, lane);
+  const humanGate = risk === "high" || requiresHumanGate({ goal, allowedFiles: normalizedAllowedFiles, lane });
   const workflowId = `workflow-${slugify(goal) || "task"}`;
 
   const packets = roleSequence.map((role) => buildTaskPacket({
@@ -188,6 +210,7 @@ export function createInitialWorkflow({
     forbiddenFiles: normalizedForbiddenFiles,
     parentTaskId: workflowId,
     risk,
+    lane,
     contextFiles
   }));
 
@@ -195,6 +218,7 @@ export function createInitialWorkflow({
     workflowId,
     goal,
     risk,
+    lane,
     humanGate,
     roleSequence,
     packets

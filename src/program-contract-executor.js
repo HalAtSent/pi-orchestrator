@@ -3,12 +3,15 @@ import { parseBooleanFlag } from "./boolean-flags.js";
 import { compileExecutionContract } from "./program-compiler.js";
 import {
   derivePlannedActionClassesFromWorkflow,
+  normalizeAcceptanceArtifact,
   normalizeChangedSurface,
   normalizeChangedSurfaceObservation,
+  normalizeClaimLedger,
   deriveCommandObservationsFromCommands,
   normalizeProviderModelSelection,
   normalizeReviewFindings,
-  normalizeScopeOwnership
+  normalizeScopeOwnership,
+  normalizeTraceability
 } from "./run-evidence.js";
 import {
   evaluatePolicyDecision,
@@ -16,6 +19,14 @@ import {
   normalizePolicyProfileId,
   POLICY_ENFORCED_ACTION_CLASSES
 } from "./policy-profiles.js";
+import {
+  buildVerificationPlan,
+  detectSpecDrift,
+  evaluateVerificationPlanRun,
+  formatSpecDriftEvidence,
+  formatVerificationPlanEvidence,
+  isCommandLikeVerificationEntry
+} from "./verification-planner.js";
 import { isPathWithinScope } from "./path-scopes.js";
 import { truncateBoundaryString } from "./redaction.js";
 import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
@@ -42,7 +53,9 @@ function unique(values) {
 function toBlockedContractResult(contractId, reason, {
   evidence = [],
   openQuestions = [],
-  policyDecision = null
+  policyDecision = null,
+  contract = null,
+  compiledPlan = null
 } = {}) {
   const result = {
     status: "blocked",
@@ -59,7 +72,20 @@ function toBlockedContractResult(contractId, reason, {
     result.policyDecision = policyDecision;
   }
 
-  return result;
+  return {
+    ...result,
+    ...createContractReviewArtifacts({
+      contractId,
+      contract,
+      compiledPlan,
+      status: result.status,
+      execution: null,
+      changedSurface: result.changedSurface,
+      scopeOwnership: null,
+      missingVerificationCommands: [],
+      specDrift: null
+    })
+  };
 }
 
 function normalizeContractStatus(status) {
@@ -128,14 +154,6 @@ function normalizeCommandText(command) {
   return typeof command === "string" ? command.trim() : "";
 }
 
-function getRequiredVerificationCommands(compiledPlan) {
-  return unique(
-    (Array.isArray(compiledPlan?.verificationPlan) ? compiledPlan.verificationPlan : [])
-      .map(normalizeCommandText)
-      .filter((command) => command.length > 0)
-  );
-}
-
 function getVerifierCommandsRun(execution) {
   return unique(
     (Array.isArray(execution?.runs) ? execution.runs : [])
@@ -146,17 +164,7 @@ function getVerifierCommandsRun(execution) {
   );
 }
 
-function findMissingVerificationCommands(compiledPlan, execution) {
-  const requiredCommands = getRequiredVerificationCommands(compiledPlan);
-  if (requiredCommands.length === 0) {
-    return [];
-  }
-
-  const verifierCommandsRun = new Set(getVerifierCommandsRun(execution));
-  return requiredCommands.filter((command) => !verifierCommandsRun.has(command));
-}
-
-function createExecutionEvidence(compiledPlan, execution) {
+function createExecutionEvidence(compiledPlan, execution, verificationPlanEvidence, specDrift) {
   const runEvidence = execution.runs.flatMap((run) => {
     const evidence = [`run ${run.packet.role}: ${run.result.status}`];
     const commandsRun = Array.isArray(run?.result?.commandsRun) ? run.result.commandsRun : [];
@@ -172,14 +180,13 @@ function createExecutionEvidence(compiledPlan, execution) {
     return evidence;
   });
 
-  const verificationPlan = getRequiredVerificationCommands(compiledPlan);
   return [
     `compiled workflow: ${compiledPlan.workflow.workflowId}`,
     `risk: ${compiledPlan.risk}`,
+    `lane: ${compiledPlan.lane}`,
     `roles: ${compiledPlan.intendedRoleSequence.join(" -> ")}`,
-    ...(verificationPlan.length > 0
-      ? verificationPlan.map((command) => `required verification command: ${command}`)
-      : []),
+    ...formatVerificationPlanEvidence(verificationPlanEvidence),
+    ...formatSpecDriftEvidence(specDrift),
     ...runEvidence
   ];
 }
@@ -190,7 +197,7 @@ function createExecutionOpenQuestions(execution) {
   if (execution.status === "human_gate_required") {
     return unique([
       ...fromRuns,
-      "Obtain explicit human approval for this high-risk contract before re-running."
+      "Obtain explicit human approval for this gated contract before re-running."
     ]);
   }
 
@@ -447,17 +454,468 @@ function deriveReviewFindings(execution) {
   return reviewFindings;
 }
 
+function normalizeContractStringList(value) {
+  return Array.isArray(value)
+    ? unique(value.map((entry) => normalizeCommandText(entry)).filter((entry) => entry.length > 0))
+    : [];
+}
+
+function acceptanceItemId(contractId, type, index) {
+  return `${contractId}:${type}:${index + 1}`;
+}
+
+function createAcceptanceItems({ contractId, contract, compiledPlan }) {
+  const successCriteria = normalizeContractStringList(contract?.successCriteria);
+  const acceptanceChecks = normalizeContractStringList(
+    compiledPlan?.acceptanceChecks ?? contract?.acceptanceChecks
+  );
+  const verificationPlan = normalizeContractStringList(
+    compiledPlan?.verificationPlan ?? contract?.verificationPlan
+  ).filter(isCommandLikeVerificationEntry);
+  const nonGoals = normalizeContractStringList(
+    compiledPlan?.nonGoals ?? contract?.nonGoals
+  );
+  const items = [];
+
+  for (const [index, text] of successCriteria.entries()) {
+    items.push({
+      id: acceptanceItemId(contractId, "success_criterion", index),
+      type: "success_criterion",
+      text,
+      required: true
+    });
+  }
+  for (const [index, text] of acceptanceChecks.entries()) {
+    items.push({
+      id: acceptanceItemId(contractId, "acceptance_check", index),
+      type: "acceptance_check",
+      text,
+      required: true
+    });
+  }
+  for (const [index, text] of verificationPlan.entries()) {
+    items.push({
+      id: acceptanceItemId(contractId, "verification", index),
+      type: "verification",
+      text,
+      required: true
+    });
+  }
+  for (const [index, text] of nonGoals.entries()) {
+    items.push({
+      id: acceptanceItemId(contractId, "non_goal", index),
+      type: "non_goal",
+      text,
+      required: true
+    });
+  }
+
+  return items;
+}
+
+function collectVerifierValidationEvidence(execution) {
+  const refs = [];
+  const commands = [];
+  const evidenceRefsByCommand = new Map();
+  const runs = Array.isArray(execution?.runs) ? execution.runs : [];
+
+  for (const [runIndex, run] of runs.entries()) {
+    if (run?.packet?.role !== "verifier") {
+      continue;
+    }
+
+    const packetId = typeof run?.packet?.id === "string" && run.packet.id.trim().length > 0
+      ? run.packet.id.trim()
+      : `verifier-${runIndex}`;
+    const commandsRun = Array.isArray(run?.result?.commandsRun) ? run.result.commandsRun : [];
+    for (const [commandIndex, rawCommand] of commandsRun.entries()) {
+      const command = normalizeCommandText(rawCommand);
+      if (command.length === 0) {
+        continue;
+      }
+      const ref = `run:${packetId}:commandsRun[${commandIndex}]`;
+      refs.push(ref);
+      commands.push(command);
+      if (!evidenceRefsByCommand.has(command)) {
+        evidenceRefsByCommand.set(command, []);
+      }
+      evidenceRefsByCommand.get(command).push(ref);
+    }
+
+    const evidence = Array.isArray(run?.result?.evidence) ? run.result.evidence : [];
+    for (const [evidenceIndex, rawEvidence] of evidence.entries()) {
+      const evidenceEntry = normalizeCommandText(rawEvidence);
+      if (evidenceEntry.length === 0) {
+        continue;
+      }
+      refs.push(`run:${packetId}:evidence[${evidenceIndex}]`);
+    }
+  }
+
+  return {
+    refs: unique(refs),
+    commands: unique(commands),
+    evidenceRefsByCommand
+  };
+}
+
+function commandPreview(commands) {
+  if (!Array.isArray(commands) || commands.length === 0) {
+    return "verifier evidence recorded";
+  }
+
+  const preview = commands.slice(0, 3).join(" | ");
+  return commands.length > 3
+    ? `${preview} | +${commands.length - 3} more`
+    : preview;
+}
+
+function createClaim({
+  id,
+  type,
+  text,
+  status,
+  evidenceRefs = [],
+  evidenceSummary = null,
+  reason = null,
+  required = true
+}) {
+  return {
+    id,
+    type,
+    text,
+    status,
+    required,
+    evidenceRefs: unique(evidenceRefs),
+    ...(evidenceSummary ? { evidenceSummary } : {}),
+    ...(reason ? { reason } : {})
+  };
+}
+
+function deriveNonGoalClaimStatus({ status, changedSurface, scopeOwnership }) {
+  if (status !== "success") {
+    return {
+      status: "unproven",
+      reason: `Contract ended with status ${status}.`
+    };
+  }
+
+  if (scopeOwnership?.status === "aligned" || scopeOwnership?.status === "no_observed_changes") {
+    return {
+      status: "proven",
+      evidenceSummary: `Observed changed surface is ${scopeOwnership.status}.`
+    };
+  }
+
+  if (
+    changedSurface?.capture === "complete"
+    && Array.isArray(changedSurface.paths)
+    && changedSurface.paths.length === 0
+  ) {
+    return {
+      status: "proven",
+      evidenceSummary: "Complete changed-path capture recorded no changed files."
+    };
+  }
+
+  if (changedSurface?.capture === "partial") {
+    return {
+      status: "partial",
+      reason: "Changed-path capture is partial, so non-goal preservation is not fully proven.",
+      evidenceSummary: "Partial changed-path capture is available."
+    };
+  }
+
+  return {
+    status: "unproven",
+    reason: "Changed-path capture is not complete enough to prove non-goal preservation."
+  };
+}
+
+function createClaimLedger({
+  contractId,
+  status,
+  acceptanceItems,
+  execution,
+  changedSurface,
+  scopeOwnership,
+  missingVerificationCommands,
+  specDrift = null
+}) {
+  const validationEvidence = collectVerifierValidationEvidence(execution);
+  const hasValidationEvidence = validationEvidence.refs.length > 0;
+  const missingVerificationCommandSet = new Set(missingVerificationCommands);
+  const verifierCommandSet = new Set(validationEvidence.commands);
+  const claims = [
+    createClaim({
+      id: `${contractId}:terminal_state:success`,
+      type: "terminal_state",
+      text: `Contract ${contractId} reaches terminal success.`,
+      status: status === "success" ? "proven" : "unproven",
+      evidenceRefs: ["contractRun.summary"],
+      evidenceSummary: status === "success" ? "Contract result status is success." : null,
+      reason: status === "success" ? null : `Contract ended with status ${status}.`
+    })
+  ];
+
+  for (const item of acceptanceItems) {
+    if (item.type === "verification") {
+      if (status === "success" && verifierCommandSet.has(item.text) && !missingVerificationCommandSet.has(item.text)) {
+        claims.push(createClaim({
+          id: item.id,
+          type: item.type,
+          text: item.text,
+          status: "proven",
+          evidenceRefs: validationEvidence.evidenceRefsByCommand.get(item.text) ?? [],
+          evidenceSummary: `Verifier reported required command: ${item.text}.`,
+          required: item.required
+        }));
+      } else {
+        const reason = missingVerificationCommandSet.has(item.text)
+          ? "Required verificationPlan command was not reported by the verifier."
+          : status === "success"
+            ? "Required verificationPlan command was not reported by the verifier."
+            : `Contract ended with status ${status}.`;
+        claims.push(createClaim({
+          id: item.id,
+          type: item.type,
+          text: item.text,
+          status: "unproven",
+          reason,
+          required: item.required
+        }));
+      }
+      continue;
+    }
+
+    if (item.type === "non_goal") {
+      const nonGoalStatus = deriveNonGoalClaimStatus({
+        status,
+        changedSurface,
+        scopeOwnership
+      });
+      claims.push(createClaim({
+        id: item.id,
+        type: item.type,
+        text: item.text,
+        status: nonGoalStatus.status,
+        evidenceRefs: nonGoalStatus.status === "proven" || nonGoalStatus.status === "partial"
+          ? ["contractRun.changedSurface", ...(scopeOwnership ? ["contractRun.scopeOwnership"] : [])]
+          : [],
+        evidenceSummary: nonGoalStatus.evidenceSummary ?? null,
+        reason: nonGoalStatus.reason ?? null,
+        required: item.required
+      }));
+      continue;
+    }
+
+    if (status !== "success") {
+      claims.push(createClaim({
+        id: item.id,
+        type: item.type,
+        text: item.text,
+        status: "unproven",
+        reason: `Contract ended with status ${status}.`,
+        required: item.required
+      }));
+      continue;
+    }
+
+    if (!hasValidationEvidence) {
+      claims.push(createClaim({
+        id: item.id,
+        type: item.type,
+        text: item.text,
+        status: "unproven",
+        reason: "No verifier command or verifier evidence was captured for this claim.",
+        required: item.required
+      }));
+      continue;
+    }
+
+    claims.push(createClaim({
+      id: item.id,
+      type: item.type,
+      text: item.text,
+      status: "proven",
+      evidenceRefs: validationEvidence.refs,
+      evidenceSummary: `Verifier evidence captured: ${commandPreview(validationEvidence.commands)}.`,
+      required: item.required
+    }));
+  }
+
+  if (specDrift?.outcome && specDrift.outcome !== "none_detected") {
+    const signalSummary = Array.isArray(specDrift.signals) && specDrift.signals.length > 0
+      ? specDrift.signals.map((signal) => `${signal.kind}: ${signal.detail}`).join("; ")
+      : "No deterministic drift signal details were captured.";
+    claims.push(createClaim({
+      id: `${contractId}:verification:spec-drift`,
+      type: "verification",
+      text: "Contract output stays aligned with the requested goal, bounded goal, changed surface, and worker evidence.",
+      status: "unproven",
+      required: true,
+      reason: `Spec drift outcome is ${specDrift.outcome}. ${signalSummary}`
+    }));
+  }
+
+  return claims;
+}
+
+function deriveAcceptanceStatus(acceptanceItems, claimLedger) {
+  if (acceptanceItems.length === 0) {
+    return "not_applicable";
+  }
+
+  const claimById = new Map(claimLedger.map((claim) => [claim.id, claim]));
+  const acceptanceClaims = acceptanceItems
+    .map((item) => claimById.get(item.id))
+    .filter(Boolean);
+  if (acceptanceClaims.length === 0) {
+    return "not_applicable";
+  }
+  if (acceptanceClaims.some((claim) => claim.status === "unproven")) {
+    return "unsatisfied";
+  }
+  if (acceptanceClaims.some((claim) => claim.status === "partial")) {
+    return "partial";
+  }
+  return "satisfied";
+}
+
+function createTraceability({ acceptanceItems, claimLedger, changedSurface }) {
+  const claimById = new Map(claimLedger.map((claim) => [claim.id, claim]));
+  const changedFilesKnown = changedSurface?.capture === "complete" || changedSurface?.capture === "partial";
+  const changedFiles = changedFilesKnown && Array.isArray(changedSurface?.paths)
+    ? changedSurface.paths
+    : [];
+
+  return {
+    requirementChecks: acceptanceItems
+      .filter((item) => item.type !== "non_goal")
+      .map((item) => {
+        const claim = claimById.get(item.id);
+        const validationEvidenceRefs = claim?.status === "proven" || claim?.status === "partial"
+          ? claim.evidenceRefs ?? []
+          : [];
+        return {
+          id: item.id,
+          type: item.type,
+          text: item.text,
+          claimIds: claim ? [claim.id] : [],
+          changedFilesKnown,
+          changedFiles,
+          validationEvidenceKnown: validationEvidenceRefs.length > 0,
+          validationEvidenceRefs
+        };
+      }),
+    nonGoals: acceptanceItems
+      .filter((item) => item.type === "non_goal")
+      .map((item) => {
+        const claim = claimById.get(item.id);
+        const preservationStatus = claim?.status === "proven"
+          ? "preserved"
+          : claim?.status === "not_applicable"
+            ? "not_applicable"
+            : "unproven";
+        return {
+          id: item.id,
+          text: item.text,
+          preservationStatus,
+          claimIds: claim ? [claim.id] : [],
+          changedFiles,
+          evidenceRefs: claim?.status === "proven" || claim?.status === "partial"
+            ? claim.evidenceRefs ?? []
+            : [],
+          ...(preservationStatus === "preserved" ? {} : {
+            reason: claim?.reason ?? "Non-goal preservation is not proven by captured evidence."
+          })
+        };
+      })
+  };
+}
+
+function createContractReviewArtifacts({
+  contractId,
+  contract,
+  compiledPlan,
+  status,
+  execution,
+  changedSurface,
+  scopeOwnership,
+  missingVerificationCommands,
+  specDrift = null
+}) {
+  const acceptanceItems = createAcceptanceItems({
+    contractId,
+    contract,
+    compiledPlan
+  });
+  const claimLedger = createClaimLedger({
+    contractId,
+    status,
+    acceptanceItems,
+    execution,
+    changedSurface,
+    scopeOwnership,
+    missingVerificationCommands,
+    specDrift
+  });
+  const acceptanceArtifact = {
+    status: deriveAcceptanceStatus(acceptanceItems, claimLedger),
+    items: acceptanceItems
+  };
+  const traceability = createTraceability({
+    acceptanceItems,
+    claimLedger,
+    changedSurface
+  });
+
+  return {
+    acceptanceArtifact: normalizeAcceptanceArtifact(acceptanceArtifact, {
+      fieldName: "contractExecutionResult.acceptanceArtifact"
+    }),
+    claimLedger: normalizeClaimLedger(claimLedger, {
+      fieldName: "contractExecutionResult.claimLedger"
+    }),
+    traceability: normalizeTraceability(traceability, {
+      fieldName: "contractExecutionResult.traceability"
+    })
+  };
+}
+
 function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {
-  policyDecision = null
+  contract = null,
+  policyDecision = null,
+  verificationPlan = null,
+  originalGoal = null
 } = {}) {
   const sanitizedExecution = sanitizeWorkflowExecutionForContractBoundary(execution);
-  const missingVerificationCommands = findMissingVerificationCommands(compiledPlan, sanitizedExecution);
+  const verificationPlanEvidence = evaluateVerificationPlanRun(verificationPlan, {
+    commandsRun: getVerifierCommandsRun(sanitizedExecution)
+  });
+  const missingVerificationCommands = verificationPlanEvidence.requiredChecksNotRun.map((check) => check.command);
   const terminalSuccessBlockedByVerification = sanitizedExecution.status === "success" && missingVerificationCommands.length > 0;
-  const status = terminalSuccessBlockedByVerification
+  const changedSurface = deriveChangedSurface(sanitizedExecution);
+  const specDrift = detectSpecDrift({
+    originalGoal: originalGoal ?? contract?.goal ?? compiledPlan.goal,
+    contractGoal: contract?.goal ?? compiledPlan.goal,
+    boundedGoal: compiledPlan.boundedGoal,
+    allowedFileScope: compiledPlan.allowedFileScope,
+    changedSurface,
+    workerSummaries: sanitizedExecution.runs.map((run) => run?.result?.summary),
+    workerEvidence: sanitizedExecution.runs.flatMap((run) => (
+      Array.isArray(run?.result?.evidence) ? run.result.evidence : []
+    )),
+    workerChangedFiles: sanitizedExecution.runs.flatMap((run) => (
+      Array.isArray(run?.result?.changedFiles) ? run.result.changedFiles : []
+    ))
+  });
+  const terminalSuccessBlockedByDrift = sanitizedExecution.status === "success" && specDrift.outcome === "drift_detected";
+  const status = terminalSuccessBlockedByVerification || terminalSuccessBlockedByDrift
     ? "blocked"
     : normalizeContractStatus(sanitizedExecution.status);
   const evidence = [
-    ...createExecutionEvidence(compiledPlan, sanitizedExecution),
+    ...createExecutionEvidence(compiledPlan, sanitizedExecution, verificationPlanEvidence, specDrift),
     ...(missingVerificationCommands.length > 0
       ? [`missing_verification_commands: ${missingVerificationCommands.join(" | ")}`]
       : [])
@@ -466,9 +924,11 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     ...createExecutionOpenQuestions(sanitizedExecution),
     ...(terminalSuccessBlockedByVerification
       ? ["Run the required verificationPlan command(s) and report them in verifier commandsRun before claiming success."]
+      : []),
+    ...(terminalSuccessBlockedByDrift
+      ? ["Reconcile the compiled bounded goal with the original contract goal before claiming success."]
       : [])
   ]);
-  const changedSurface = deriveChangedSurface(sanitizedExecution);
   const scopeOwnership = deriveScopeOwnership(compiledPlan, changedSurface);
   const commandObservations = deriveCommandObservations(sanitizedExecution);
   const providerModelSelections = deriveProviderModelSelections(sanitizedExecution);
@@ -478,12 +938,16 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     ? `Executed ${contractId} through ${sanitizedExecution.runs.length} bounded packet run(s).`
     : terminalSuccessBlockedByVerification
       ? `Contract ${contractId} blocked: required verificationPlan command(s) were not reported by the verifier.`
+      : terminalSuccessBlockedByDrift
+        ? `Contract ${contractId} blocked: deterministic spec drift was detected.`
       : `Contract ${contractId} ${status}: ${sanitizedExecution.stopReason ?? "execution stopped without an explicit reason"}`;
 
   const contractResult = {
     status,
     summary,
     evidence,
+    verificationPlanEvidence,
+    specDrift,
     providerModelEvidenceRequirement,
     changedSurface,
     openQuestions
@@ -505,7 +969,20 @@ function mapWorkflowExecutionToContractResult(contractId, compiledPlan, executio
     contractResult.policyDecision = policyDecision;
   }
 
-  return contractResult;
+  return {
+    ...contractResult,
+    ...createContractReviewArtifacts({
+      contractId,
+      contract,
+      compiledPlan,
+      status,
+      execution: sanitizedExecution,
+      changedSurface,
+      scopeOwnership,
+      missingVerificationCommands,
+      specDrift
+    })
+  };
 }
 
 function createPolicyGateReason(policyDecision) {
@@ -609,6 +1086,7 @@ export function createProgramContractExecutor({
     } catch (error) {
       return toBlockedContractResult(contractId, `compile step failed safely: ${error.message}`, {
         evidence: [],
+        contract,
         openQuestions: [
           "Fix the contract payload so it can be compiled into bounded packets."
         ]
@@ -654,10 +1132,18 @@ export function createProgramContractExecutor({
               requiresProcessBackend
             }),
             openQuestions: createPolicyGateOpenQuestions(policyDecision),
-            policyDecision
+            policyDecision,
+            contract,
+            compiledPlan
           }
         );
       }
+
+      const verificationPlan = await buildVerificationPlan({
+        contractVerificationPlan: compiledPlan.verificationPlan,
+        plannedScope: compiledPlan.allowedFileScope,
+        repositoryRoot: process.cwd()
+      });
 
       const execution = await executePlannedWorkflow({
         workflow: compiledPlan.workflow,
@@ -674,7 +1160,10 @@ export function createProgramContractExecutor({
       });
 
       return mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {
-        policyDecision
+        contract,
+        policyDecision,
+        verificationPlan,
+        originalGoal: context?.originalGoal ?? context?.programGoal ?? null
       });
     } catch (error) {
       return toBlockedContractResult(contractId, `bounded execution failed safely: ${error.message}`, {
@@ -684,7 +1173,9 @@ export function createProgramContractExecutor({
         openQuestions: [
           "Inspect runner behavior and packet validation for this contract."
         ],
-        policyDecision
+        policyDecision,
+        contract,
+        compiledPlan
       });
     }
   };

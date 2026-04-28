@@ -8,6 +8,7 @@ import {
   deriveExecutionProgramActionClasses
 } from "../src/project-workflows.js";
 import {
+  formatCompactReviewPack,
   formatOperatorApprovalCheckpoint,
   formatOperatorBuildSessionLookupBlocked,
   formatOperatorBuildSessionStatus,
@@ -255,6 +256,78 @@ test("build session status reports exact observed changed paths when complete ca
   assert.doesNotMatch(status, /Changed-path capture is partial/u);
 });
 
+test("compact review pack surfaces changed files, commands, claims, reviewability, and next decision", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+  buildSession.approval.approved = true;
+  buildSession.approval.approvedAt = new Date().toISOString();
+  buildSession.execution.status = "success";
+  buildSession.execution.programId = buildSession.lifecycle.executionProgram.id;
+  buildSession.execution.completedContracts = 1;
+  buildSession.execution.pendingContracts = 0;
+
+  const runJournal = {
+    programId: buildSession.lifecycle.executionProgram.id,
+    status: "success",
+    stopReason: null,
+    reviewability: {
+      status: "reviewable",
+      reasons: []
+    },
+    contractRuns: [
+      {
+        contractId: firstContract.id,
+        status: "success",
+        summary: "Executed one scoped contract.",
+        evidence: ["run implementer: success"],
+        commandObservations: [
+          {
+            command: "node --test --test-name-pattern helpers",
+            source: "worker_reported",
+            actionClasses: ["execute_local_command"]
+          }
+        ],
+        changedSurface: {
+          capture: "complete",
+          paths: ["src/helpers.js"]
+        },
+        claimLedger: [
+          {
+            id: `${firstContract.id}:acceptance_check:1`,
+            type: "acceptance_check",
+            text: "Scoped behavior is verified.",
+            status: "proven",
+            evidenceRefs: ["run:verifier:commandsRun[0]"]
+          },
+          {
+            id: `${firstContract.id}:non_goal:1`,
+            type: "non_goal",
+            text: "Do not widen scope.",
+            status: "unproven",
+            reason: "Changed-path capture did not cover all runs."
+          }
+        ],
+        openQuestions: []
+      }
+    ],
+    completedContractIds: [firstContract.id],
+    pendingContractIds: []
+  };
+
+  const pack = formatCompactReviewPack(buildSession, { runJournal });
+
+  assert.match(pack, /Compact Review Pack/u);
+  assert.match(pack, /Changed files: observed: src\/helpers\.js/u);
+  assert.match(pack, /Commands run: node --test --test-name-pattern helpers/u);
+  assert.match(pack, /Proven claims: .*acceptance_check:1/u);
+  assert.match(pack, /Unproven claims: .*non_goal:1 \(unproven: Changed-path capture did not cover all runs\.\)/u);
+  assert.match(pack, /Reviewability status: reviewable/u);
+  assert.match(pack, /Next human decision: Review evidence and decide whether to run another \/build for the next slice\./u);
+
+  const status = formatOperatorBuildSessionStatus(buildSession, { runJournal });
+  assert.match(status, /Compact Review Pack/u);
+});
+
 test("blocked run summary distinguishes requested outcome from actual outcome", () => {
   const buildSession = createSampleBuildSession();
   const status = formatOperatorBuildSessionStatus(buildSession, {
@@ -310,6 +383,44 @@ test("unproven outcomes surface a truthful unproven claims section from typed fi
 
   assert.match(status, /unproven claims: .*typed review finding\(s\) are recorded/u);
   assert.match(status, /Audit evaluation coverage marks 1 criterion\/criteria as missing/u);
+});
+
+test("build session status surfaces verification planning and spec drift evidence", () => {
+  const buildSession = createSampleBuildSession();
+  const firstContract = buildSession.lifecycle.executionProgram.contracts[0];
+
+  const status = formatOperatorBuildSessionStatus(buildSession, {
+    runJournal: {
+      programId: buildSession.lifecycle.executionProgram.id,
+      status: "success",
+      stopReason: null,
+      contractRuns: [
+        {
+          contractId: firstContract.id,
+          status: "success",
+          summary: "Executed one scoped contract.",
+          evidence: [
+            "verification_plan_confidence: low",
+            "verification_selected_check: advisory | package_script | npm test | package.json script \"test\" is verification-like",
+            "verification_required_not_run: npm test",
+            "spec_drift_outcome: possible_drift"
+          ],
+          changedSurface: {
+            capture: "not_captured",
+            paths: []
+          },
+          openQuestions: []
+        }
+      ],
+      completedContractIds: [firstContract.id],
+      pendingContractIds: []
+    }
+  });
+
+  assert.match(status, /Proof collected: .*Verification planning recorded 1 selected check\(s\), 0 skipped candidate\(s\), confidence low\./u);
+  assert.match(status, /Proof collected: .*Spec drift check outcome: possible_drift\./u);
+  assert.match(status, /Unproven claims: .*Required verification checks were not run: npm test\./u);
+  assert.match(status, /Unproven claims: .*Spec drift outcome is possible_drift; reviewability is blocked until this is reconciled\./u);
 });
 
 test("summary labels still render when newer typed fields are absent", () => {

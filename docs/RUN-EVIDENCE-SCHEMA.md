@@ -35,11 +35,16 @@ A persisted artifact can be structurally valid without yet being reviewable for 
 
 Current v1 persists a narrow first-class `reviewability` object on `persisted_run_record`, embedded `run_journal`, and `build_session.execution`.
 
+Current v1 persists a first-class `failureClass` on `persisted_run_record` and embedded `run_journal`; terminal `run_journal.contractRuns[]` entries also persist the derived class. Missing legacy values are normalized from terminal status, stop reason code, stop reason text, and typed contract-run evidence. High-value terminal classes may carry a non-authorizing `fixtureRecommendation` metadata object; the harness does not create fixtures from that metadata.
+
 Current v1 now persists narrow first-class per-contract fields on `run_journal.contractRuns[]` for:
 
 - `providerModelEvidenceRequirement` (partial Track 2 landing, derived from code-owned backend provenance)
 - `commandObservations[]` (typed command/tool observation surface for currently detector-backed command classes)
 - `policyDecision` (typed pre-execution policy gate decision for the current narrow profile-enforcement slice; live supported profile ids are currently `default` only)
+- `acceptanceArtifact` (definition-of-done items derived by the contract executor from `successCriteria`, `acceptanceChecks`, `nonGoals`, and `verificationPlan`)
+- `claimLedger[]` (typed per-contract claims with proof status and evidence references or summaries)
+- `traceability` (requirement/check and non-goal mapping to changed-path and validation evidence when known)
 
 ## Normative Terms
 
@@ -143,6 +148,19 @@ Current loader behavior:
 - `terminal_resume_rejected`
 - `unknown`
 
+### Failure Class
+
+- `bad_context`
+- `missing_validation`
+- `scope_violation`
+- `protected_path_violation`
+- `approval_required`
+- `model_or_runtime_unavailable`
+- `unsafe_command`
+- `worker_output_invalid`
+- `summary_overclaim`
+- `unknown`
+
 ### Action Class
 
 - `read_repo`
@@ -185,6 +203,35 @@ Current implementation note:
 - `missing_stop_reason_code`
 - `provider_model_evidence_missing`
 - `provider_model_evidence_requirement_unknown`
+- `required_claims_unproven`
+
+### Acceptance Artifact Status
+
+- `satisfied`
+- `partial`
+- `unsatisfied`
+- `not_applicable`
+
+### Acceptance Item / Claim Type
+
+- `terminal_state` (claim ledger only)
+- `success_criterion`
+- `acceptance_check`
+- `verification`
+- `non_goal`
+
+### Claim Status
+
+- `proven`
+- `partial`
+- `unproven`
+- `not_applicable`
+
+### Traceability Non-Goal Status
+
+- `preserved`
+- `unproven`
+- `not_applicable`
 
 ### Policy Profile
 
@@ -232,6 +279,7 @@ Required fields:
 - `lastStatus`
 - `stopReason`
 - `stopReasonCode`
+- `failureClass`
 - `validationOutcome`
 - `actionClasses`
 - `policyProfile`
@@ -248,6 +296,7 @@ Current field provenance:
 
 - `program` and embedded `runJournal` are the primary stored payloads. The top-level summary fields mirror the normalized embedded journal and are not an independent source of truth.
 - `stopReasonCode` is authoritative only as the persisted normalized value. When omitted or null, current code derives it with `normalizeStopReasonCode()` from `status` plus substring heuristics over `stopReason`.
+- `failureClass` is authoritative only as the persisted normalized value. When omitted or null, current code derives it with `normalizeFailureClass()` from terminal status, stop reason code, stop reason text, and typed contract-run evidence.
 - `validationOutcome` is authoritative only as the persisted normalized value. When omitted, current code derives it from `status`.
 - `actionClasses` is authoritative only as the persisted normalized output. Current code validates any supplied array against the enum, then recomputes the stored value from normalized role evidence, typed `runJournal.contractRuns[].commandObservations[]` when present, legacy command-evidence fallback when that typed field is absent, and limited `stopReasonCode` mappings.
 - `validationArtifacts`, `reviewability`, `policyProfile`, `sourceArtifactIds`, `lineageDepth`, and embedded `runJournal.artifactType` may be backfilled or normalized during persistence even when absent in the input object.
@@ -261,6 +310,7 @@ Required invariants:
 - `lastStatus` must equal `runJournal.status`.
 - `stopReason` must equal `runJournal.stopReason`.
 - `stopReasonCode` must equal `runJournal.stopReasonCode`.
+- `failureClass` must equal `runJournal.failureClass`.
 - `validationOutcome` must equal `runJournal.validationOutcome`.
 - `reviewability` must equal `runJournal.reviewability`.
 - `sourceArtifactIds` must identify the embedded `execution_program` and `run_journal`, directly or by normalized reference.
@@ -270,6 +320,8 @@ Null policy:
 
 - `stopReason` and `stopReasonCode` must both be `null` only when `lastStatus` is `running` or `success`.
 - `stopReason` and `stopReasonCode` are both required and non-null when `lastStatus` is `blocked`, `failed`, or `repair_required`.
+- `failureClass` must be `null` when `lastStatus` is `running` or `success`.
+- `failureClass` is required and non-null when `lastStatus` is `blocked`, `failed`, or `repair_required`.
 
 Validation target:
 
@@ -293,6 +345,7 @@ Required fields:
 - `status`
 - `stopReason`
 - `stopReasonCode`
+- `failureClass`
 - `validationOutcome`
 - `contractRuns`
 - `completedContractIds`
@@ -305,13 +358,14 @@ Required fields:
 
 Optional fields:
 
-- none
+- `fixtureRecommendation`
 
 Current field provenance:
 
 - `status`, `stopReason`, `contractRuns`, `completedContractIds`, and `pendingContractIds` are the core stored fields validated by `src/project-contracts.js`.
 - `contractRuns[].changedSurface` is normalized per contract run and defaults to `capture = not_captured` for legacy records that omit it.
 - `stopReasonCode` is stored in the persisted journal, but when it is omitted or null current code infers it from `status` plus substring heuristics over `stopReason`. It is therefore a normalized classification, not always an original event type emitted directly by the executor.
+- `failureClass` is stored in the persisted journal, but when it is omitted or null current code infers it from terminal status, stop reason code, stop reason text, and typed contract-run evidence. It is therefore a normalized failure-memory category, not an original event type emitted directly by the executor.
 - `validationOutcome` is stored in the persisted journal, but when omitted current code derives it from `status`.
 - `actionClasses` is recomputed by current persistence normalization from role evidence, typed `contractRuns[].commandObservations[]` when present, legacy command-evidence markers when that typed field is absent, and selected `stopReasonCode` mappings. The stored array is conservative derived evidence, not a first-class complete action log.
 - `policyProfile`, `validationArtifacts`, `reviewability`, `sourceArtifactIds`, `lineageDepth`, and `artifactType` are normalized or backfilled at persistence time.
@@ -324,6 +378,7 @@ Required invariants:
 - `status = running` requires `stopReason = null` and `stopReasonCode = null`.
 - `status = repair_required` is terminal by status alone. No separate `isTerminal` field is defined or needed.
 - `status = blocked`, `failed`, and `repair_required` are terminal for normal execution, but a later resume refusal may still return a separate `blocked` artifact rather than continuing the original run.
+- `failureClass = null` only when `status = running` or `success`; terminal statuses require a non-null closed-enum class.
 - `policyProfile` must be the resolved active profile id.
 - `reviewability` is a machine-derived summary from persisted execution evidence; it is normalized from status, stop reasons, validation-artifact capture state, and machine-checkable provider/model signals when present.
 
@@ -342,6 +397,8 @@ Null policy:
 
 - `stopReason` and `stopReasonCode` must both be `null` only when `status` is `running` or `success`.
 - `stopReason` and `stopReasonCode` are both required and non-null when `status` is `blocked`, `failed`, or `repair_required`.
+- `failureClass` must be `null` when `status` is `running` or `success`.
+- `fixtureRecommendation`, when present, is advisory metadata with `autoCreate = false`; fixture files are never created from this field by persistence normalization.
 
 #### `run_journal.contractRuns[]`
 
@@ -359,10 +416,14 @@ Required fields:
 
 Optional fields:
 
+- `acceptanceArtifact`
+- `claimLedger`
+- `traceability`
 - `commandObservations`
 - `providerModelEvidenceRequirement`
 - `providerModelSelections`
 - `policyDecision`
+- `failureClass`
 - `redaction`
 
 Required invariants:
@@ -412,6 +473,21 @@ Required invariants:
   - `allowed` -> `profile_allows_execution`
   - `approval_required` -> `profile_requires_human_gate`
   - `blocked` -> `profile_disallows_process_backend` | `profile_disallows_action_class` | `unknown_profile`
+- `failureClass`, when present, must be one of the closed Failure Class enum values and must match the code-inferred class for that terminal contract run.
+- `acceptanceArtifact`, when present, must contain:
+  - `status` (`satisfied`, `partial`, `unsatisfied`, or `not_applicable`)
+  - `items[]`
+- `acceptanceArtifact.items[]` entries must contain `id`, `type`, `text`, and `required`.
+- `acceptanceArtifact.items[].type` must be `success_criterion`, `acceptance_check`, `verification`, or `non_goal`.
+- `claimLedger[]`, when present, must contain typed entries with `id`, `type`, `text`, `status`, `required`, `evidenceRefs[]`, optional `evidenceSummary`, and optional `reason`.
+- `claimLedger[].type` must be `terminal_state`, `success_criterion`, `acceptance_check`, `verification`, or `non_goal`.
+- `claimLedger[].status` must be `proven`, `partial`, `unproven`, or `not_applicable`.
+- `claimLedger[]` entries with `status = proven` or `partial` must include at least one `evidenceRefs[]` entry or a non-empty `evidenceSummary`.
+- `claimLedger[]` entries with `status != proven` must include a non-empty `reason`.
+- `traceability`, when present, must contain `requirementChecks[]` and `nonGoals[]`.
+- `traceability.requirementChecks[]` entries map success criteria, acceptance checks, and verification checks to `claimIds[]`, changed files when known, and validation evidence when known.
+- `traceability.nonGoals[]` entries map non-goals to changed files, evidence references, and `preservationStatus`.
+- `traceability.nonGoals[].preservationStatus` must be `preserved`, `unproven`, or `not_applicable`.
 - current live reachability note: with the current supported profile-id set (`default`), `allowed/profile_allows_execution` is the supported-id runtime path and `blocked/unknown_profile` is the fail-closed invalid-id path; other status/reason pairs remain schema-valid for compiled-profile helper logic and future live profiles
 - `redaction`, when present, must be a typed metadata object with exactly:
   - `applied` (boolean)
@@ -447,10 +523,24 @@ Policy decision omission note:
 - malformed present `policyDecision` values fail closed.
 - current code does not synthesize fake `policyDecision` values for legacy records that omitted the field.
 
+Failure classification omission note:
+
+- `contractRuns[]` may omit `failureClass` for legacy compatibility.
+- terminal entries with omitted `failureClass` are normalized to the deterministic class inferred from their status, summary, stop reason context, and typed evidence when loaded or persisted through current code.
+- malformed or contradictory present `failureClass` values fail closed.
+- high-value journal-level failure classes can carry `fixtureRecommendation` metadata pointing at `test/fixtures` with `autoCreate = false`; this metadata is a recommendation only and is not a fixture artifact.
+
 Redaction metadata omission note:
 
 - `contractRuns[]` may omit `redaction` for legacy compatibility.
 - when present, malformed or non-truthful values fail closed.
+
+Acceptance, claim-ledger, and traceability omission note:
+
+- `contractRuns[]` may omit `acceptanceArtifact`, `claimLedger`, and `traceability` for legacy compatibility.
+- current `src/program-contract-executor.js` derives these fields for contract-run results it owns.
+- malformed present values fail closed.
+- `claimLedger[]` is a machine-checkable proof-status surface for the narrow derived claims. It does not replace reviewer judgment about whether the underlying evidence is technically adequate.
 
 Reviewer guidance for narrative fields:
 
@@ -682,11 +772,16 @@ The following evidence claims must bind to the named fields below.
 | validated build session artifact | `build_session@v1` including `approval`, `execution`, and lifecycle references |
 | blocked boundary or missing precondition | `run_journal.stopReason`, `run_journal.stopReasonCode`, and the blocking `contractRuns[].summary` |
 | terminal resume rejection | top-level `run_journal.status = blocked`, `run_journal.stopReasonCode = terminal_resume_rejected`, and refusal wording in `run_journal.stopReason` |
+| terminal failure memory | `run_journal.failureClass` and terminal `run_journal.contractRuns[].failureClass` when a blocking contract run exists |
 | remediation guidance or next action | blocking or repair-related `contractRuns[].openQuestions[]` |
 | observed changed-path evidence | `run_journal.contractRuns[].changedSurface` where `capture = complete` or `partial`; when capture is unavailable, operator rendering may fall back to planned scope with explicit caveats |
 | terminal repair-required state | `run_journal.status = repair_required`, supporting `validationArtifacts[]` or repair-related `contractRuns[]`, and terminal `stopReason` text |
 | machine reviewability summary | `run_journal.reviewability`, mirrored by `persisted_run_record.reviewability` and `build_session.execution.reviewability` |
 | pre-execution policy gate outcome for a contract run | first-class `run_journal.contractRuns[].policyDecision` (`profileId`, `status`, `reason`) |
+| definition-of-done items for a contract run | first-class `run_journal.contractRuns[].acceptanceArtifact` derived from contract `successCriteria`, `acceptanceChecks`, `nonGoals`, and `verificationPlan` |
+| typed proof status for contract-run claims | first-class `run_journal.contractRuns[].claimLedger[]` (`id`, `type`, `text`, `status`, `required`, evidence references or summary, and reason when not proven) |
+| requirement/check traceability | first-class `run_journal.contractRuns[].traceability.requirementChecks[]` with changed files and validation evidence when known |
+| non-goal preservation traceability | first-class `run_journal.contractRuns[].traceability.nonGoals[]` with `preservationStatus` of `preserved`, `unproven`, or `not_applicable` |
 | detector-backed command/tool evidence for runtime action-class normalization | first-class `run_journal.contractRuns[].commandObservations[]`; when that field is absent on a run entry, compatibility fallback is explicit command markers in `contractRuns[].evidence[]` |
 | provider/model evidence on success | first-class `run_journal.contractRuns[].providerModelEvidenceRequirement` decides requirement semantics when present (`required` or `unknown`), and first-class `run_journal.contractRuns[].providerModelSelections[]` carries typed packet entries when promoted; legacy fallback is process-backend `contractRuns[].evidence[]` convention only for runs where the requirement field is absent |
 | approved plan identity | `build_session.planFingerprint` and `build_session.approval.planFingerprint` |
@@ -723,6 +818,7 @@ The current live minimum for operator-facing build summaries is the formatter-ba
 - `approval_needed`
 - `recovery_undo_notes`
 - `next_action`
+- compact review pack containing changed files, commands run, proven claims, unproven claims, reviewability status, and the next human decision
 
 | Current operator field | Operator question answered | Current grounding | Live coverage today |
 | --- | --- | --- | --- |
@@ -739,6 +835,7 @@ The current live minimum for operator-facing build summaries is the formatter-ba
 | `approval_needed` | Is fresh approval required before proceeding? | `build_session.approval.approved`, `build_session.execution.status`, and approval-related stop signals in execution summary | rendered today |
 | `recovery_undo_notes` | What rollback or recovery guidance is recorded? | `run_journal.contractRuns[].openQuestions[]` when present; otherwise explicit weak-guidance wording grounded in execution state and stop reason | rendered today |
 | `next_action` | What exact action should happen next? | formatter output such as `formatOperatorBuildNextAction()` or status-derived operator action grounded in persisted state | rendered today |
+| compact review pack | What should a reviewer inspect first? | `run_journal.contractRuns[].changedSurface`, `commandObservations[]` or legacy command evidence, `claimLedger[]` when present, `reviewability`, and status-derived next action | rendered today |
 
 ### Current Rendering Rules
 
@@ -768,6 +865,7 @@ Current implementation binds operator-readable summaries to persisted evidence a
 
 - `src/operator-formatters.js` already renders `requested_outcome` through `build_session.intake.goal`
 - `formatOperatorBuildSessionStatus()` currently renders goal, approval state, plan fingerprint, approval scope, execution status, stop reason, changed surfaces, proof collected, unproven claims, reviewability, approval-needed guidance, recovery/undo notes, and next action grounded in `build_session` plus optional linked `run_journal`
+- `formatCompactReviewPack()` and `formatOperatorBuildSessionStatus()` currently render a compact review pack with changed files, commands run, proven claims, unproven claims, reviewability status, and the exact next human decision
 - `formatOperatorApprovalCheckpoint()` currently renders approval checkpoint state and run status grounded in `build_session` plus linked execution state
 - `formatOperatorBuildNextAction()` currently derives `next_step` from persisted status and resume policy
 - current formatters do not yet render dedicated `requested outcome`, `actual outcome`, and `next step` labels as a fully normalized richer summary model across all operator command outputs
@@ -810,6 +908,7 @@ Current derivation rules are intentionally narrow:
     - prefer first-class `contractRuns[].providerModelSelections[]` when that field is present on the run entry
     - if the typed field is absent on a run entry, fall back to legacy provider/model key-value evidence parsing from `contractRuns[].evidence[]`
     - if provider/model requirement cannot be machine-decided from current signals, status is `unknown` with `provider_model_evidence_requirement_unknown`
+  - when a successful contract run has `claimLedger[]`, required claims with `status = partial` or `unproven` yield `not_reviewable` with `required_claims_unproven`
 - `blocked`, `failed`, and `repair_required` require both stop reason and stop reason code for machine reviewability; missing either yields `not_reviewable` with the corresponding reason code
 
 Current limitation:

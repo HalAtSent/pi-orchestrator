@@ -994,6 +994,81 @@ test("pi extension resume-program resumes a persisted execution program run", as
   });
 });
 
+test("pi extension run-program preflight blocks protected planned scope before workers launch", async () => {
+  await withTempDir("pi-orchestrator-run-program-preflight-store-", async (rootDir) => {
+    const { createPiExtension } = await import("../src/pi-extension.js");
+    const registeredCommands = new Map();
+    const registeredTools = new Map();
+    const runStore = createRunStore({ rootDir });
+    const requestedRuns = [];
+    const runner = {
+      async run(packet, context) {
+        requestedRuns.push({ packet, context });
+        return {
+          status: "success",
+          summary: "should not run",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    };
+    const extension = createPiExtension({
+      workerRunner: runner,
+      runStore
+    });
+
+    extension({
+      registerCommand(name, config) {
+        registeredCommands.set(name, config);
+      },
+      registerTool(config) {
+        registeredTools.set(config.name, config);
+      }
+    });
+
+    const commandProgram = buildSingleContractProgram({
+      contractId: "run-program-preflight-protected-command",
+      contractRisk: "low"
+    });
+    commandProgram.contracts[0].scopePaths = [".env"];
+
+    const runJournal = await registeredCommands.get("run-program").handler(JSON.stringify({
+      program: commandProgram
+    }), {
+      ui: createUiStub()
+    });
+
+    assert.equal(runJournal.status, "blocked");
+    assert.match(runJournal.stopReason, /^Preflight blocked execution:/u);
+    assert.equal(runJournal.details.preflight.status, "blocked");
+    assert.equal(requestedRuns.length, 0);
+
+    const persistedCommandRun = await runStore.loadRun(commandProgram.id);
+    assert.equal(persistedCommandRun.runJournal.status, "blocked");
+    assert.equal(persistedCommandRun.runJournal.stopReason, runJournal.stopReason);
+
+    const toolProgram = buildSingleContractProgram({
+      contractId: "run-program-preflight-protected-tool",
+      contractRisk: "low"
+    });
+    toolProgram.contracts[0].scopePaths = [".env"];
+
+    const toolRun = await registeredTools.get("run_execution_program").execute("tool-call-preflight", {
+      program: toolProgram
+    });
+
+    assert.equal(toolRun.details.status, "blocked");
+    assert.equal(toolRun.details.preflight.status, "blocked");
+    assert.equal(requestedRuns.length, 0);
+
+    const persistedToolRun = await runStore.loadRun(toolProgram.id);
+    assert.equal(persistedToolRun.runJournal.status, "blocked");
+    assert.equal(persistedToolRun.runJournal.stopReason, toolRun.details.stopReason);
+  });
+});
+
 test("pi extension run-program uses the backend-selected runner for low-risk execution contracts", async () => {
   await withTempDir("pi-orchestrator-run-program-low-risk-process-", async (repositoryRoot) => {
     const { createPiExtension } = await import("../src/pi-extension.js");
@@ -1033,6 +1108,94 @@ test("pi extension run-program uses the backend-selected runner for low-risk exe
     );
     assert.equal(defaultRunner.getCalls().length, 0);
   });
+});
+
+test("pi extension run-program preflight uses effective risk for low-risk process backend requirements", async () => {
+  const { createPiExtension } = await import("../src/pi-extension.js");
+  const registeredCommands = new Map();
+  const defaultRunner = createScriptedWorkerRunner([
+    {
+      role: "explorer",
+      status: "success",
+      summary: "Default runner inspected the effective medium-risk scope.",
+      changedFiles: [],
+      commandsRun: [],
+      evidence: ["Scoped context inspected."],
+      openQuestions: []
+    },
+    {
+      role: "implementer",
+      status: "success",
+      summary: "Default runner handled effective medium-risk implementer work.",
+      changedFiles: ["src/helpers.js"],
+      commandsRun: [],
+      evidence: ["Default runner completed the implementation."],
+      openQuestions: []
+    },
+    {
+      role: "reviewer",
+      status: "success",
+      summary: "Default runner reviewed the effective medium-risk work.",
+      changedFiles: [],
+      commandsRun: [],
+      evidence: ["Independent review passed."],
+      openQuestions: []
+    },
+    {
+      role: "verifier",
+      status: "success",
+      summary: "Default runner verified the effective medium-risk work.",
+      changedFiles: [],
+      commandsRun: ["node --test"],
+      evidence: ["Verification passed."],
+      openQuestions: []
+    }
+  ]);
+  const sandboxChecks = [];
+  const processBackend = {
+    async run() {
+      throw new Error("process backend should not run for effective high-risk work");
+    },
+    async checkSandboxAvailability() {
+      sandboxChecks.push("called");
+      return {
+        available: false,
+        reason: "sandbox intentionally unavailable"
+      };
+    }
+  };
+  const extension = createPiExtension({
+    workerRunner: defaultRunner,
+    processWorkerBackend: processBackend,
+    autoBackendMode: AUTO_BACKEND_MODES.LOW_RISK_PROCESS_IMPLEMENTER
+  });
+
+  extension({
+    registerCommand(name, config) {
+      registeredCommands.set(name, config);
+    },
+    registerTool() {}
+  });
+
+  const program = buildSingleContractProgram({
+    contractId: "run-program-effective-risk-default-runner",
+    contractRisk: "low"
+  });
+  program.contracts[0].goal = "Rename one local helper in a directory scope";
+  program.contracts[0].scopePaths = ["src/"];
+
+  const runJournal = await registeredCommands.get("run-program").handler(JSON.stringify({
+    program
+  }), {
+    ui: createUiStub()
+  });
+
+  assert.equal(runJournal.status, "success");
+  assert.deepEqual(
+    defaultRunner.getCalls().map((call) => call.packet.role),
+    ["explorer", "implementer", "reviewer", "verifier"]
+  );
+  assert.deepEqual(sandboxChecks, []);
 });
 
 test("pi extension resume-program uses the backend-selected runner for pending contracts", async () => {
@@ -1241,7 +1404,8 @@ test("pi extension run-program uses the default compiler/executor path with a sc
   singleContractProgram.contracts = [program.contracts[0]];
 
   const runJournal = await registeredCommands.get("run-program").handler(JSON.stringify({
-    program: singleContractProgram
+    program: singleContractProgram,
+    approvedHighRisk: "true"
   }), {
     ui: {
       notify() {},

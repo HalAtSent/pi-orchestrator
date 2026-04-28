@@ -30,6 +30,9 @@ Current policy-surface note:
 
 - the live enforcement surface is narrower than the full action-class vocabulary used in the contract and evidence docs
 - current runtime gating is primarily high-risk approval, allowlist and forbidden-path checks, protected-path rejection in declared scope, and pre-execution approval-scope checks against the current stored plan
+- task lanes are now a first-class, closed, code-owned classifier alongside risk: `tiny_edit`, `docs_only`, `test_only`, `bounded_bugfix`, `feature_slice`, `refactor`, `migration`, and `policy_or_harness_change`
+- current lane inference uses the task goal plus scoped files; invalid or downclassifying user-supplied lanes fail closed
+- `refactor`, `migration`, and `policy_or_harness_change` require independent review roles and a human gate even when the separate risk classifier remains `low`
 - persisted `actionClasses` should be read as plan-derived scope or conservative evidence, depending on the field, not as a complete detector-backed policy trace
 - current post-run command/tool evidence is first-class typed `run_journal.contractRuns[].commandObservations[]` for the detector-backed command subset (`execute_local_command`, `install_dependency`, `mutate_git_state`), with legacy command-string fallback only when that typed field is absent
 
@@ -49,7 +52,7 @@ Roles here are capability boundaries with permission and evidence duties. Reusab
   - writes only inside the packet allowlist
 - `reviewer`
   - independent read-only review
-  - can request repair; the orchestrator spends at most one in-run repair loop by default
+  - can request repair; typed blocking findings become scoped repair contracts, and the orchestrator spends at most one in-run repair loop by default
 - `verifier`
   - read-only evidence collection
   - reports exact commands and outcomes
@@ -60,8 +63,10 @@ The contract currently requires:
 - no recursive delegation
 - workers are task-scoped and ephemeral
 - file allowlists per worker
+- explicit risk and task-lane values on planned worker packets
 - one in-run repair loop max by default
-- human gate for high-risk work unless the active policy profile denies the action entirely
+- repair-loop packets carry finding ids, target files when known, required corrections, forbidden changes, and expected verification; their write scope is clamped to the original packet allowlist
+- human gate for high-risk work and review-gated lanes unless the active policy profile denies the action entirely
 
 ## Workflow Stages
 
@@ -100,6 +105,7 @@ Approval meaning:
 Operator-facing run summaries should stay readable without hiding uncertainty. The live minimums are defined in [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md).
 
 Current formatter coverage now includes dedicated summary lines for changed surfaces, proof collected, unproven claims, reviewability, approval needed, and recovery / undo notes.
+It also includes a compact review pack that groups changed files, commands run, proven claims, unproven claims, reviewability status, and the next human decision.
 
 In practice, the current summary should make clear:
 
@@ -113,6 +119,7 @@ In practice, the current summary should make clear:
 This guide does not add new evidence-schema fields. The authoritative operator-readable evidence model now lives in [`RUN-EVIDENCE-SCHEMA.md`](./RUN-EVIDENCE-SCHEMA.md).
 
 In current v1, operator summaries should use persisted `run_journal.contractRuns[].changedSurface` evidence when available, explicitly mark partial capture when only some runs have observed paths, and fall back to planned scope with a caveat when capture is unavailable.
+When available, summaries should use the typed per-contract `claimLedger[]`, `acceptanceArtifact`, and `traceability` fields rather than reconstructing proof status from narrative evidence strings.
 
 ### `brainstorm`
 
@@ -195,12 +202,14 @@ Use when the task is already bounded enough to execute.
 Current state:
 
 - plans a bounded workflow
+- emits a deterministic task lane on the workflow and worker packets
 - runs it through the configured worker runner
 - defaults to `pi_runtime`; process backend routing is only used when `processWorkerBackend` and `autoBackendMode` are explicitly configured
 - the local Pi shim currently pins `process_subagents`, so local development `/auto` runs use the process backend by default
 - supports `low_risk_process_implementer`, which routes low-risk `implementer` and `verifier` packets to the process backend
 - supports `process_subagents`, which routes `explorer`, `implementer`, `reviewer`, and `verifier` packets to the process backend
 - enforces read-only roles and an in-run repair-loop budget
+- converts typed reviewer findings into bounded repair packets instead of using reviewer prose as an open-ended repair goal
 - in process backend mode, `explorer`, `reviewer`, and `verifier` are read-only; `implementer` can write only inside packet allowlists and still respects forbidden paths
 - uses the Pi-backed runner by default when the host exposes worker execution
 - cleanly blocks if the live Pi runtime surface is missing or unsafe
@@ -219,11 +228,14 @@ Current state:
 Current context-selection note:
 
 - `contextManifest[]` is structural provenance instrumentation, not a retrieval engine
-- entries carry stable references and typed reasons; they do not embed full file contents or prior-result payloads
+- entries carry stable references, typed reasons, and optional deterministic metadata; they do not embed full file contents or prior-result payloads
 - packet-level `contextManifest[]` is canonical for explicit packet `contextFiles` only (`context_file` entries), and packet-authored manifests are accepted only when they exactly match that canonical subset
 - runtime-derived provenance (`prior_result`, `review_result`, trusted `changed_surface`) is added by code during run-context assembly, not accepted as packet-authored manifest input
 - runtime admission checks enforce bidirectional manifest/payload alignment for
-  those provenance kinds; mismatches fail closed as context-assembly drift
+  those provenance kinds and fail closed on malformed or drifted present
+  metadata
+- read-only recon artifacts can be forwarded inside prior-result context as
+  advisory scope/context/validation input; they do not authorize writes
 - truncation is explicit and typed through `contextBudget`; this is structural
   budgeting only and does not claim semantic retrieval scoring
 - `contextBudget` is runtime-truth validated against forwarded payload shape;
@@ -310,7 +322,8 @@ For zero-to-project work:
 3. Inspect status any time with `build-status <buildId>`
 4. Resume only in-progress (`running`) journals with `resume-program`; persisted terminal `blocked`, `failed`, and `repair_required` journals do not continue execution. Current implementation returns a new blocked refusal result for those resume attempts, so use a new `build` run to continue work
 5. `repair_required` is not a separate repair phase; it is the terminal outcome emitted when review still requires changes after the allowed in-run repair loop is exhausted or unavailable
-6. Use `brainstorm`, `blueprint`, `slice`, `bootstrap`, and `audit` directly when deeper control is needed
+6. Inspect persisted `failureClass` on terminal run journals and terminal contract runs when deciding whether a repeated failure deserves a deterministic regression fixture
+7. Use `brainstorm`, `blueprint`, `slice`, `bootstrap`, and `audit` directly when deeper control is needed
 
 In plain English, `/build-approve <buildId>` means "record approval for this saved plan identified by its stored `programId` and `planFingerprint` within the recorded approval scope, then try to start it if the pre-execution gate still passes," not "do anything later needed to finish the project." If the stored plan fingerprint changes before execution, or if the current pre-execution derived action-class set contains a newly introduced or stricter class outside the recorded approval scope, the harness should stop and require another approval path rather than silently widening authority. That fail-closed stop can happen after approval is recorded but before execution starts. Mid-run reapproval and richer operator-safe mode hardening are tracked in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
 
