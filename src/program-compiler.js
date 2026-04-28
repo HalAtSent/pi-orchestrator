@@ -61,6 +61,7 @@ function validateExecutionContract(contract) {
     constraints: normalizeStringArray("contract.constraints", contract.constraints),
     nonGoals: normalizeStringArray("contract.nonGoals", contract.nonGoals),
     acceptanceChecks: normalizeStringArray("contract.acceptanceChecks", contract.acceptanceChecks),
+    verificationPlan: normalizeStringArray("contract.verificationPlan", contract.verificationPlan ?? []),
     stopConditions: normalizeStringArray("contract.stopConditions", contract.stopConditions),
     deliverables: normalizeStringArray("contract.deliverables", contract.deliverables),
     risk: contract.risk
@@ -86,7 +87,13 @@ function mergePacketPolicy(packet, contract) {
       ...packet.stopConditions,
       ...contract.stopConditions,
       ...contract.constraints.map((constraint) => `Stop if this contract constraint cannot be preserved: ${constraint}`)
-    ])
+    ]),
+    commands: packet.role === "verifier"
+      ? unique([
+        ...(packet.commands ?? []),
+        ...contract.verificationPlan
+      ])
+      : packet.commands
   });
 }
 
@@ -127,6 +134,7 @@ export function compileExecutionContract(contractInput, { contextFiles = [] } = 
     constraints: [...contract.constraints],
     nonGoals: [...contract.nonGoals],
     acceptanceChecks: [...contract.acceptanceChecks],
+    verificationPlan: [...contract.verificationPlan],
     stopConditions: [...contract.stopConditions],
     workflow: {
       workflowId,

@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { createTaskPacket, createWorkerResult, RESULT_STATUSES } from "./contracts.js";
+import { RUN_CONTEXT_BUDGET_LIMITS } from "./context-manifest.js";
 import { isPathWithinScope, normalizeScopedPath } from "./path-scopes.js";
+import { findProtectedPaths } from "./policies.js";
 import {
   assertExistingPathHasNoSymlinkSegments,
   assertExistingPathRealpathWithinRoot,
@@ -26,25 +28,23 @@ import {
 } from "./process-model-probe.js";
 import { getPiSpawnCommand } from "./pi-spawn.js";
 import {
-  assertRedactionMetadataMatchesCoveredStrings,
-  createBoundaryPathRedactor,
-  mergeRedactionMetadata,
-  normalizeRedactionMetadata,
-  redactCoveredStringFields,
   truncateBoundaryString
 } from "./redaction.js";
 import { safeClone } from "./safe-clone.js";
+import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
 
 const SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const DEFAULT_TEMP_PREFIX = "pi-orchestrator-process-worker-";
 const DEFAULT_APPLY_TEMP_PREFIX = ".pi-orchestrator-apply-";
+const APPLY_TRANSACTION_JOURNAL_FILE = "apply-journal.json";
 const DEFAULT_LAUNCH_TIMEOUT_MS = 120_000;
 const DEFAULT_TIMEOUT_KILL_GRACE_MS = 2_000;
 const DEFAULT_COMMAND_OUTPUT_BUFFER_MAX_CHARS = 1_000_000;
 const READ_ONLY_RETRY_STDOUT_SNIPPET_MAX_CHARS = 600;
 const LAUNCHER_STDOUT_SURFACE_MAX_CHARS = 1200;
 const LAUNCHER_STDERR_SURFACE_MAX_CHARS = 1200;
+const WORKFLOW_CONTEXT_PROMPT_MAX_CHARS = 12_000;
 const IMPLICIT_PI_DEFAULT_SELECTION = "implicit_pi_default";
 const EXPLICIT_PROVIDER_MODEL_OVERRIDE_MODE = "explicit_provider_model_override";
 const EXPLICIT_FLAG_WITHOUT_VALUE = "explicit_requested_without_value";
@@ -311,8 +311,74 @@ function createPlainSpawnOptions(cwd) {
   return {
     cwd,
     detached: process.platform !== "win32",
+    env: createSanitizedProcessEnv(cwd),
     shell: false,
     stdio: ["ignore", "pipe", "pipe"]
+  };
+}
+
+function firstNonEmptyString(values, fallback = null) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
+function createSanitizedProcessEnv(cwd, sourceEnv = process.env) {
+  const workspaceHome = resolve(cwd);
+  const pathKey = process.platform === "win32" ? "Path" : "PATH";
+  const pathValue = firstNonEmptyString([
+    sourceEnv.PATH,
+    sourceEnv.Path
+  ], process.platform === "win32"
+    ? "C:\\Windows\\System32;C:\\Windows"
+    : "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+  const sanitized = {
+    [pathKey]: pathValue,
+    HOME: workspaceHome,
+    TMPDIR: workspaceHome,
+    TMP: workspaceHome,
+    TEMP: workspaceHome,
+    XDG_CACHE_HOME: join(workspaceHome, ".cache"),
+    XDG_CONFIG_HOME: join(workspaceHome, ".config"),
+    XDG_DATA_HOME: join(workspaceHome, ".local", "share"),
+    TERM: firstNonEmptyString([sourceEnv.TERM], "dumb")
+  };
+
+  for (const key of ["LANG", "LC_ALL", "LC_CTYPE", "NO_COLOR", "FORCE_COLOR"]) {
+    if (typeof sourceEnv[key] === "string" && sourceEnv[key].trim().length > 0) {
+      sanitized[key] = sourceEnv[key];
+    }
+  }
+
+  if (process.platform === "win32") {
+    for (const key of ["SystemRoot", "WINDIR", "PATHEXT"]) {
+      if (typeof sourceEnv[key] === "string" && sourceEnv[key].trim().length > 0) {
+        sanitized[key] = sourceEnv[key];
+      }
+    }
+  }
+
+  return sanitized;
+}
+
+function normalizeSpawnOptionsWithSanitizedEnv(spawnOptions, cwd) {
+  const normalizedOptions = spawnOptions && typeof spawnOptions === "object"
+    ? { ...spawnOptions }
+    : createPlainSpawnOptions(cwd);
+  const normalizedCwd = typeof normalizedOptions.cwd === "string" && normalizedOptions.cwd.trim().length > 0
+    ? normalizedOptions.cwd
+    : cwd;
+
+  return {
+    ...normalizedOptions,
+    cwd: normalizedCwd,
+    env: createSanitizedProcessEnv(normalizedCwd, {
+      ...process.env,
+      ...(normalizedOptions.env && typeof normalizedOptions.env === "object" ? normalizedOptions.env : {})
+    })
   };
 }
 
@@ -960,178 +1026,18 @@ function collectBoundaryLaunchResultStringFields(result) {
   return fields;
 }
 
-function buildEvidenceCoveredStringFields(evidence) {
-  return evidence.map((entry, index) => ({
-    fieldName: resolveEvidenceRedactionFieldName(entry, index),
-    value: entry
-  }));
-}
-
-function buildWorkerResultCoveredRedactionFields(result) {
-  const stringFields = [
-    {
-      fieldName: "result.summary",
-      value: result.summary
-    }
-  ];
-  const stringArrayFields = [
-    {
-      fieldName: "result.changedFiles",
-      value: result.changedFiles
-    },
-    {
-      fieldName: "result.commandsRun",
-      value: result.commandsRun
-    },
-    {
-      fieldName: "result.openQuestions",
-      value: result.openQuestions
-    }
-  ];
-
-  buildEvidenceCoveredStringFields(result.evidence).forEach((field) => {
-    stringFields.push(field);
-  });
-
-  collectBoundaryLaunchResultStringFields(result).forEach((field) => {
-    stringFields.push({
-      fieldName: field.fieldName,
-      value: field.value
-    });
-  });
-
-  if (Array.isArray(result.commandObservations)) {
-    result.commandObservations.forEach((observation, index) => {
-      stringFields.push({
-        fieldName: `result.commandObservations[${index}].command`,
-        value: observation.command
-      });
-    });
-  }
-
-  if (Array.isArray(result.reviewFindings)) {
-    result.reviewFindings.forEach((finding, index) => {
-      stringFields.push({
-        fieldName: `result.reviewFindings[${index}].message`,
-        value: finding.message
-      });
-    });
-  }
-
-  return {
-    stringFields,
-    stringArrayFields
-  };
-}
-
 function redactWorkerResultForBoundary(result, {
   repositoryRoot,
   processWorkspaceRoots = []
 }) {
-  const redactor = createBoundaryPathRedactor({
+  return sanitizeWorkerResultForBoundary(result, {
     repositoryRoot,
-    processWorkspaceRoots
+    processWorkspaceRoots,
+    evidenceFieldNameResolver: resolveEvidenceRedactionFieldName,
+    extraStringFields: collectBoundaryLaunchResultStringFields(result),
+    validateExistingRedaction: true,
+    mergeExistingRedaction: false
   });
-  const coveredRedactionFields = buildWorkerResultCoveredRedactionFields(result);
-
-  const summary = redactor.redactString(result.summary, {
-    fieldName: "result.summary"
-  });
-  const changedFiles = redactor.redactStringArray(result.changedFiles, {
-    fieldName: "result.changedFiles"
-  });
-  const commandsRun = redactor.redactStringArray(result.commandsRun, {
-    fieldName: "result.commandsRun"
-  });
-  const evidence = redactCoveredStringFields({
-    redactor,
-    stringFields: buildEvidenceCoveredStringFields(result.evidence)
-  });
-  const openQuestions = redactor.redactStringArray(result.openQuestions, {
-    fieldName: "result.openQuestions"
-  });
-  const launchResultStringFields = collectBoundaryLaunchResultStringFields(result);
-  const redactedLaunchResultStringFields = redactCoveredStringFields({
-    redactor,
-    stringFields: launchResultStringFields.map(({ fieldName, value }) => ({
-      fieldName,
-      value
-    }))
-  });
-
-  const commandObservationRedactions = [];
-  const commandObservations = Array.isArray(result.commandObservations)
-    ? result.commandObservations.map((observation, index) => {
-      const command = redactor.redactString(observation.command, {
-        fieldName: `result.commandObservations[${index}].command`
-      });
-      commandObservationRedactions.push(command.redaction);
-      return {
-        ...observation,
-        command: command.value
-      };
-    })
-    : undefined;
-
-  const reviewFindingRedactions = [];
-  const reviewFindings = Array.isArray(result.reviewFindings)
-    ? result.reviewFindings.map((finding, index) => {
-      const message = redactor.redactString(finding.message, {
-        fieldName: `result.reviewFindings[${index}].message`
-      });
-      reviewFindingRedactions.push(message.redaction);
-      return {
-        ...finding,
-        message: message.value
-      };
-    })
-    : undefined;
-
-  if (Object.prototype.hasOwnProperty.call(result, "redaction")) {
-    const normalizedExistingRedaction = normalizeRedactionMetadata(result.redaction, {
-      fieldName: "result.redaction",
-      allowMissing: false
-    });
-    assertRedactionMetadataMatchesCoveredStrings(normalizedExistingRedaction, {
-      redactor,
-      fieldName: "result.redaction",
-      stringFields: coveredRedactionFields.stringFields,
-      stringArrayFields: coveredRedactionFields.stringArrayFields
-    });
-  }
-
-  const redacted = {
-    ...result,
-    summary: summary.value,
-    changedFiles: changedFiles.values,
-    commandsRun: commandsRun.values,
-    evidence: evidence.values,
-    openQuestions: openQuestions.values,
-    redaction: mergeRedactionMetadata(
-      summary.redaction,
-      changedFiles.redaction,
-      commandsRun.redaction,
-      evidence.redaction,
-      openQuestions.redaction,
-      redactedLaunchResultStringFields.redaction,
-      ...commandObservationRedactions,
-      ...reviewFindingRedactions
-    )
-  };
-
-  launchResultStringFields.forEach((field, index) => {
-    redacted[field.key] = redactedLaunchResultStringFields.values[index];
-  });
-
-  if (commandObservations !== undefined) {
-    redacted.commandObservations = commandObservations;
-  }
-
-  if (reviewFindings !== undefined) {
-    redacted.reviewFindings = reviewFindings;
-  }
-
-  return createWorkerResult(redacted);
 }
 
 function getProviderModelSelectionFromLaunchSelection(launchSelection) {
@@ -1194,6 +1100,48 @@ async function getPathStats(pathValue) {
     }
 
     throw error;
+  }
+}
+
+async function fingerprintRepositoryDestination(pathValue) {
+  const pathStats = await getPathLstat(pathValue);
+  if (!pathStats) {
+    return "missing";
+  }
+
+  if (pathStats.isSymbolicLink()) {
+    return "symlink";
+  }
+
+  if (pathStats.isDirectory()) {
+    return "directory";
+  }
+
+  if (!pathStats.isFile()) {
+    return "special";
+  }
+
+  const content = await readFile(pathValue);
+  return createHash("sha256").update(content).digest("hex");
+}
+
+async function assertRepositoryDestinationsMatchSeed({
+  repositoryRoot,
+  changedFiles,
+  seedSnapshot
+}) {
+  const normalizedRepositoryRoot = resolve(repositoryRoot);
+
+  for (const changedFileInput of changedFiles) {
+    const changedFile = normalizeRelativeFilePath(changedFileInput, "changedFiles");
+    const destinationPath = resolve(normalizedRepositoryRoot, changedFile);
+    assertWithinRoot(normalizedRepositoryRoot, destinationPath, "repository changed file");
+    await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, dirname(destinationPath), "repository changed file");
+    const expectedFingerprint = seedSnapshot.has(changedFile) ? seedSnapshot.get(changedFile) : "missing";
+    const currentFingerprint = await fingerprintRepositoryDestination(destinationPath);
+    if (currentFingerprint !== expectedFingerprint) {
+      throw new Error(`repository destination changed after worker seed snapshot: ${changedFile}`);
+    }
   }
 }
 
@@ -1267,6 +1215,76 @@ async function assertExistingTreeHasNoSymlinks(pathValue, label) {
   }
 }
 
+async function hashRegularFileIfPresent(pathValue) {
+  const stats = await getPathStats(pathValue);
+  if (!stats) {
+    return null;
+  }
+  if (!stats.isFile()) {
+    return stats.isDirectory() ? "directory" : "special";
+  }
+
+  const content = await readFile(pathValue);
+  return `sha256:${createHash("sha256").update(content).digest("hex")}`;
+}
+
+async function writeApplyTransactionJournal(applyRoot, {
+  state,
+  repositoryRoot,
+  workspaceRoot,
+  operations
+}) {
+  const journal = {
+    artifactType: "pi_orchestrator_apply_transaction_journal",
+    version: 1,
+    state,
+    updatedAt: new Date().toISOString(),
+    repositoryRoot,
+    workspaceRoot,
+    operations: operations.map((operation) => ({
+      changedFile: operation.changedFile,
+      sourceExists: operation.sourceExists,
+      destinationExisted: operation.destinationExisted,
+      backupCreated: operation.backupCreated,
+      destinationApplied: operation.destinationApplied,
+      sourceHash: operation.sourceHash,
+      destinationBeforeHash: operation.destinationBeforeHash,
+      destinationAfterHash: operation.destinationAfterHash ?? null
+    }))
+  };
+
+  await writeFile(
+    join(applyRoot, APPLY_TRANSACTION_JOURNAL_FILE),
+    `${JSON.stringify(journal, null, 2)}\n`,
+    "utf8"
+  );
+}
+
+async function assertNoIncompleteApplyTransactions(repositoryRoot) {
+  const entries = await readdir(repositoryRoot, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !entry.name.startsWith(DEFAULT_APPLY_TEMP_PREFIX)) {
+      continue;
+    }
+
+    const transactionRoot = join(repositoryRoot, entry.name);
+    const journalPath = join(transactionRoot, APPLY_TRANSACTION_JOURNAL_FILE);
+    let journal;
+    try {
+      journal = JSON.parse(await readFile(journalPath, "utf8"));
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        throw new Error(`incomplete changed-file apply transaction detected without journal: ${entry.name}`);
+      }
+      throw new Error(`incomplete changed-file apply transaction journal is unreadable: ${entry.name}`);
+    }
+
+    if (journal?.state !== "completed" && journal?.state !== "rolled_back") {
+      throw new Error(`incomplete changed-file apply transaction detected: ${entry.name} (${journal?.state ?? "unknown"})`);
+    }
+  }
+}
+
 async function applyChangedFilesToRepository({
   repositoryRoot,
   workspaceRoot,
@@ -1277,11 +1295,13 @@ async function applyChangedFilesToRepository({
 
   const normalizedRepositoryRoot = resolve(repositoryRoot);
   const normalizedWorkspaceRoot = resolve(workspaceRoot);
+  await assertNoIncompleteApplyTransactions(normalizedRepositoryRoot);
   const applyRoot = await mkdtemp(join(normalizedRepositoryRoot, DEFAULT_APPLY_TEMP_PREFIX));
   const stagedRoot = resolve(applyRoot, "staged");
   const backupRoot = resolve(applyRoot, "backup");
   const operations = [];
   let commitStarted = false;
+  let preserveApplyRoot = false;
 
   try {
     for (const changedFileInput of changedFiles) {
@@ -1303,8 +1323,10 @@ async function applyChangedFilesToRepository({
 
       const destinationStats = await getPathStats(destinationPath);
       if (destinationStats?.isDirectory()) {
-        throw new Error(`cannot atomically replace directory destination: ${changedFile}`);
+        throw new Error(`cannot replace directory destination through changed-file apply: ${changedFile}`);
       }
+      const sourceHash = sourceStats ? await hashRegularFileIfPresent(sourcePath) : null;
+      const destinationBeforeHash = destinationStats ? await hashRegularFileIfPresent(destinationPath) : null;
 
       const stagedPath = resolve(stagedRoot, changedFile);
       assertWithinRoot(stagedRoot, stagedPath, "staged changed file");
@@ -1329,12 +1351,27 @@ async function applyChangedFilesToRepository({
         backupPath,
         sourceExists: Boolean(sourceStats),
         destinationExisted: Boolean(destinationStats),
+        sourceHash,
+        destinationBeforeHash,
+        destinationAfterHash: null,
         destinationApplied: false,
         backupCreated: false
       });
     }
 
+    await writeApplyTransactionJournal(applyRoot, {
+      state: "prepared",
+      repositoryRoot: normalizedRepositoryRoot,
+      workspaceRoot: normalizedWorkspaceRoot,
+      operations
+    });
     commitStarted = true;
+    await writeApplyTransactionJournal(applyRoot, {
+      state: "commit_started",
+      repositoryRoot: normalizedRepositoryRoot,
+      workspaceRoot: normalizedWorkspaceRoot,
+      operations
+    });
     for (const operation of operations) {
       if (operation.destinationExisted) {
         await assertExistingPathHasNoSymlinkSegments(normalizedRepositoryRoot, dirname(operation.destinationPath), "repository changed file");
@@ -1343,6 +1380,12 @@ async function applyChangedFilesToRepository({
         await moveFileFn(operation.destinationPath, operation.backupPath);
         await assertPathIsNotSymlink(operation.backupPath, "backup changed file");
         operation.backupCreated = true;
+        await writeApplyTransactionJournal(applyRoot, {
+          state: "commit_started",
+          repositoryRoot: normalizedRepositoryRoot,
+          workspaceRoot: normalizedWorkspaceRoot,
+          operations
+        });
       }
 
       if (operation.sourceExists) {
@@ -1352,8 +1395,21 @@ async function applyChangedFilesToRepository({
         await moveFileFn(operation.stagedPath, operation.destinationPath);
         await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
         operation.destinationApplied = true;
+        operation.destinationAfterHash = await hashRegularFileIfPresent(operation.destinationPath);
+        await writeApplyTransactionJournal(applyRoot, {
+          state: "commit_started",
+          repositoryRoot: normalizedRepositoryRoot,
+          workspaceRoot: normalizedWorkspaceRoot,
+          operations
+        });
       }
     }
+    await writeApplyTransactionJournal(applyRoot, {
+      state: "completed",
+      repositoryRoot: normalizedRepositoryRoot,
+      workspaceRoot: normalizedWorkspaceRoot,
+      operations
+    });
   } catch (error) {
     if (commitStarted) {
       let rollbackError = null;
@@ -1366,6 +1422,7 @@ async function applyChangedFilesToRepository({
               "repository changed file"
             );
             operation.destinationApplied = false;
+            operation.destinationAfterHash = await hashRegularFileIfPresent(operation.destinationPath);
           }
 
           if (operation.backupCreated) {
@@ -1379,24 +1436,46 @@ async function applyChangedFilesToRepository({
             await moveFileFn(operation.backupPath, operation.destinationPath);
             await assertPathIsNotSymlink(operation.destinationPath, "repository changed file");
             operation.backupCreated = false;
+            operation.destinationAfterHash = await hashRegularFileIfPresent(operation.destinationPath);
           }
+          await writeApplyTransactionJournal(applyRoot, {
+            state: "rollback_started",
+            repositoryRoot: normalizedRepositoryRoot,
+            workspaceRoot: normalizedWorkspaceRoot,
+            operations
+          });
         } catch (rollbackFailure) {
           rollbackError = rollbackError ?? rollbackFailure;
         }
       }
 
       if (rollbackError) {
+        preserveApplyRoot = true;
+        await writeApplyTransactionJournal(applyRoot, {
+          state: "rollback_failed",
+          repositoryRoot: normalizedRepositoryRoot,
+          workspaceRoot: normalizedWorkspaceRoot,
+          operations
+        });
         throw new Error(
-          `failed to apply changed files atomically and rollback failed: ${errorMessage(error)}; rollback_error: ${errorMessage(rollbackError)}`
+          `failed to apply changed files transactionally and rollback failed: ${errorMessage(error)}; rollback_error: ${errorMessage(rollbackError)}; apply_journal: ${join(applyRoot, APPLY_TRANSACTION_JOURNAL_FILE)}`
         );
       }
 
-      throw new Error(`failed to apply changed files atomically: ${errorMessage(error)}`);
+      await writeApplyTransactionJournal(applyRoot, {
+        state: "rolled_back",
+        repositoryRoot: normalizedRepositoryRoot,
+        workspaceRoot: normalizedWorkspaceRoot,
+        operations
+      });
+      throw new Error(`failed to apply changed files transactionally and rolled back: ${errorMessage(error)}`);
     }
 
-    throw new Error(`failed to prepare changed files for atomic apply: ${errorMessage(error)}`);
+    throw new Error(`failed to prepare changed files for transactional apply: ${errorMessage(error)}`);
   } finally {
-    await rm(applyRoot, { recursive: true, force: true });
+    if (!preserveApplyRoot) {
+      await rm(applyRoot, { recursive: true, force: true });
+    }
   }
 }
 
@@ -1437,6 +1516,14 @@ function diffSnapshots(beforeSnapshot, afterSnapshot) {
   return files.filter((file) => beforeSnapshot.get(file) !== afterSnapshot.get(file));
 }
 
+function formatChangedFileList(files, maxEntries = 20) {
+  const normalizedFiles = normalizeStringArray(files);
+  if (normalizedFiles.length <= maxEntries) {
+    return normalizedFiles.join(", ");
+  }
+  return `${normalizedFiles.slice(0, maxEntries).join(", ")} (+${normalizedFiles.length - maxEntries} more)`;
+}
+
 function getReadOnlyAllowedStatusInstruction(role) {
   return role === "reviewer"
     ? 'Allowed statuses: "success", "repair_required", "blocked".'
@@ -1473,7 +1560,160 @@ function buildRoleContractPromptSection(role, roleContractGuidance = getRoleCont
   ];
 }
 
-function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance()) {
+function hasWorkflowContextPromptData(context = {}) {
+  return Array.isArray(context?.priorResults) && context.priorResults.length > 0
+    || context?.reviewResult
+    || Array.isArray(context?.changedSurfaceContext) && context.changedSurfaceContext.length > 0
+    || context?.contextBudget;
+}
+
+function stringifyWorkflowPromptContext(promptContext) {
+  return JSON.stringify(promptContext, (key, value) => (
+    typeof value === "bigint" ? value.toString() : value
+  ), 2);
+}
+
+function truncatePromptContextStrings(value, maxStringLength) {
+  if (typeof value === "string") {
+    return truncateBoundaryString(value, {
+      maxLength: maxStringLength,
+      fieldName: "workflowContextPrompt.stringValue"
+    });
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((entry) => truncatePromptContextStrings(entry, maxStringLength));
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        truncatePromptContextStrings(entry, maxStringLength)
+      ])
+    );
+  }
+
+  return value;
+}
+
+function withPromptContextTruncationMetadata(promptContext, omittedChars) {
+  const contextBudget = promptContext.contextBudget && typeof promptContext.contextBudget === "object"
+    ? clone(promptContext.contextBudget)
+    : {};
+  const truncationCount = contextBudget.truncationCount && typeof contextBudget.truncationCount === "object"
+    ? clone(contextBudget.truncationCount)
+    : {};
+
+  return {
+    ...promptContext,
+    contextBudget: {
+      ...contextBudget,
+      promptContextTruncated: true,
+      truncationCount: {
+        ...truncationCount,
+        promptContextChars: omittedChars
+      }
+    }
+  };
+}
+
+function serializeWithPromptContextTruncationMetadata(promptContext, originalSerializedLength) {
+  let omittedChars = Math.max(1, originalSerializedLength);
+  let serialized = "";
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    serialized = stringifyWorkflowPromptContext(
+      withPromptContextTruncationMetadata(promptContext, omittedChars)
+    );
+    const exactOmittedChars = Math.max(1, originalSerializedLength - serialized.length);
+    if (exactOmittedChars === omittedChars) {
+      return serialized;
+    }
+    omittedChars = exactOmittedChars;
+  }
+
+  return stringifyWorkflowPromptContext(
+    withPromptContextTruncationMetadata(promptContext, omittedChars)
+  );
+}
+
+function compactPromptContextBudgetForFallback(contextBudget) {
+  if (!contextBudget || typeof contextBudget !== "object" || Array.isArray(contextBudget)) {
+    return null;
+  }
+
+  return {
+    ...clone(contextBudget),
+    truncatedPriorResultPacketIds: Array.isArray(contextBudget.truncatedPriorResultPacketIds)
+      ? contextBudget.truncatedPriorResultPacketIds.slice(0, RUN_CONTEXT_BUDGET_LIMITS.maxTruncatedPriorResultPacketIds)
+      : []
+  };
+}
+
+function serializeBoundedWorkflowPromptContext(promptContext) {
+  const originalSerializedContext = stringifyWorkflowPromptContext(promptContext);
+  if (originalSerializedContext.length <= WORKFLOW_CONTEXT_PROMPT_MAX_CHARS) {
+    return originalSerializedContext;
+  }
+
+  for (const maxStringLength of [512, 256, 128, 64]) {
+    const truncatedPromptContext = truncatePromptContextStrings(promptContext, maxStringLength);
+    const serializedWithMetadata = serializeWithPromptContextTruncationMetadata(
+      truncatedPromptContext,
+      originalSerializedContext.length
+    );
+    if (serializedWithMetadata.length <= WORKFLOW_CONTEXT_PROMPT_MAX_CHARS) {
+      return serializedWithMetadata;
+    }
+  }
+
+  const fallbackPromptContext = {
+    priorResults: [],
+    reviewResult: null,
+    changedSurfaceContext: [],
+    contextBudget: compactPromptContextBudgetForFallback(promptContext.contextBudget)
+  };
+  const serializedFallbackContext = serializeWithPromptContextTruncationMetadata(
+    fallbackPromptContext,
+    originalSerializedContext.length
+  );
+  if (serializedFallbackContext.length <= WORKFLOW_CONTEXT_PROMPT_MAX_CHARS) {
+    return serializedFallbackContext;
+  }
+
+  return serializeWithPromptContextTruncationMetadata({
+    priorResults: [],
+    reviewResult: null,
+    changedSurfaceContext: [],
+    contextBudget: null
+  }, originalSerializedContext.length);
+}
+
+function buildWorkflowContextPromptSection(context = {}) {
+  if (!hasWorkflowContextPromptData(context)) {
+    return [];
+  }
+
+  const promptContext = {
+    priorResults: Array.isArray(context.priorResults) ? clone(context.priorResults) : [],
+    reviewResult: context.reviewResult ? clone(context.reviewResult) : null,
+    changedSurfaceContext: Array.isArray(context.changedSurfaceContext) ? clone(context.changedSurfaceContext) : [],
+    contextBudget: context.contextBudget ? clone(context.contextBudget) : null
+  };
+  const serializedContext = serializeBoundedWorkflowPromptContext(promptContext);
+
+  return [
+    "WORKFLOW_CONTEXT:",
+    "- This is validated, bounded, and path-redacted orchestration context forwarded from earlier worker runs.",
+    "- Use priorResults, reviewResult, and changedSurfaceContext when they are relevant to the current role.",
+    "- If reviewResult is present during a repair task, it contains the findings or rationale the repair must address.",
+    "WORKFLOW_CONTEXT_JSON:",
+    serializedContext
+  ];
+}
+
+function buildCodexPrompt(packet, context = {}, roleContractGuidance = getRoleContractGuidance()) {
   if (READ_ONLY_ROLES.has(packet.role)) {
     const roleLabel = packet.role === "explorer"
       ? "explorer"
@@ -1510,6 +1750,8 @@ function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance
       "",
       ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
       "",
+      ...buildWorkflowContextPromptSection(context),
+      ...(hasWorkflowContextPromptData(context) ? [""] : []),
       "ALLOWED_SCOPE:",
       ...packet.allowedFiles.map((file) => `- ${file}`)
     ];
@@ -1520,6 +1762,14 @@ function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance
 
     if (packet.acceptanceChecks.length > 0) {
       lines.push("", "ACCEPTANCE_CHECKS:", ...packet.acceptanceChecks.map((check) => `- ${check}`));
+    }
+
+    if (packet.commands.length > 0) {
+      lines.push(
+        "",
+        packet.role === "verifier" ? "VERIFICATION_PLAN:" : "COMMANDS:",
+        ...packet.commands.map((command) => `- ${command}`)
+      );
     }
 
     if (packet.stopConditions.length > 0) {
@@ -1550,6 +1800,8 @@ function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance
     "",
     ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
     "",
+    ...buildWorkflowContextPromptSection(context),
+    ...(hasWorkflowContextPromptData(context) ? [""] : []),
     "ALLOWED_FILES:",
     ...packet.allowedFiles.map((file) => `- ${file}`)
   ];
@@ -1566,6 +1818,10 @@ function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance
     lines.push("", "ACCEPTANCE_CHECKS:", ...packet.acceptanceChecks.map((check) => `- ${check}`));
   }
 
+  if (packet.commands.length > 0) {
+    lines.push("", "COMMANDS:", ...packet.commands.map((command) => `- ${command}`));
+  }
+
   if (packet.stopConditions.length > 0) {
     lines.push("", "STOP_CONDITIONS:", ...packet.stopConditions.map((condition) => `- ${condition}`));
   }
@@ -1574,7 +1830,7 @@ function buildCodexPrompt(packet, roleContractGuidance = getRoleContractGuidance
   return lines.join("\n");
 }
 
-function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuidance = getRoleContractGuidance()) {
+function buildStrictReadOnlyRetryPrompt(packet, previousStdout, context = {}, roleContractGuidance = getRoleContractGuidance()) {
   const roleLabel = packet.role === "explorer"
     ? "explorer"
     : packet.role === "reviewer"
@@ -1599,6 +1855,8 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuid
     "",
     ...buildRoleContractPromptSection(packet.role, roleContractGuidance),
     "",
+    ...buildWorkflowContextPromptSection(context),
+    ...(hasWorkflowContextPromptData(context) ? [""] : []),
     "ALLOWED_SCOPE:",
     ...packet.allowedFiles.map((file) => `- ${file}`)
   ];
@@ -1609,6 +1867,14 @@ function buildStrictReadOnlyRetryPrompt(packet, previousStdout, roleContractGuid
 
   if (packet.acceptanceChecks.length > 0) {
     lines.push("", "ACCEPTANCE_CHECKS:", ...packet.acceptanceChecks.map((check) => `- ${check}`));
+  }
+
+  if (packet.commands.length > 0) {
+    lines.push(
+      "",
+      packet.role === "verifier" ? "VERIFICATION_PLAN:" : "COMMANDS:",
+      ...packet.commands.map((command) => `- ${command}`)
+    );
   }
 
   lines.push(
@@ -1705,9 +1971,7 @@ async function runCommand({
 
   const spawnCommand = typeof spawnPlan?.command === "string" ? spawnPlan.command : command;
   const spawnArgs = Array.isArray(spawnPlan?.args) ? spawnPlan.args.map((value) => String(value)) : [];
-  const spawnOptions = spawnPlan?.spawnOptions && typeof spawnPlan.spawnOptions === "object"
-    ? spawnPlan.spawnOptions
-    : createPlainSpawnOptions(cwd);
+  const spawnOptions = normalizeSpawnOptionsWithSanitizedEnv(spawnPlan?.spawnOptions, cwd);
   const sandboxAttestation = buildSandboxAttestation(sandboxProvider, spawnPlan?.evidence);
 
   return new Promise((resolveResult) => {
@@ -2488,7 +2752,7 @@ export function createProcessPiCliLauncher(options = {}) {
     const roleContractGuidance = hasPromptOverride ? null : roleContractGuidanceLoader();
     const prompt = hasPromptOverride
       ? promptOverride
-      : buildCodexPrompt(packet, roleContractGuidance);
+      : buildCodexPrompt(packet, context, roleContractGuidance);
     let argsBuilderOutput;
     try {
       argsBuilderOutput = await resolvedArgsBuilder({
@@ -2784,12 +3048,41 @@ export function createProcessWorkerBackend({
         });
       }
 
+      const protectedPacketPaths = findProtectedPaths([
+        ...allowedFiles,
+        ...forbiddenFiles,
+        ...contextFiles
+      ]);
+      if (protectedPacketPaths.length > 0) {
+        return blockedResult(`process worker blocked: packet references protected path(s): ${protectedPacketPaths.join(", ")}`, {
+          evidence: [
+            "protected packet paths are blocked before worker launch",
+            `protected paths: ${protectedPacketPaths.join(", ")}`
+          ],
+          openQuestions: [
+            "Narrow the packet scope to repository files outside protected harness, dependency, build, coverage, and secret paths."
+          ]
+        });
+      }
+
       const normalizedPacket = {
         ...packet,
         allowedFiles,
         forbiddenFiles,
-        contextFiles
+        contextFiles,
+        commands: Array.isArray(packet.commands) ? [...packet.commands] : []
       };
+
+      try {
+        await assertNoIncompleteApplyTransactions(normalizedRepositoryRoot);
+      } catch (error) {
+        return blockedResult(`process worker blocked: ${errorMessage(error)}`, {
+          evidence: ["changed_file_apply_transaction_preflight: blocked"],
+          openQuestions: [
+            "Inspect or recover the incomplete apply transaction before launching another process worker."
+          ]
+        });
+      }
 
       let sandboxAvailability;
       try {
@@ -2826,6 +3119,7 @@ export function createProcessWorkerBackend({
       }
 
       let changedFiles = [];
+      let repositoryDriftFiles = [];
       let launchResult = null;
       let providerModelSelection = null;
       const copiedSeedFiles = [];
@@ -2881,6 +3175,9 @@ export function createProcessWorkerBackend({
         }
 
         const beforeSnapshot = await snapshotFiles(workspaceRoot);
+        const repositoryBeforeSnapshot = sandboxConfig.policy === PROCESS_SANDBOX_DISABLED
+          ? await snapshotFiles(normalizedRepositoryRoot)
+          : null;
 
         launchResult = await launcher({
           packet: clone(normalizedPacket),
@@ -2901,6 +3198,10 @@ export function createProcessWorkerBackend({
 
         const afterSnapshot = await snapshotFiles(workspaceRoot);
         changedFiles = diffSnapshots(beforeSnapshot, afterSnapshot);
+        if (repositoryBeforeSnapshot) {
+          const repositoryAfterSnapshot = await snapshotFiles(normalizedRepositoryRoot);
+          repositoryDriftFiles = diffSnapshots(repositoryBeforeSnapshot, repositoryAfterSnapshot);
+        }
         const isReadOnlyRole = READ_ONLY_ROLES.has(packet.role);
         let commandsRun = inferCommandsRun(launchResult);
         let observedCommandsRun = inferObservedCommandsRun(launchResult);
@@ -2916,6 +3217,25 @@ export function createProcessWorkerBackend({
           sandboxConfig
         });
         let readOnlyStructuredOutputSource = null;
+
+        if (repositoryDriftFiles.length > 0) {
+          return failedResult("process worker failed: unsandboxed launcher modified repository files outside controlled workspace apply", {
+            changedFiles,
+            commandsRun,
+            observedCommandsRun,
+            evidence: unique([
+              ...evidence,
+              "repository_drift_checked: true",
+              `repository_drift_files: ${formatChangedFileList(repositoryDriftFiles)}`,
+              "allowlist_enforced: false",
+              "repository_changes_applied: false"
+            ]),
+            openQuestions: [
+              "Run with a trusted OS sandbox provider or keep launcher writes confined to the temp workspace."
+            ],
+            providerModelSelection
+          });
+        }
 
         const setReadOnlyRetryAttemptedEvidence = (attempted) => {
           if (!isReadOnlyRole) {
@@ -3003,6 +3323,7 @@ export function createProcessWorkerBackend({
           const retryPrompt = buildStrictReadOnlyRetryPrompt(
             normalizedPacket,
             launchResult?.stdout ?? "",
+            contextInput,
             getRoleContractGuidance()
           );
 
@@ -3029,6 +3350,10 @@ export function createProcessWorkerBackend({
 
           const retrySnapshot = await snapshotFiles(workspaceRoot);
           changedFiles = diffSnapshots(beforeSnapshot, retrySnapshot);
+          if (repositoryBeforeSnapshot) {
+            const retryRepositorySnapshot = await snapshotFiles(normalizedRepositoryRoot);
+            repositoryDriftFiles = diffSnapshots(repositoryBeforeSnapshot, retryRepositorySnapshot);
+          }
           commandsRun = [...commandsRun, ...inferCommandsRun(launchResult)];
           observedCommandsRun = [...observedCommandsRun, ...inferObservedCommandsRun(launchResult)];
           evidence = unique([
@@ -3045,6 +3370,25 @@ export function createProcessWorkerBackend({
               sandboxConfig
             }), "retry_")
           ]);
+
+          if (repositoryDriftFiles.length > 0) {
+            return failedResult("process worker failed: unsandboxed launcher modified repository files outside controlled workspace apply", {
+              changedFiles,
+              commandsRun,
+              observedCommandsRun,
+              evidence: unique([
+                ...evidence,
+                "repository_drift_checked: true",
+                `repository_drift_files: ${formatChangedFileList(repositoryDriftFiles)}`,
+                "allowlist_enforced: false",
+                "repository_changes_applied: false"
+              ]),
+              openQuestions: [
+                "Run with a trusted OS sandbox provider or keep launcher writes confined to the temp workspace."
+              ],
+              providerModelSelection
+            });
+          }
 
           if (launchResult?.error) {
             return blockedResult(`process worker blocked: launcher invocation failed (${errorMessage(launchResult.error)})`, {
@@ -3166,6 +3510,23 @@ export function createProcessWorkerBackend({
           });
         }
 
+        const changedProtectedFiles = findProtectedPaths(changedFiles);
+        if (changedProtectedFiles.length > 0) {
+          return failedResult("process worker failed: worker changed protected files", {
+            changedFiles,
+            commandsRun,
+            observedCommandsRun,
+            evidence: unique([
+              ...evidence,
+              `protected_files_changed: ${changedProtectedFiles.join(", ")}`
+            ]),
+            openQuestions: [
+              "Narrow worker output to non-protected repository files."
+            ],
+            providerModelSelection
+          });
+        }
+
         if (isReadOnlyRole && structuredReadOnlyOutput) {
           const commandObservations = deriveProcessBackendCommandObservations(observedCommandsRun);
           return finalizeWorkerResult(createWorkerResult({
@@ -3179,6 +3540,7 @@ export function createProcessWorkerBackend({
               ...structuredReadOnlyOutput.evidence,
               "read_only_structured_output_valid: true",
               `read_only_structured_output_source: ${readOnlyStructuredOutputSource ?? "unknown"}`,
+              `repository_drift_checked: ${repositoryBeforeSnapshot ? "true" : "not_applicable"}`,
               "allowlist_enforced: true",
               "recursive_delegation_forbidden: true",
               "repository_changes_applied: not_applicable"
@@ -3245,6 +3607,11 @@ export function createProcessWorkerBackend({
         }
 
         if (packet.role === "implementer" && changedFiles.length > 0) {
+          await assertRepositoryDestinationsMatchSeed({
+            repositoryRoot: normalizedRepositoryRoot,
+            changedFiles,
+            seedSnapshot: beforeSnapshot
+          });
           await applyChangedFilesToRepository({
             repositoryRoot: normalizedRepositoryRoot,
             workspaceRoot,
@@ -3266,6 +3633,7 @@ export function createProcessWorkerBackend({
             packet.role === "implementer"
               ? `validation_evidence_captured: ${validationEvidence.length > 0 ? "true" : "false"}`
               : "validation_evidence_captured: not_applicable",
+            `repository_drift_checked: ${repositoryBeforeSnapshot ? "true" : "not_applicable"}`,
             "allowlist_enforced: true",
             "recursive_delegation_forbidden: true"
           ]),

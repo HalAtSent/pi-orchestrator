@@ -111,6 +111,148 @@ test("adapter forwards bounded worker request fields to the runtime host", async
   assert.equal(calls[0].context.packet.id, "packet-1");
 });
 
+test("adapter rejects direct unsafe path references before runtime invocation", async () => {
+  for (const unsafePath of ["../../outside.js", "/tmp/outside.js", ".pi/runs/x.json", "node_modules/pkg/index.js"]) {
+    let callCount = 0;
+    const adapter = createPiAdapter({
+      host: {
+        async runWorker() {
+          callCount += 1;
+          return {
+            status: "success",
+            summary: "should not run",
+            changedFiles: [],
+            commandsRun: [],
+            evidence: [],
+            openQuestions: []
+          };
+        }
+      }
+    });
+
+    const result = await adapter.runWorker(createWorkerRequest("implementer", {
+      allowedFiles: [unsafePath]
+    }), {});
+
+    assert.equal(result.status, "blocked");
+    assert.equal(callCount, 0);
+    assert.match(result.summary, /relative path|escape|protected path/i);
+  }
+});
+
+test("adapter rejects write-capable policies for direct read-only role requests", async () => {
+  let callCount = 0;
+  const adapter = createPiAdapter({
+    host: {
+      async runWorker() {
+        callCount += 1;
+        return {
+          status: "success",
+          summary: "should not run",
+          changedFiles: [],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("reviewer", {
+    controls: {
+      noRecursiveDelegation: true,
+      taskScoped: true,
+      ephemeral: true,
+      writePolicy: "allowlist_only"
+    },
+    modelProfile: {
+      model: "gpt-5.5",
+      reasoningEffort: "high",
+      access: "write"
+    }
+  }), {});
+
+  assert.equal(result.status, "blocked");
+  assert.equal(callCount, 0);
+  assert.match(result.summary, /read_only writePolicy|read-only model profile/i);
+});
+
+test("adapter rejects direct implementer requests without allowlist-only write controls", async () => {
+  let callCount = 0;
+  const adapter = createPiAdapter({
+    host: {
+      async runWorker() {
+        callCount += 1;
+        return {
+          status: "success",
+          summary: "should not run",
+          changedFiles: ["outside.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("implementer", {
+    controls: {
+      noRecursiveDelegation: true,
+      taskScoped: true,
+      ephemeral: true,
+      writePolicy: "read_only"
+    }
+  }), {});
+
+  assert.equal(result.status, "blocked");
+  assert.equal(callCount, 0);
+  assert.match(result.summary, /allowlist_only writePolicy/i);
+});
+
+test("adapter redacts direct runtime result narrative and typed review finding messages", async () => {
+  const repoAbsolutePath = join(process.cwd(), "src", "helpers.js");
+  const externalAbsolutePath = join(tmpdir(), `pi-adapter-redaction-${process.pid}.txt`);
+  const adapter = createPiAdapter({
+    supportedRoles: ["reviewer"],
+    host: {
+      async runWorker() {
+        return {
+          status: "repair_required",
+          summary: `Review found API_KEY=adaptersecret123 at ${repoAbsolutePath}`,
+          changedFiles: [],
+          commandsRun: ["curl -H 'Authorization: Bearer adapterbearer12345' https://example.invalid"],
+          evidence: [`external_path: ${externalAbsolutePath}`],
+          openQuestions: ["Rotate TOKEN=adaptertoken456?"],
+          reviewFindings: [
+            {
+              kind: "issue",
+              severity: "high",
+              message: `Found password is adapterpassword789 in ${externalAbsolutePath}`
+            }
+          ]
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("reviewer"), {});
+  const serialized = JSON.stringify(result);
+
+  assert.equal(result.status, "repair_required");
+  for (const raw of [
+    "adaptersecret123",
+    "adapterbearer12345",
+    "adaptertoken456",
+    "adapterpassword789",
+    repoAbsolutePath,
+    externalAbsolutePath
+  ]) {
+    assert.equal(serialized.includes(raw), false, raw);
+  }
+  assert.match(serialized, /<secret_material>/u);
+  assert.match(serialized, /<absolute_path>/u);
+});
+
 test("adapter preserves runtime typed review findings when provided", async () => {
   const adapter = createPiAdapter({
     supportedRoles: ["reviewer"],
@@ -211,6 +353,54 @@ test("adapter blocks runtime responses that signal recursive delegation", async 
 
   assert.equal(result.status, "blocked");
   assert.match(result.summary, /recursive delegation/i);
+});
+
+test("adapter blocks read-only runtime responses that report changed files", async () => {
+  const adapter = createPiAdapter({
+    supportedRoles: ["reviewer"],
+    host: {
+      async runWorker() {
+        return {
+          status: "success",
+          summary: "reviewed",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("reviewer"), {});
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /returned writes for read-only reviewer/i);
+  assert.deepEqual(result.changedFiles, []);
+});
+
+test("adapter blocks implementer runtime responses outside allowlist and forbidden paths", async () => {
+  const adapter = createPiAdapter({
+    supportedRoles: ["implementer"],
+    host: {
+      async runWorker() {
+        return {
+          status: "success",
+          summary: "changed",
+          changedFiles: ["src/forbidden.js", "src/outside.js"],
+          commandsRun: [],
+          evidence: [],
+          openQuestions: []
+        };
+      }
+    }
+  });
+
+  const result = await adapter.runWorker(createWorkerRequest("implementer"), {});
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /outside the allowlist/i);
+  assert.deepEqual(result.changedFiles, []);
 });
 
 test("adapter fails closed when workflowContext payloads drift from contextManifest", async () => {
@@ -500,7 +690,7 @@ test("adapter trusted runtime repositoryRoot still fails closed when workflowCon
     });
 
     assert.equal(result.status, "blocked");
-    assert.match(result.summary, /context\.workflowContext\.packetContextFiles\[0\] must resolve within the repository root/i);
+    assert.match(result.summary, /request path must not escape the repository root|context\.workflowContext\.packetContextFiles\[0\] must resolve within the repository root/i);
     assert.equal(runtimeCallCount, 0);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });

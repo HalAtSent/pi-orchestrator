@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, readlink, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { createWorkerResult, validateTaskPacket } from "./contracts.js";
-import { assertExistingPathHasNoSymlinkSegments, assertWithinRoot } from "./path-safety.js";
+import { assertExistingPathHasNoSymlinkSegments, getPathLstat } from "./path-safety.js";
 import { isPathWithinScope, normalizeScopedPath, scopesOverlap } from "./path-scopes.js";
 import { findProtectedPacketPaths } from "./policies.js";
 import { safeClone } from "./safe-clone.js";
@@ -15,6 +15,7 @@ import {
   setTrustedRuntimeRepositoryRoot,
   validateRunContext
 } from "./context-manifest.js";
+import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
 
 const READ_ONLY_ACCESS = "read_only";
 const WRITE_ACCESS = "write";
@@ -336,6 +337,56 @@ function isWriteRole(roleProfile) {
   return roleProfile.access === WRITE_ACCESS;
 }
 
+function resolveObservedExecutionSnapshotScope() {
+  return [""];
+}
+
+function isRealpathInsideRoot(rootRealpath, candidateRealpath) {
+  const relativePath = relative(rootRealpath, candidateRealpath);
+  return relativePath === ""
+    || (
+      !relativePath.startsWith("..")
+      && !isAbsolute(relativePath)
+    );
+}
+
+async function assertRepositorySymlinksResolveInsideRoot(repositoryRoot) {
+  const root = resolve(repositoryRoot);
+  const rootRealpath = await realpath(root);
+
+  async function visit(relativePath) {
+    const absolutePath = resolve(root, relativePath);
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+
+    await visitDirectoryEntriesInBatches(entries, async (entry) => {
+      const entryRelativePath = relativePath.length > 0
+        ? `${relativePath}/${entry.name}`
+        : entry.name;
+      const entryAbsolutePath = resolve(root, entryRelativePath);
+
+      if (entry.isSymbolicLink()) {
+        let targetRealpath;
+        try {
+          targetRealpath = await realpath(entryAbsolutePath);
+        } catch (error) {
+          throw new Error(`repository symlink target could not be resolved safely: ${entryRelativePath} (${error.message})`);
+        }
+
+        if (!isRealpathInsideRoot(rootRealpath, targetRealpath)) {
+          throw new Error(`repository symlink resolves outside the repository: ${entryRelativePath}`);
+        }
+        return;
+      }
+
+      if (entry.isDirectory()) {
+        await visit(entryRelativePath);
+      }
+    });
+  }
+
+  await visit("");
+}
+
 async function snapshotScopedFiles(repositoryRoot, scopedPaths) {
   const root = resolve(repositoryRoot);
   const snapshot = new Map();
@@ -367,7 +418,8 @@ async function snapshotScopedFiles(repositoryRoot, scopedPaths) {
       snapshot.set(normalizedRelativePath.endsWith("/") ? normalizedRelativePath : `${normalizedRelativePath}/`, "directory");
       const entries = await readdir(absolutePath, { withFileTypes: true });
       await visitDirectoryEntriesInBatches(entries, async (entry) => {
-        await visit(`${normalizedRelativePath.replace(/\/$/u, "")}/${entry.name}`);
+        const directoryPrefix = normalizedRelativePath.replace(/\/$/u, "");
+        await visit(directoryPrefix.length > 0 ? `${directoryPrefix}/${entry.name}` : entry.name);
       });
       return;
     }
@@ -386,78 +438,6 @@ async function snapshotScopedFiles(repositoryRoot, scopedPaths) {
     await visit(scopedPath);
   }
 
-  return snapshot;
-}
-
-async function snapshotRepositoryFiles(repositoryRoot) {
-  const root = resolve(repositoryRoot);
-  const rootRealPath = await realpath(root);
-  const snapshot = new Map();
-
-  async function assertSymlinkTargetWithinRepository(absolutePath, normalizedRelativePath) {
-    let targetRealPath;
-    try {
-      targetRealPath = await realpath(absolutePath);
-    } catch (error) {
-      throw new Error(`repository symlink ${normalizedRelativePath} target must resolve within the repository root (${error.message})`);
-    }
-
-    try {
-      assertWithinRoot(rootRealPath, targetRealPath, `repository symlink ${normalizedRelativePath} target`);
-    } catch (error) {
-      throw new Error(`repository symlink ${normalizedRelativePath} target resolves outside the repository root`);
-    }
-  }
-
-  async function visit(relativePath) {
-    const normalizedRelativePath = normalizeScopedPath(relativePath);
-    const absolutePath = resolve(root, normalizedRelativePath);
-    let stats;
-    try {
-      stats = await lstat(absolutePath);
-    } catch (error) {
-      if (error && error.code === "ENOENT") {
-        snapshot.set(normalizedRelativePath, "missing");
-        return;
-      }
-      throw error;
-    }
-
-    if (stats.isSymbolicLink()) {
-      const target = await readlink(absolutePath);
-      await assertSymlinkTargetWithinRepository(absolutePath, normalizedRelativePath);
-      snapshot.set(
-        normalizedRelativePath,
-        `symlink:${stats.size}:${stats.mode}:${stats.uid}:${stats.gid}:${stats.mtimeMs}:${stats.ctimeMs}:${target}`
-      );
-      return;
-    }
-
-    if (stats.isDirectory()) {
-      snapshot.set(normalizedRelativePath.endsWith("/") || normalizedRelativePath.length === 0
-        ? normalizedRelativePath
-        : `${normalizedRelativePath}/`, "directory");
-      const entries = await readdir(absolutePath, { withFileTypes: true });
-      await visitDirectoryEntriesInBatches(entries, async (entry) => {
-        const childRelativePath = normalizedRelativePath.length === 0
-          ? entry.name
-          : `${normalizedRelativePath.replace(/\/$/u, "")}/${entry.name}`;
-        await visit(childRelativePath);
-      });
-      return;
-    }
-
-    if (!stats.isFile()) {
-      snapshot.set(normalizedRelativePath, `special:${stats.size}:${stats.mtimeMs}`);
-      return;
-    }
-
-    const content = await readFile(absolutePath);
-    const digest = createHash("sha256").update(content).digest("hex");
-    snapshot.set(normalizedRelativePath, `file:${stats.size}:${digest}`);
-  }
-
-  await visit("");
   return snapshot;
 }
 
@@ -503,6 +483,24 @@ function assertObservedWritePolicy({ packet, roleProfile, observedChangedFiles }
   }
 }
 
+async function assertObservedChangedFilesSafe({ repositoryRoot, observedChangedFiles }) {
+  const root = resolve(repositoryRoot);
+  for (const changedFile of observedChangedFiles) {
+    const absolutePath = resolve(root, changedFile);
+    await assertExistingPathHasNoSymlinkSegments(root, absolutePath, `observed changed file ${changedFile}`);
+    const stats = await getPathLstat(absolutePath);
+    if (!stats) {
+      continue;
+    }
+    if (stats.isSymbolicLink()) {
+      throw new Error(`observed changed file must not be a symlink: ${changedFile}`);
+    }
+    if (stats.isFile() && Number.isInteger(stats.nlink) && stats.nlink > 1) {
+      throw new Error(`observed changed file must not be hardlinked to multiple directory entries: ${changedFile}`);
+    }
+  }
+}
+
 function assertReportedChangedFilesWithinPolicy({ packet, roleProfile, reportedChangedFiles }) {
   const normalizedChangedFiles = normalizeFileList(reportedChangedFiles);
   if (!isWriteRole(roleProfile) || normalizedChangedFiles.length === 0) {
@@ -517,6 +515,34 @@ function assertReportedChangedFilesWithinPolicy({ packet, roleProfile, reportedC
   }
 
   return normalizedChangedFiles;
+}
+
+function formatChangedFileSet(values) {
+  return values.length > 0 ? values.join(", ") : "none";
+}
+
+function createReportedObservedChangedFilesMismatchEvidence({
+  reportedChangedFiles,
+  observedChangedFiles
+}) {
+  const reportedSet = new Set(reportedChangedFiles);
+  const observedSet = new Set(observedChangedFiles);
+  const missingFromReport = observedChangedFiles.filter((file) => !reportedSet.has(file));
+  const unobservedReported = reportedChangedFiles.filter((file) => !observedSet.has(file));
+
+  if (missingFromReport.length === 0 && unobservedReported.length === 0) {
+    return [];
+  }
+
+  return [
+    `reported_changed_files_mismatch: reported=${formatChangedFileSet(reportedChangedFiles)} observed=${formatChangedFileSet(observedChangedFiles)}`,
+    ...(missingFromReport.length > 0
+      ? [`reported_changed_files_missing_observed: ${missingFromReport.join(", ")}`]
+      : []),
+    ...(unobservedReported.length > 0
+      ? [`reported_changed_files_unobserved: ${unobservedReported.join(", ")}`]
+      : [])
+  ];
 }
 
 function validateResultWritePolicy({ packet, roleProfile, workerResult }) {
@@ -703,6 +729,11 @@ export function createPiWorkerRunner({
 
   return {
     async run(packetInput, context = {}) {
+      let boundaryRepositoryRoot = process.cwd();
+      const finalizeResult = (result) => sanitizeWorkerResultForBoundary(result, {
+        repositoryRoot: boundaryRepositoryRoot,
+        mergeExistingRedaction: true
+      });
       let packet;
       try {
         packet = normalizePacket(packetInput);
@@ -710,19 +741,19 @@ export function createPiWorkerRunner({
         const role = typeof packetInput?.role === "string" && packetInput.role.trim().length > 0
           ? packetInput.role.trim()
           : "unknown";
-        return createBlockedResult({
+        return finalizeResult(createBlockedResult({
           role,
           summary: `invalid task packet (${error.message})`,
           evidence: ["packet validation failed before worker launch"],
           openQuestions: [
             "Provide a valid task packet before launching a Pi worker."
           ]
-        });
+        }));
       }
 
       const protectedPacketPaths = findProtectedPacketPaths(packet);
       if (protectedPacketPaths.length > 0) {
-        return createBlockedResult({
+        return finalizeResult(createBlockedResult({
           role: packet.role,
           summary: `packet references protected path(s): ${protectedPacketPaths.join(", ")}`,
           evidence: [
@@ -732,32 +763,32 @@ export function createPiWorkerRunner({
           openQuestions: [
             "Narrow the packet scope to repository files outside protected harness, dependency, build, coverage, and secret paths."
           ]
-        });
+        }));
       }
 
       const roleProfile = normalizedRoleProfiles[packet.role];
 
       if (!roleProfile) {
-        return createBlockedResult({
+        return finalizeResult(createBlockedResult({
           role: packet.role,
           summary: "no Pi role profile is configured for this worker role",
           openQuestions: [
             `Configure a Pi role profile for ${packet.role} before re-running.`
           ]
-        });
+        }));
       }
 
       let runtimeContext;
       try {
         runtimeContext = normalizeRuntimeContext(packet, context);
       } catch (error) {
-        return createFailedResult({
+        return finalizeResult(createFailedResult({
           role: packet.role,
           summary: error.message,
           openQuestions: [
             "Ensure runtime context payloads match contextManifest[] before worker execution."
           ]
-        });
+        }));
       }
 
       const runId = `${packet.id}:${packet.role}:${runCounter + 1}`;
@@ -771,7 +802,7 @@ export function createPiWorkerRunner({
 
         if (!claimResult.ok) {
           const blockedFiles = claimResult.conflicts.map((conflict) => `${conflict.file} (owned by ${conflict.owner})`);
-          return createBlockedResult({
+          return finalizeResult(createBlockedResult({
             role: packet.role,
             summary: `write scope already claimed: ${blockedFiles.join(", ")}`,
             evidence: [
@@ -780,7 +811,7 @@ export function createPiWorkerRunner({
             openQuestions: [
               "Wait for the active writer to complete or narrow this packet allowlist."
             ]
-          });
+          }));
         }
       }
 
@@ -797,7 +828,7 @@ export function createPiWorkerRunner({
         if (claimOwner) {
           claimRegistry.release(claimOwner);
         }
-        return createBlockedResult({
+        return finalizeResult(createBlockedResult({
           role: packet.role,
           summary: `model availability probe failed (${error.message})`,
           evidence: [
@@ -808,21 +839,21 @@ export function createPiWorkerRunner({
           openQuestions: [
             "Configure an available native Pi model or update the model probe before re-running."
           ]
-        });
+        }));
       }
 
       if (!resolvedModelProfile.ok) {
         if (claimOwner) {
           claimRegistry.release(claimOwner);
         }
-        return createBlockedResult({
+        return finalizeResult(createBlockedResult({
           role: packet.role,
           summary: resolvedModelProfile.reason,
           evidence: resolvedModelProfile.evidence,
           openQuestions: [
             "Configure an available native Pi model or explicit fallback before re-running."
           ]
-        });
+        }));
       }
 
       const request = buildWorkerRequest({
@@ -864,36 +895,47 @@ export function createPiWorkerRunner({
 
         const trustedRunRepositoryRoot = getTrustedRuntimeRepositoryRoot(runtimeContext);
         const repositoryRoot = trustedRunRepositoryRoot ?? process.cwd();
+        boundaryRepositoryRoot = repositoryRoot;
         let beforeSnapshot;
+        const executionSnapshotScope = resolveObservedExecutionSnapshotScope(packet, resolvedModelProfile.roleProfile);
         try {
           await assertPacketExecutionPathsHaveNoSymlinks({
             repositoryRoot,
             packet
           });
-          beforeSnapshot = await snapshotRepositoryFiles(repositoryRoot);
+          await assertRepositorySymlinksResolveInsideRoot(repositoryRoot);
+          beforeSnapshot = await snapshotScopedFiles(repositoryRoot, executionSnapshotScope);
         } catch (error) {
-          return createBlockedResult({
+          return finalizeResult(createBlockedResult({
             role: packet.role,
             summary: error.message,
             openQuestions: [
               "Remove repository symlinks from native Pi execution surfaces before re-running."
             ]
-          });
+          }));
         }
         const adapterResponse = await adapter.runWorker(clone(request), adapterContext);
-        const afterSnapshot = await snapshotRepositoryFiles(repositoryRoot);
+        const afterSnapshot = await snapshotScopedFiles(repositoryRoot, executionSnapshotScope);
         const observedChangedFiles = diffScopedSnapshots(beforeSnapshot, afterSnapshot);
         assertObservedWritePolicy({
           packet,
           roleProfile: resolvedModelProfile.roleProfile,
           observedChangedFiles
         });
+        await assertObservedChangedFilesSafe({
+          repositoryRoot,
+          observedChangedFiles
+        });
         assertNoRecursiveDelegation(adapterResponse);
         const rawWorkerResult = extractWorkerResult(adapterResponse);
-        assertReportedChangedFilesWithinPolicy({
+        const reportedChangedFiles = assertReportedChangedFilesWithinPolicy({
           packet,
           roleProfile: resolvedModelProfile.roleProfile,
           reportedChangedFiles: rawWorkerResult?.changedFiles ?? []
+        });
+        const changedFilesMismatchEvidence = createReportedObservedChangedFilesMismatchEvidence({
+          reportedChangedFiles,
+          observedChangedFiles: normalizeFileList(observedChangedFiles)
         });
         if (
           isWriteRole(resolvedModelProfile.roleProfile)
@@ -909,22 +951,23 @@ export function createPiWorkerRunner({
             : rawWorkerResult?.changedFiles,
           evidence: unique([
             ...(Array.isArray(rawWorkerResult?.evidence) ? rawWorkerResult.evidence : []),
+            ...changedFilesMismatchEvidence,
             ...resolvedModelProfile.evidence
           ])
         });
-        return validateResultWritePolicy({
+        return finalizeResult(validateResultWritePolicy({
           packet,
           roleProfile: resolvedModelProfile.roleProfile,
           workerResult
-        });
+        }));
       } catch (error) {
-        return createFailedResult({
+        return finalizeResult(createFailedResult({
           role: packet.role,
           summary: error.message,
           openQuestions: [
             "Inspect the Pi adapter output and bounded packet constraints."
           ]
-        });
+        }));
       } finally {
         if (claimOwner) {
           claimRegistry.release(claimOwner);

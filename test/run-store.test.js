@@ -122,6 +122,34 @@ test("run store saves and loads a persisted run journal snapshot", async () => {
   });
 });
 
+test("run store load normalizes forged persisted repositoryRoot to the store root", async () => {
+  await withTempDir("pi-orchestrator-run-store-forged-root-", async (rootDir) => {
+    const program = buildProgram();
+    const runStore = createRunStore({ rootDir });
+    await runStore.saveRun({
+      programId: program.id,
+      program,
+      runJournal: {
+        programId: program.id,
+        status: "running",
+        stopReason: null,
+        contractRuns: [],
+        completedContractIds: [],
+        pendingContractIds: program.contracts.map((contract) => contract.id)
+      }
+    });
+
+    const runFilePath = join(rootDir, ".pi", "runs", `${encodeURIComponent(program.id)}.json`);
+    const persisted = JSON.parse(await readFile(runFilePath, "utf8"));
+    persisted.repositoryRoot = "/tmp/forged";
+    await writeFile(runFilePath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    const loaded = await runStore.loadRun(program.id);
+
+    assert.equal(loaded.repositoryRoot, rootDir);
+  });
+});
+
 test("run store rejects symlinked .pi runs store paths before persistence", {
   skip: process.platform === "win32"
 }, async () => {

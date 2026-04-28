@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   BOUNDARY_TRUNCATION_MARKER_PREFIX,
   BOUNDARY_TRUNCATION_MARKER_SUFFIX,
+  REDACTION_SECRET_MATERIAL_PLACEHOLDER,
   assertRedactionMetadataMatchesCoveredStrings,
   createBoundaryPathRedactor,
   mergeRedactionMetadata,
@@ -95,6 +96,98 @@ test("boundary path redactor keeps relative paths unchanged", () => {
     repoPathRewrites: 0,
     workspacePathRewrites: 0,
     externalPathRewrites: 0
+  });
+});
+
+test("boundary redactor scrubs secret-looking material with distinct metadata", () => {
+  const fixture = buildPathFixture();
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot: fixture.repositoryRoot,
+    processWorkspaceRoots: [fixture.workspaceRoot]
+  });
+
+  const result = redactor.redactString(
+    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY token sk-abcdefghijklmnopqrstuvwxyz123456"
+  );
+
+  assert.equal(
+    result.value,
+    `AWS_SECRET_ACCESS_KEY=${REDACTION_SECRET_MATERIAL_PLACEHOLDER} token ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`
+  );
+  assert.deepEqual(result.redaction, {
+    applied: true,
+    repoPathRewrites: 0,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0,
+    secretMaterialRewrites: 2
+  });
+});
+
+test("boundary redactor scrubs quoted assignments, bearer headers, and common token shapes", () => {
+  const fixture = buildPathFixture();
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot: fixture.repositoryRoot,
+    processWorkspaceRoots: [fixture.workspaceRoot]
+  });
+
+  const result = redactor.redactString(
+    [
+      "API_KEY=\"quoted-secret-value\"",
+      "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
+      "jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+      "npm npm_abcdefghijklmnopqrstuvwxyz1234567890",
+      `slack ${["xoxb", "123456789012", "abcdefghijklmnopqrstuv"].join("-")}`
+    ].join(" ")
+  );
+
+  assert.equal(
+    result.value,
+    [
+      `API_KEY=${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `Authorization: Bearer ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `jwt ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `npm ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `slack ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`
+    ].join(" ")
+  );
+  assert.deepEqual(result.redaction, {
+    applied: true,
+    repoPathRewrites: 0,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0,
+    secretMaterialRewrites: 5
+  });
+});
+
+test("boundary redactor scrubs basic auth, cookie headers, and prose credentials", () => {
+  const fixture = buildPathFixture();
+  const redactor = createBoundaryPathRedactor({
+    repositoryRoot: fixture.repositoryRoot,
+    processWorkspaceRoots: [fixture.workspaceRoot]
+  });
+
+  const result = redactor.redactString(
+    [
+      "Authorization: Basic dXNlcjpwYXNz",
+      "Cookie: sessionid=abc123; csrftoken=def456",
+      "password is hunter2"
+    ].join("\n")
+  );
+
+  assert.equal(
+    result.value,
+    [
+      `Authorization: Basic ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `Cookie: ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`,
+      `password is ${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`
+    ].join("\n")
+  );
+  assert.deepEqual(result.redaction, {
+    applied: true,
+    repoPathRewrites: 0,
+    workspacePathRewrites: 0,
+    externalPathRewrites: 0,
+    secretMaterialRewrites: 3
   });
 });
 

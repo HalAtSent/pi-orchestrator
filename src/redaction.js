@@ -2,10 +2,18 @@ import { posix, win32 } from "node:path";
 
 export const REDACTION_PROCESS_WORKSPACE_PLACEHOLDER = "<process_workspace>";
 export const REDACTION_ABSOLUTE_PATH_PLACEHOLDER = "<absolute_path>";
+export const REDACTION_SECRET_MATERIAL_PLACEHOLDER = "<secret_material>";
 export const BOUNDARY_TRUNCATION_MARKER_PREFIX = "...[truncated ";
 export const BOUNDARY_TRUNCATION_MARKER_SUFFIX = " chars]";
 
 const ABSOLUTE_PATH_PATTERN = /(?<![A-Za-z0-9._-])[A-Za-z]:[\\/][^\s"'`<>()\[\]{}|,;:]*|(?<![A-Za-z0-9._-])\/[^\s"'`<>()\[\]{}|,;:\/]+(?:\/[^\s"'`<>()\[\]{}|,;:\/]+)*\/?/gu;
+const SECRET_ASSIGNMENT_PATTERN = /\b([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PRIVATE_KEY|PASSWORD|PASS|AUTH)[A-Z0-9_]*)\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|[^\s"'`]+)/giu;
+const SECRET_BEARER_HEADER_PATTERN = /\b(Authorization\s*:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{10,})\b/giu;
+const SECRET_BASIC_AUTH_HEADER_PATTERN = /\b((?:Authorization|Proxy-Authorization)\s*:\s*Basic\s+)([A-Za-z0-9._~+/=-]{6,})\b/giu;
+const SECRET_GENERIC_SECRET_HEADER_PATTERN = /\b((?:X-Api-Key|X-Auth-Token)\s*:\s*)([^\s\r\n;]+)/giu;
+const SECRET_COOKIE_HEADER_PATTERN = /\b((?:Cookie|Set-Cookie)\s*:\s*)([^\r\n]+)/giu;
+const SECRET_PROSE_PATTERN = /\b((?:password|passphrase|secret|token|api[_ -]?key|auth(?:entication)?\s+token)\s+(?:is|was|=|:)\s*)(?:"[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|[^\s"'`;]+)/giu;
+const SECRET_TOKEN_PATTERN = /\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|npm_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{20,}|ya29\.[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b/gu;
 
 function assert(condition, message) {
   if (!condition) {
@@ -31,7 +39,8 @@ function createRedactionCounts() {
   return {
     repoPathRewrites: 0,
     workspacePathRewrites: 0,
-    externalPathRewrites: 0
+    externalPathRewrites: 0,
+    secretMaterialRewrites: 0
   };
 }
 
@@ -44,14 +53,22 @@ function createRedactionMetadataFromCounts(counts) {
   const repoPathRewrites = normalizeNonNegativeInteger("redaction.repoPathRewrites", counts.repoPathRewrites);
   const workspacePathRewrites = normalizeNonNegativeInteger("redaction.workspacePathRewrites", counts.workspacePathRewrites);
   const externalPathRewrites = normalizeNonNegativeInteger("redaction.externalPathRewrites", counts.externalPathRewrites);
-  const totalRewrites = repoPathRewrites + workspacePathRewrites + externalPathRewrites;
+  const secretMaterialRewrites = normalizeNonNegativeInteger(
+    "redaction.secretMaterialRewrites",
+    counts.secretMaterialRewrites ?? 0
+  );
+  const totalRewrites = repoPathRewrites + workspacePathRewrites + externalPathRewrites + secretMaterialRewrites;
 
-  return {
+  const metadata = {
     applied: totalRewrites > 0,
     repoPathRewrites,
     workspacePathRewrites,
     externalPathRewrites
   };
+  if (secretMaterialRewrites > 0) {
+    metadata.secretMaterialRewrites = secretMaterialRewrites;
+  }
+  return metadata;
 }
 
 function isPlainObject(value) {
@@ -155,6 +172,7 @@ function addRedactionCounts(target, source) {
   target.repoPathRewrites += source.repoPathRewrites;
   target.workspacePathRewrites += source.workspacePathRewrites;
   target.externalPathRewrites += source.externalPathRewrites;
+  target.secretMaterialRewrites += source.secretMaterialRewrites ?? 0;
 }
 
 function assertBoundaryRedactor(redactor) {
@@ -179,11 +197,13 @@ function redactionMetadataMatches(left, right) {
   return left.applied === right.applied
     && left.repoPathRewrites === right.repoPathRewrites
     && left.workspacePathRewrites === right.workspacePathRewrites
-    && left.externalPathRewrites === right.externalPathRewrites;
+    && left.externalPathRewrites === right.externalPathRewrites
+    && (left.secretMaterialRewrites ?? 0) === (right.secretMaterialRewrites ?? 0);
 }
 
 function formatRedactionMetadataValue(metadata) {
-  return `{"applied":${metadata.applied},"repoPathRewrites":${metadata.repoPathRewrites},"workspacePathRewrites":${metadata.workspacePathRewrites},"externalPathRewrites":${metadata.externalPathRewrites}}`;
+  const secretMaterialRewrites = metadata.secretMaterialRewrites ?? 0;
+  return `{"applied":${metadata.applied},"repoPathRewrites":${metadata.repoPathRewrites},"workspacePathRewrites":${metadata.workspacePathRewrites},"externalPathRewrites":${metadata.externalPathRewrites},"secretMaterialRewrites":${secretMaterialRewrites}}`;
 }
 
 export function normalizeRedactionMetadata(value, {
@@ -202,18 +222,25 @@ export function normalizeRedactionMetadata(value, {
   const repoPathRewrites = normalizeNonNegativeInteger(`${fieldName}.repoPathRewrites`, value.repoPathRewrites);
   const workspacePathRewrites = normalizeNonNegativeInteger(`${fieldName}.workspacePathRewrites`, value.workspacePathRewrites);
   const externalPathRewrites = normalizeNonNegativeInteger(`${fieldName}.externalPathRewrites`, value.externalPathRewrites);
-  const expectedApplied = (repoPathRewrites + workspacePathRewrites + externalPathRewrites) > 0;
+  const secretMaterialRewrites = value.secretMaterialRewrites === undefined
+    ? 0
+    : normalizeNonNegativeInteger(`${fieldName}.secretMaterialRewrites`, value.secretMaterialRewrites);
+  const expectedApplied = (repoPathRewrites + workspacePathRewrites + externalPathRewrites + secretMaterialRewrites) > 0;
   assert(
     value.applied === expectedApplied,
     `${fieldName}.applied must be ${expectedApplied} when rewrite counts imply that value`
   );
 
-  return {
+  const metadata = {
     applied: expectedApplied,
     repoPathRewrites,
     workspacePathRewrites,
     externalPathRewrites
   };
+  if (secretMaterialRewrites > 0) {
+    metadata.secretMaterialRewrites = secretMaterialRewrites;
+  }
+  return metadata;
 }
 
 export function mergeRedactionMetadata(...metadataValues) {
@@ -370,7 +397,35 @@ export function createBoundaryPathRedactor({
   function redactString(value, { fieldName = "value" } = {}) {
     assert(typeof value === "string", `${fieldName} must be a string`);
     const counts = createRedactionCounts();
-    const redactedValue = value.replace(ABSOLUTE_PATH_PATTERN, (match, offset, source) => {
+    const cookieRedactedValue = value.replace(SECRET_COOKIE_HEADER_PATTERN, (_match, prefix) => {
+      counts.secretMaterialRewrites += 1;
+      return `${prefix}${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const assignmentRedactedValue = cookieRedactedValue.replace(SECRET_ASSIGNMENT_PATTERN, (_match, key) => {
+      counts.secretMaterialRewrites += 1;
+      return `${key}=${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const bearerRedactedValue = assignmentRedactedValue.replace(SECRET_BEARER_HEADER_PATTERN, (_match, prefix) => {
+      counts.secretMaterialRewrites += 1;
+      return `${prefix}${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const basicAuthHeaderRedactedValue = bearerRedactedValue.replace(SECRET_BASIC_AUTH_HEADER_PATTERN, (_match, prefix) => {
+      counts.secretMaterialRewrites += 1;
+      return `${prefix}${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const genericHeaderRedactedValue = basicAuthHeaderRedactedValue.replace(SECRET_GENERIC_SECRET_HEADER_PATTERN, (_match, prefix) => {
+      counts.secretMaterialRewrites += 1;
+      return `${prefix}${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const proseRedactedValue = genericHeaderRedactedValue.replace(SECRET_PROSE_PATTERN, (_match, prefix) => {
+      counts.secretMaterialRewrites += 1;
+      return `${prefix}${REDACTION_SECRET_MATERIAL_PLACEHOLDER}`;
+    });
+    const secretRedactedValue = proseRedactedValue.replace(SECRET_TOKEN_PATTERN, () => {
+      counts.secretMaterialRewrites += 1;
+      return REDACTION_SECRET_MATERIAL_PLACEHOLDER;
+    });
+    const redactedValue = secretRedactedValue.replace(ABSOLUTE_PATH_PATTERN, (match, offset, source) => {
       if (shouldIgnorePathMatch(source, offset, match)) {
         return match;
       }

@@ -303,16 +303,20 @@ test("runner builds the expected worker request payload", async () => {
       perResultEvidenceTruncated: false,
       perResultCommandsTruncated: false,
       perResultChangedFilesTruncated: false,
+      perResultOpenQuestionsTruncated: false,
       reviewResultTruncated: false,
       changedSurfaceTruncated: false,
+      promptContextTruncated: false,
       truncationCount: {
         priorResults: 0,
         evidenceEntries: 0,
         commandEntries: 0,
         changedFiles: 0,
+        openQuestionEntries: 0,
         reviewResultEvidenceEntries: 0,
         reviewResultOpenQuestionEntries: 0,
-        changedSurfacePaths: 0
+        changedSurfacePaths: 0,
+        promptContextChars: 0
       }
     }
   };
@@ -955,6 +959,51 @@ test("adapter response maps back into a valid worker result", async () => {
   }
 });
 
+test("native runner surfaces reported versus observed changed-file mismatches", async () => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-runner-changed-file-mismatch-"));
+  try {
+    mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+    writeFileSync(join(repositoryRoot, "src", "a.js"), "export const a = 1;\n", "utf8");
+    writeFileSync(join(repositoryRoot, "src", "b.js"), "export const b = 1;\n", "utf8");
+    writeFileSync(join(repositoryRoot, "README.md"), "# fixture\n", "utf8");
+
+    const runner = createPiWorkerRunner({
+      adapter: {
+        async runWorker(request) {
+          writeFileSync(join(repositoryRoot, "src", "a.js"), "export const a = 2;\n", "utf8");
+          writeFileSync(join(repositoryRoot, "src", "b.js"), "export const b = 2;\n", "utf8");
+          return {
+            status: "success",
+            summary: "changed two files but reported one",
+            changedFiles: ["src/a.js"],
+            commandsRun: [...request.commands],
+            evidence: ["runtime reported a partial changed surface"],
+            openQuestions: []
+          };
+        }
+      }
+    });
+
+    const result = await runner.run(createPacket("implementer", {
+      allowedFiles: ["src/a.js", "src/b.js"],
+      forbiddenFiles: []
+    }), createTrustedRepositoryContext(repositoryRoot));
+
+    assert.equal(result.status, "success");
+    assert.deepEqual(result.changedFiles, ["src/a.js", "src/b.js"]);
+    assert.equal(
+      result.evidence.some((entry) => entry.startsWith("reported_changed_files_mismatch:")),
+      true
+    );
+    assert.equal(
+      result.evidence.some((entry) => entry.includes("reported_changed_files_missing_observed: src/b.js")),
+      true
+    );
+  } finally {
+    rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("runner handles non-cloneable context values without crashing", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-runner-non-cloneable-"));
   mkdirSync(join(repositoryRoot, "src"), { recursive: true });
@@ -1085,7 +1134,7 @@ test("read-only Pi runner detects scoped writes even when worker reports no chan
   }
 });
 
-test("read-only Pi runner detects unscoped repository writes even when worker reports no changed files", async () => {
+test("read-only Pi runner detects unscoped repository writes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-read-only-unscoped-write-"));
   try {
     mkdirSync(join(repositoryRoot, "src"), { recursive: true });
@@ -1113,13 +1162,14 @@ test("read-only Pi runner detects unscoped repository writes even when worker re
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*src\/outside\.js/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("read-only Pi runner detects protected state writes even when worker reports no changed files", async () => {
+test("read-only Pi runner detects protected state writes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-read-only-protected-write-"));
   try {
     mkdirSync(join(repositoryRoot, "src"), { recursive: true });
@@ -1148,13 +1198,14 @@ test("read-only Pi runner detects protected state writes even when worker report
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*\.pi\/runs\/journal\.json/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("read-only Pi runner detects dependency writes even when worker reports no changed files", async () => {
+test("read-only Pi runner detects dependency writes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-read-only-dependency-write-"));
   try {
     mkdirSync(join(repositoryRoot, "src"), { recursive: true });
@@ -1183,13 +1234,14 @@ test("read-only Pi runner detects dependency writes even when worker reports no 
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*node_modules\/pkg\/index\.js/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("read-only Pi runner detects same-size dependency writes with restored mtime", async () => {
+test("read-only Pi runner detects same-size dependency writes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-read-only-dependency-spoof-"));
   try {
     const dependencyFile = join(repositoryRoot, "node_modules", "pkg", "index.js");
@@ -1222,7 +1274,8 @@ test("read-only Pi runner detects same-size dependency writes with restored mtim
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*node_modules\/pkg\/index\.js/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
@@ -1409,7 +1462,7 @@ test("native runner tolerates unrelated dependency bin symlinks during repositor
   }
 });
 
-test("native runner rejects external-target repository symlinks before worker execution", async () => {
+test("native runner blocks unrelated external-target repository symlinks before worker execution", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-external-repo-symlink-"));
   const outsideFile = join(tmpdir(), `pi-worker-external-target-${process.pid}-${Date.now()}.txt`);
   try {
@@ -1428,25 +1481,22 @@ test("native runner rejects external-target repository symlinks before worker ex
     let adapterCallCount = 0;
     const runner = createPiWorkerRunner({
       adapter: {
-        async runWorker(request) {
+        async runWorker(request, runtimeContext) {
           adapterCallCount += 1;
           writeFileSync(join(repositoryRoot, "misc", "link.txt"), "outside after\n", "utf8");
-          return successResultForRequest(request, {
-            changedFiles: [],
-            observeChange: false
-          });
+          return successResultForRequest(request, {}, runtimeContext);
         }
       }
     });
 
-    const result = await runner.run(createPacket("reviewer", {
+    const result = await runner.run(createPacket("implementer", {
       allowedFiles: ["src/allowed.js"],
       forbiddenFiles: [],
       contextFiles: ["README.md"]
     }), context);
 
     assert.equal(result.status, "blocked");
-    assert.match(result.summary, /repository symlink misc\/link\.txt target resolves outside the repository root/i);
+    assert.match(result.summary, /symlink resolves outside the repository/i);
     assert.equal(adapterCallCount, 0);
     assert.equal(readFileSync(outsideFile, "utf8"), "outside before\n");
   } finally {
@@ -1455,7 +1505,7 @@ test("native runner rejects external-target repository symlinks before worker ex
   }
 });
 
-test("native runner observes repository symlink target changes without following symlinks", async () => {
+test("read-only native runner detects unrelated symlink target changes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-symlink-target-change-"));
   try {
     const toolLink = join(repositoryRoot, "node_modules", ".bin", "tool");
@@ -1491,13 +1541,14 @@ test("native runner observes repository symlink target changes without following
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*node_modules\/\.bin\/tool/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("native runner observes internal repository symlink metadata changes", async () => {
+test("read-only native runner detects unrelated symlink metadata changes outside packet scope", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-symlink-metadata-change-"));
   try {
     const toolLink = join(repositoryRoot, "node_modules", ".bin", "tool");
@@ -1531,13 +1582,14 @@ test("native runner observes internal repository symlink metadata changes", asyn
     }), context);
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /read-only.*modified repository file.*node_modules\/\.bin\/tool/i);
+    assert.match(result.summary, /read-only.*modified repository file/i);
+    assert.deepEqual(result.changedFiles, []);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }
 });
 
-test("writer Pi runner detects unreported out-of-scope repository writes", async () => {
+test("writer Pi runner detects unreported packet-scope writes outside allowlist", async () => {
   const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-writer-unreported-outside-write-"));
   try {
     mkdirSync(join(repositoryRoot, "src"), { recursive: true });
@@ -1554,7 +1606,8 @@ test("writer Pi runner detects unreported out-of-scope repository writes", async
         async runWorker(request, runtimeContext) {
           writeFileSync(join(repositoryRoot, "src", "outside.js"), "export const outside = 2;\n", "utf8");
           return successResultForRequest(request, {
-            changedFiles: []
+            changedFiles: [],
+            observeChange: false
           });
         }
       }
@@ -1562,11 +1615,48 @@ test("writer Pi runner detects unreported out-of-scope repository writes", async
 
     const result = await runner.run(createPacket("implementer", {
       allowedFiles: ["src/allowed.js"],
-      forbiddenFiles: []
+      forbiddenFiles: [],
+      contextFiles: ["src/outside.js"]
     }), context);
 
     assert.equal(result.status, "failed");
     assert.match(result.summary, /outside its allowlist.*src\/outside\.js/i);
+  } finally {
+    rmSync(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("writer Pi runner detects unreported unscoped writes outside packet surfaces", async () => {
+  const repositoryRoot = mkdtempSync(join(tmpdir(), "pi-worker-writer-unscoped-write-"));
+  try {
+    mkdirSync(join(repositoryRoot, "src"), { recursive: true });
+    writeFileSync(join(repositoryRoot, "src", "allowed.js"), "export const allowed = 1;\n", "utf8");
+    writeFileSync(join(repositoryRoot, "README.md"), "# fixture\n", "utf8");
+
+    const context = {};
+    setTrustedRuntimeRepositoryRoot(context, repositoryRoot, {
+      fieldName: "context.repositoryRoot"
+    });
+
+    const runner = createPiWorkerRunner({
+      adapter: {
+        async runWorker(request, runtimeContext) {
+          writeFileSync(join(repositoryRoot, "src", "unscoped.js"), "export const unscoped = 1;\n", "utf8");
+          return successResultForRequest(request, {
+            changedFiles: ["src/allowed.js"]
+          }, runtimeContext);
+        }
+      }
+    });
+
+    const result = await runner.run(createPacket("implementer", {
+      allowedFiles: ["src/allowed.js"],
+      forbiddenFiles: [],
+      contextFiles: ["README.md"]
+    }), context);
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /outside its allowlist.*src\/unscoped\.js/i);
   } finally {
     rmSync(repositoryRoot, { recursive: true, force: true });
   }

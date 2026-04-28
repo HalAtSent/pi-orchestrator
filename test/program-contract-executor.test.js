@@ -138,6 +138,89 @@ test("default program contract executor can succeed with a scripted worker runne
   assert.equal(runner.getPendingStepCount(), 0);
 });
 
+test("program contract executor blocks success when verificationPlan commands are not reported", async () => {
+  const requiredCommand = "uv run pytest tests/test_critical.py";
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: [],
+        evidence: ["Implemented scoped change."],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Claimed verification without running the required command.",
+        changedFiles: [],
+        commandsRun: [],
+        evidence: ["Looked at the file."],
+        openQuestions: []
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract({
+    verificationPlan: [requiredCommand]
+  }));
+  const verifierCall = runner.getCalls().find((call) => call.packet.role === "verifier");
+
+  assert.equal(result.status, "blocked");
+  assert.match(result.summary, /verificationPlan command/i);
+  assert.equal(result.evidence.includes(`required verification command: ${requiredCommand}`), true);
+  assert.equal(result.evidence.includes(`missing_verification_commands: ${requiredCommand}`), true);
+  assert.equal(verifierCall.packet.commands.includes(requiredCommand), true);
+});
+
+test("program contract executor persists bounded worker evidence from workflow runs", async () => {
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: "Renamed the helper.",
+        changedFiles: ["src/helpers.js"],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: [
+          "process_backend_os_sandbox: true",
+          "stdout: helper check passed"
+        ],
+        openQuestions: []
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified helper behavior.",
+        changedFiles: [],
+        commandsRun: ["node --check src/helpers.js"],
+        evidence: ["validation_evidence_captured: node --check src/helpers.js"],
+        openQuestions: []
+      }
+    }
+  ]);
+  const executeContract = createProgramContractExecutor({ runner });
+
+  const result = await executeContract(buildLowRiskContract());
+
+  assert.equal(result.status, "success");
+  assert.equal(
+    result.evidence.some((entry) => entry.includes("run implementer evidence") && entry.includes("process_backend_os_sandbox: true")),
+    true
+  );
+  assert.equal(
+    result.evidence.some((entry) => entry.includes("run implementer evidence") && entry.includes("stdout: helper check passed")),
+    true
+  );
+});
+
 test("program contract executor fails closed on unsupported policy profile ids before worker launch", async () => {
   const runner = createScriptedWorkerRunner([
     {

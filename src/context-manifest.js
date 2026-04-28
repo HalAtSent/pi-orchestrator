@@ -43,6 +43,8 @@ export const RUN_CONTEXT_BUDGET_LIMITS = Object.freeze({
   maxPriorResultEvidence: 8,
   maxPriorResultCommands: 8,
   maxPriorResultChangedFiles: 8,
+  maxPriorResultOpenQuestions: 8,
+  maxTruncatedPriorResultPacketIds: 32,
   maxReviewResultEvidence: 8,
   maxReviewResultOpenQuestions: 8,
   maxChangedSurfacePaths: 8
@@ -433,11 +435,13 @@ function redactionMetadataEqual(left, right) {
   return left.applied === right.applied
     && left.repoPathRewrites === right.repoPathRewrites
     && left.workspacePathRewrites === right.workspacePathRewrites
-    && left.externalPathRewrites === right.externalPathRewrites;
+    && left.externalPathRewrites === right.externalPathRewrites
+    && (left.secretMaterialRewrites ?? 0) === (right.secretMaterialRewrites ?? 0);
 }
 
 function formatRedactionMetadata(metadata) {
-  return `{"applied":${metadata.applied},"repoPathRewrites":${metadata.repoPathRewrites},"workspacePathRewrites":${metadata.workspacePathRewrites},"externalPathRewrites":${metadata.externalPathRewrites}}`;
+  const secretMaterialRewrites = metadata.secretMaterialRewrites ?? 0;
+  return `{"applied":${metadata.applied},"repoPathRewrites":${metadata.repoPathRewrites},"workspacePathRewrites":${metadata.workspacePathRewrites},"externalPathRewrites":${metadata.externalPathRewrites},"secretMaterialRewrites":${secretMaterialRewrites}}`;
 }
 
 function cloneExpectedForwardedRedactionMetadata(value) {
@@ -978,6 +982,10 @@ function assertContextBudgetConsistency({
   );
 
   const seenTruncatedPacketIds = new Set();
+  assert(
+    truncatedPacketIds.length <= RUN_CONTEXT_BUDGET_LIMITS.maxTruncatedPriorResultPacketIds,
+    `${fieldName}.truncatedPriorResultPacketIds must contain at most ${RUN_CONTEXT_BUDGET_LIMITS.maxTruncatedPriorResultPacketIds} entries`
+  );
   for (const [index, packetId] of truncatedPacketIds.entries()) {
     assert(packetId.length > 0, `${fieldName}.truncatedPriorResultPacketIds[${index}] must be a non-empty string`);
     assert(
@@ -1010,6 +1018,11 @@ function assertContextBudgetConsistency({
     truncated: contextBudget.perResultChangedFilesTruncated,
     count: contextBudget.truncationCount.changedFiles
   });
+  assertContextBudgetTruncationFlag({
+    fieldName: `${fieldName}.perResultOpenQuestionsTruncated`,
+    truncated: contextBudget.perResultOpenQuestionsTruncated,
+    count: contextBudget.truncationCount.openQuestionEntries
+  });
   const reviewResultCountSignal = (
     contextBudget.truncationCount.reviewResultEvidenceEntries > 0
     || contextBudget.truncationCount.reviewResultOpenQuestionEntries > 0
@@ -1023,6 +1036,11 @@ function assertContextBudgetConsistency({
   assert(
     contextBudget.changedSurfaceTruncated === changedSurfaceCountSignal,
     `${fieldName}.changedSurfaceTruncated must be true iff truncationCount.changedSurfacePaths > 0`
+  );
+  const promptContextCountSignal = contextBudget.truncationCount.promptContextChars > 0;
+  assert(
+    contextBudget.promptContextTruncated === promptContextCountSignal,
+    `${fieldName}.promptContextTruncated must be true iff truncationCount.promptContextChars > 0`
   );
   assertRunContextPayloadTruncationSignalConsistency({
     contextBudget,
@@ -1086,6 +1104,11 @@ export function normalizeContextBudget(contextBudget, {
       value: contextBudget.perResultChangedFilesTruncated,
       defaultValue: false
     }),
+    perResultOpenQuestionsTruncated: normalizeOptionalBoolean({
+      fieldName: `${fieldName}.perResultOpenQuestionsTruncated`,
+      value: contextBudget.perResultOpenQuestionsTruncated,
+      defaultValue: false
+    }),
     reviewResultTruncated: normalizeOptionalBoolean({
       fieldName: `${fieldName}.reviewResultTruncated`,
       value: contextBudget.reviewResultTruncated,
@@ -1094,6 +1117,11 @@ export function normalizeContextBudget(contextBudget, {
     changedSurfaceTruncated: normalizeOptionalBoolean({
       fieldName: `${fieldName}.changedSurfaceTruncated`,
       value: contextBudget.changedSurfaceTruncated,
+      defaultValue: false
+    }),
+    promptContextTruncated: normalizeOptionalBoolean({
+      fieldName: `${fieldName}.promptContextTruncated`,
+      value: contextBudget.promptContextTruncated,
       defaultValue: false
     }),
     truncationCount: {
@@ -1117,6 +1145,11 @@ export function normalizeContextBudget(contextBudget, {
         value: truncationCount.changedFiles,
         defaultValue: 0
       }),
+      openQuestionEntries: normalizeNonNegativeInteger({
+        fieldName: `${fieldName}.truncationCount.openQuestionEntries`,
+        value: truncationCount.openQuestionEntries,
+        defaultValue: 0
+      }),
       reviewResultEvidenceEntries: normalizeNonNegativeInteger({
         fieldName: `${fieldName}.truncationCount.reviewResultEvidenceEntries`,
         value: truncationCount.reviewResultEvidenceEntries,
@@ -1130,6 +1163,11 @@ export function normalizeContextBudget(contextBudget, {
       changedSurfacePaths: normalizeNonNegativeInteger({
         fieldName: `${fieldName}.truncationCount.changedSurfacePaths`,
         value: truncationCount.changedSurfacePaths,
+        defaultValue: 0
+      }),
+      promptContextChars: normalizeNonNegativeInteger({
+        fieldName: `${fieldName}.truncationCount.promptContextChars`,
+        value: truncationCount.promptContextChars,
         defaultValue: 0
       })
     }

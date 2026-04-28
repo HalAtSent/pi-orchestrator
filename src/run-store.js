@@ -285,9 +285,7 @@ function normalizePersistedRunRecord(recordInput, { existingCreatedAt, repositor
       contractRuns: normalizedRunJournal.contractRuns
     });
   }
-  const normalizedRepositoryRoot = typeof recordInput.repositoryRoot === "string" && recordInput.repositoryRoot.trim().length > 0
-    ? recordInput.repositoryRoot.trim()
-    : repositoryRoot;
+  const normalizedRepositoryRoot = repositoryRoot;
   const artifactType = normalizeExactArtifactType(
     "persistedRun.artifactType",
     recordInput.artifactType,

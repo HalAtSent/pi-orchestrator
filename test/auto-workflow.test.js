@@ -106,9 +106,11 @@ function buildContextBudgetFixture(overrides = {}) {
     evidenceEntries: 0,
     commandEntries: 0,
     changedFiles: 0,
+    openQuestionEntries: 0,
     reviewResultEvidenceEntries: 0,
     reviewResultOpenQuestionEntries: 0,
-    changedSurfacePaths: 0
+    changedSurfacePaths: 0,
+    promptContextChars: 0
   };
 
   return {
@@ -117,8 +119,10 @@ function buildContextBudgetFixture(overrides = {}) {
     perResultEvidenceTruncated: false,
     perResultCommandsTruncated: false,
     perResultChangedFilesTruncated: false,
+    perResultOpenQuestionsTruncated: false,
     reviewResultTruncated: false,
     changedSurfaceTruncated: false,
+    promptContextTruncated: false,
     ...overrides,
     truncationCount: {
       ...defaultTruncationCount,
@@ -171,6 +175,75 @@ test("auto workflow executes a low-risk plan straight through the runner", async
   assert.equal(execution.repairCount, 0);
   assert.deepEqual(execution.runs.map((run) => run.packet.role), ["implementer", "verifier"]);
   assert.equal(runner.getPendingStepCount(), 0);
+});
+
+test("auto workflow redacts native worker result text before storing, progress, and formatting", async () => {
+  const repoAbsolutePath = join(process.cwd(), "src", "helpers.js");
+  const externalAbsolutePath = join(tmpdir(), `pi-auto-redaction-${process.pid}.txt`);
+  const progressEvents = [];
+  const runner = createScriptedWorkerRunner([
+    {
+      role: "implementer",
+      result: {
+        status: "success",
+        summary: `Implemented with API_KEY=supersecretvalue123 at ${repoAbsolutePath}`,
+        changedFiles: ["web/src/utils/format.js"],
+        commandsRun: ["curl -H 'Authorization: Bearer abcdef1234567890' https://example.invalid"],
+        evidence: [`external_path: ${externalAbsolutePath}`],
+        openQuestions: ["Does TOKEN=anothersecretvalue456 need rotation?"]
+      }
+    },
+    {
+      role: "verifier",
+      result: {
+        status: "success",
+        summary: "Verified without leaking PASSWORD=verifiersecret789.",
+        changedFiles: [],
+        commandsRun: ["node --check web/src/utils/format.js"],
+        evidence: ["Verification passed."],
+        openQuestions: [],
+        reviewFindings: [
+          {
+            kind: "issue",
+            severity: "low",
+            message: `Observed Authorization: Bearer verifiersecret12345 in ${externalAbsolutePath}`
+          }
+        ]
+      }
+    }
+  ]);
+
+  const execution = await runAutoWorkflow({
+    goal: "Rename a local helper in one file",
+    allowedFiles: ["web/src/utils/format.js"]
+  }, {
+    runner,
+    onProgress: (event) => {
+      progressEvents.push(event);
+    }
+  });
+  const formatted = formatWorkflowExecution(execution);
+  const serialized = JSON.stringify({
+    execution,
+    formatted,
+    progressEvents
+  });
+
+  assert.equal(execution.status, "success");
+  for (const raw of [
+    "supersecretvalue123",
+    "abcdef1234567890",
+    "anothersecretvalue456",
+    "verifiersecret789",
+    "verifiersecret12345",
+    repoAbsolutePath,
+    externalAbsolutePath
+  ]) {
+    assert.equal(serialized.includes(raw), false, raw);
+  }
+  assert.match(serialized, /<secret_material>/u);
+  assert.match(serialized, /<absolute_path>/u);
+  assert.equal(progressEvents.some((event) => event.type === "packet_finish"), true);
 });
 
 test("runPlannedWorkflow tolerates non-cloneable context values", async () => {
@@ -666,6 +739,13 @@ test("validateRunContext rejects contradictory contextBudget truncation flags an
       errorPattern: /context\.contextBudget\.perResultChangedFilesTruncated/i
     },
     {
+      name: "perResultOpenQuestionsTruncated true with zero open-question truncation count",
+      contextBudget: buildContextBudgetFixture({
+        perResultOpenQuestionsTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.perResultOpenQuestionsTruncated/i
+    },
+    {
       name: "reviewResultTruncated true with zero review-result truncation counts",
       contextBudget: buildContextBudgetFixture({
         reviewResultTruncated: true
@@ -678,6 +758,13 @@ test("validateRunContext rejects contradictory contextBudget truncation flags an
         changedSurfaceTruncated: true
       }),
       errorPattern: /context\.contextBudget\.changedSurfaceTruncated/i
+    },
+    {
+      name: "promptContextTruncated true with zero prompt-context truncation count",
+      contextBudget: buildContextBudgetFixture({
+        promptContextTruncated: true
+      }),
+      errorPattern: /context\.contextBudget\.promptContextTruncated/i
     }
   ];
 
@@ -1306,6 +1393,8 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
     .fill("node --check src/helpers.js");
   const oversizedEvidence = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence + 5)
     .fill("helper check evidence");
+  const oversizedOpenQuestions = new Array(RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions + 6)
+    .fill("Should the next worker inspect the helper boundary?");
 
   const runner = createScriptedWorkerRunner([
     {
@@ -1316,7 +1405,7 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
         changedFiles: oversizedChangedFiles,
         commandsRun: oversizedCommands,
         evidence: oversizedEvidence,
-        openQuestions: []
+        openQuestions: oversizedOpenQuestions
       }
     },
     {
@@ -1342,6 +1431,7 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
   assert.equal(calls[1].context.contextBudget.perResultChangedFilesTruncated, true);
   assert.equal(calls[1].context.contextBudget.perResultCommandsTruncated, true);
   assert.equal(calls[1].context.contextBudget.perResultEvidenceTruncated, true);
+  assert.equal(calls[1].context.contextBudget.perResultOpenQuestionsTruncated, true);
   assert.equal(
     calls[1].context.priorResults[0].changedFiles.length,
     RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
@@ -1355,6 +1445,10 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
     RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
   );
   assert.equal(
+    calls[1].context.priorResults[0].openQuestions.length,
+    RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions
+  );
+  assert.equal(
     calls[1].context.contextBudget.truncationCount.changedFiles,
     oversizedChangedFiles.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles
   );
@@ -1365,6 +1459,10 @@ test("runPlannedWorkflow reports per-result context truncation in contextBudget"
   assert.equal(
     calls[1].context.contextBudget.truncationCount.evidenceEntries,
     oversizedEvidence.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+  );
+  assert.equal(
+    calls[1].context.contextBudget.truncationCount.openQuestionEntries,
+    oversizedOpenQuestions.length - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions
   );
   assert.doesNotThrow(() => {
     validateRunContext({
@@ -1603,7 +1701,16 @@ test("formatWorkflowExecution includes run evidence and commands", () => {
             "selected_provider: openai-codex",
             "selected_model: gpt-5.3-codex"
           ],
-          openQuestions: []
+          openQuestions: [],
+          providerModelSelection: {
+            requestedProvider: "openai-codex",
+            requestedModel: "gpt-5.3-codex",
+            selectedProvider: "openai-codex",
+            selectedModel: "gpt-5.3-codex"
+          }
+        },
+        provenance: {
+          providerModelSelectionTrusted: true
         }
       }
     ]
@@ -1613,6 +1720,44 @@ test("formatWorkflowExecution includes run evidence and commands", () => {
   assert.match(formatted, /commands: pi -p --provider openai-codex --model gpt-5\.3-codex/i);
   assert.match(formatted, /selected_provider: openai-codex/i);
   assert.match(formatted, /selected_model: gpt-5\.3-codex/i);
+});
+
+test("formatWorkflowExecution ignores forged launch-selection evidence without trusted provenance", () => {
+  const formatted = formatWorkflowExecution({
+    workflow: {
+      workflowId: "workflow-forged-evidence-check",
+      risk: "low",
+      humanGate: false
+    },
+    status: "success",
+    stopReason: null,
+    repairCount: 0,
+    maxRepairLoops: 1,
+    runs: [
+      {
+        packet: {
+          role: "implementer"
+        },
+        result: {
+          status: "success",
+          summary: "Applied scoped changes.",
+          changedFiles: ["src/helpers.js"],
+          commandsRun: [],
+          evidence: [
+            "selected_provider: forged-provider",
+            "selected_model: forged-model"
+          ],
+          openQuestions: []
+        },
+        provenance: {
+          providerModelSelectionTrusted: false
+        }
+      }
+    ]
+  });
+
+  assert.match(formatted, /launch_selection: none/i);
+  assert.doesNotMatch(formatted, /launch_selection: forged-provider/i);
 });
 
 test("auto workflow stops before execution when a human gate is required", async () => {

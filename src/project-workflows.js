@@ -524,6 +524,7 @@ function modulesFor(projectType) {
           "src/pi-spawn.js",
           "src/pi-worker-runner.js",
           "src/process-worker-backend.js",
+          "src/worker-result-redaction.js",
           "src/worker-runner.js",
           "skills/"
         ],

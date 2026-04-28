@@ -1416,13 +1416,10 @@ test("pi extension auto command runs through an injected Pi-backed runner", asyn
       assert.equal(execution.status, "success");
       assert.deepEqual(requestedRoles, ["implementer", "verifier"]);
       assert.equal(execution.runs.length, 2);
-      assert.match(execution.summary, /openai-codex/i);
-      assert.match(execution.summary, /implementer=gpt-5\.3-codex/i);
-      assert.match(notifications[0].message, /openai-codex/i);
-      assert.match(notifications[0].message, /implementer=gpt-5\.3-codex/i);
+      assert.doesNotMatch(execution.summary, /openai-codex/i);
+      assert.doesNotMatch(notifications[0].message, /openai-codex/i);
       assert.ok(statuses.some((event) => /auto: implementer running/u.test(event.value)));
-      assert.match(statuses.at(-1).value, /openai-codex/i);
-      assert.match(statuses.at(-1).value, /implementer=gpt-5\.3-codex/i);
+      assert.doesNotMatch(statuses.at(-1).value, /openai-codex/i);
     });
   });
 });
@@ -1569,13 +1566,17 @@ test("pi extension inline-approved build writes the approval binding before exec
     assert.deepEqual(inlineApproved.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: inlineApproved.buildId
+      buildId: inlineApproved.buildId,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
     });
     const persistedRun = await runStore.loadRun(inlineApproved.lifecycle.executionProgram.id);
     assert.deepEqual(persistedRun.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: inlineApproved.buildId
+      buildId: inlineApproved.buildId,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
     });
     assert.deepEqual(approvalDuringExecution, {
       approved: true,
@@ -1675,13 +1676,17 @@ test("pi extension build-approve executes a pending build session by build id", 
     assert.deepEqual(approved.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: planned.buildId
+      buildId: planned.buildId,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
     });
     const persistedRun = await runStore.loadRun(approved.lifecycle.executionProgram.id);
     assert.deepEqual(persistedRun.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: planned.buildId
+      buildId: planned.buildId,
+      actionClasses: expectedApprovalActionClasses,
+      policyProfile: "default"
     });
     assert.deepEqual(approvalDuringExecution, {
       approved: true,

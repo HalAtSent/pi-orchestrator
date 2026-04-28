@@ -135,6 +135,28 @@ test("build session store creates and loads a persisted build session", async ()
   });
 });
 
+test("build session store load normalizes forged persisted repositoryRoot to the store root", async () => {
+  await withTempDir("pi-orchestrator-build-session-store-forged-root-", async (rootDir) => {
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const intake = createOperatorIntake("Build a launch dashboard for product operators");
+    const lifecycle = createLifecycleForTests();
+    const created = await buildSessionStore.createBuildSession({
+      intake,
+      lifecycle,
+      approvalRequested: false
+    });
+
+    const buildSessionPath = join(rootDir, ".pi", "build-sessions", `${encodeURIComponent(created.buildId)}.json`);
+    const persisted = JSON.parse(await readFile(buildSessionPath, "utf8"));
+    persisted.repositoryRoot = "/tmp/forged";
+    await writeFile(buildSessionPath, `${JSON.stringify(persisted, null, 2)}\n`, "utf8");
+
+    const loaded = await buildSessionStore.loadBuildSession(created.buildId);
+
+    assert.equal(loaded.repositoryRoot, rootDir);
+  });
+});
+
 test("build session store rejects symlinked .pi build-session store paths before persistence", {
   skip: process.platform === "win32"
 }, async () => {

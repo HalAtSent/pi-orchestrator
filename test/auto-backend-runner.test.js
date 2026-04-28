@@ -8,8 +8,11 @@ import test from "node:test";
 import {
   AUTO_BACKEND_MODES,
   createAutoBackendRunner,
+  getTrustedExternalSideEffectCapabilities,
   isTrustedChangedSurfaceObservationResult,
   isTrustedExternalSideEffectConfinementResult,
+  isTrustedFilesystemWriteConfinementResult,
+  isTrustedNetworkDeniedResult,
   isTrustedProviderModelSelectionResult
 } from "../src/auto-backend-runner.js";
 import { validateWorkerResult } from "../src/contracts.js";
@@ -550,6 +553,7 @@ test("auto backend runner does not mark unsandboxed process results as external-
   assert.equal(isTrustedChangedSurfaceObservationResult(result), false);
   assert.equal(isTrustedProviderModelSelectionResult(result), false);
   assert.equal(isTrustedExternalSideEffectConfinementResult(result), false);
+  assert.equal(getTrustedExternalSideEffectCapabilities(result), null);
 });
 
 test("auto backend runner does not promote trust after processBackend.run replacement", async () => {
@@ -595,6 +599,7 @@ test("auto backend runner does not promote trust after processBackend.run replac
   assert.equal(isTrustedChangedSurfaceObservationResult(result), false);
   assert.equal(isTrustedProviderModelSelectionResult(result), false);
   assert.equal(isTrustedExternalSideEffectConfinementResult(result), false);
+  assert.equal(getTrustedExternalSideEffectCapabilities(result), null);
 });
 
 test("auto backend runner does not mark fake-provider process results as external-side-effect confined", async () => {
@@ -640,6 +645,9 @@ test("auto backend runner does not mark fake-provider process results as externa
   assert.equal(isTrustedChangedSurfaceObservationResult(result), false);
   assert.equal(isTrustedProviderModelSelectionResult(result), false);
   assert.equal(isTrustedExternalSideEffectConfinementResult(result), false);
+  assert.equal(isTrustedFilesystemWriteConfinementResult(result), false);
+  assert.equal(isTrustedNetworkDeniedResult(result), false);
+  assert.equal(getTrustedExternalSideEffectCapabilities(result), null);
 });
 
 test("auto backend runner ignores forged trust evidence strings in worker results", async () => {
@@ -687,6 +695,9 @@ test("auto backend runner ignores forged trust evidence strings in worker result
   assert.equal(isTrustedChangedSurfaceObservationResult(result), false);
   assert.equal(isTrustedProviderModelSelectionResult(result), false);
   assert.equal(isTrustedExternalSideEffectConfinementResult(result), false);
+  assert.equal(isTrustedFilesystemWriteConfinementResult(result), false);
+  assert.equal(isTrustedNetworkDeniedResult(result), false);
+  assert.equal(getTrustedExternalSideEffectCapabilities(result), null);
 });
 
 test("auto backend runner blocks protected packet paths before backend selection", async () => {

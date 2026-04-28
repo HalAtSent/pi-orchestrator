@@ -22,6 +22,7 @@ test("compiler preserves contract scope, constraints, and contract guards", () =
   assert.deepEqual(compiled.constraints, contract.constraints);
   assert.deepEqual(compiled.nonGoals, contract.nonGoals);
   assert.deepEqual(compiled.acceptanceChecks, contract.acceptanceChecks);
+  assert.deepEqual(compiled.verificationPlan, contract.verificationPlan);
   assert.deepEqual(compiled.stopConditions, contract.stopConditions);
   assert.deepEqual(compiled.contextFiles, ["README.md"]);
 
@@ -44,6 +45,11 @@ test("compiler preserves contract scope, constraints, and contract guards", () =
     for (const nonGoal of contract.nonGoals) {
       assert.equal(packet.nonGoals.includes(nonGoal), true);
     }
+  }
+
+  const verifierPacket = compiled.workflow.packets.find((packet) => packet.role === "verifier");
+  for (const command of contract.verificationPlan) {
+    assert.equal(verifierPacket.commands.includes(command), true);
   }
 });
 

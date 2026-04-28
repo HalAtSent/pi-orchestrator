@@ -3,10 +3,15 @@ import {
   createRunJournal,
   validateExecutionProgram
 } from "./project-contracts.js";
-import { createExecutionProgramPlanFingerprint } from "./project-workflows.js";
+import {
+  createExecutionProgramPlanFingerprint,
+  deriveExecutionProgramActionClasses
+} from "./project-workflows.js";
 import { findProtectedPaths } from "./policies.js";
 import {
+  normalizeDeclaredActionClasses,
   normalizeApprovalBinding,
+  normalizePolicyProfile,
   normalizeReviewability,
   normalizeStopReasonCode,
   normalizeValidationOutcome
@@ -389,6 +394,13 @@ function findProtectedExecutionProgramPaths(program) {
   )));
 }
 
+function stringArraysEqual(left, right) {
+  return Array.isArray(left)
+    && Array.isArray(right)
+    && left.length === right.length
+    && left.every((entry, index) => entry === right[index]);
+}
+
 async function validateApprovedBuildSessionBinding({
   program,
   buildId,
@@ -420,11 +432,34 @@ async function validateApprovedBuildSessionBinding({
     buildSession.approval?.planFingerprint === programFingerprint,
     `Build session ${normalizedBuildId} approval fingerprint does not match execution program content`
   );
+  const expectedActionClasses = normalizeDeclaredActionClasses(
+    deriveExecutionProgramActionClasses(program)
+  );
+  const approvedActionClasses = normalizeDeclaredActionClasses(buildSession.approval?.actionClasses, {
+    fallback: null
+  });
+  assert(
+    stringArraysEqual(approvedActionClasses, expectedActionClasses),
+    `Build session ${normalizedBuildId} approval actionClasses do not match execution program content`
+  );
+  const resolvedExecutionPolicyProfile = normalizePolicyProfile(buildSession.execution?.policyProfile);
+  assert(
+    typeof buildSession.approval?.policyProfile === "string"
+      && buildSession.approval.policyProfile.trim().length > 0,
+    `Build session ${normalizedBuildId} approval policyProfile is required`
+  );
+  const approvedPolicyProfile = normalizePolicyProfile(buildSession.approval?.policyProfile);
+  assert(
+    approvedPolicyProfile === resolvedExecutionPolicyProfile,
+    `Build session ${normalizedBuildId} approval policyProfile does not match execution policy profile`
+  );
 
   return normalizeApprovalBinding({
     status: "approved",
     source: "build_session",
-    buildId: normalizedBuildId
+    buildId: normalizedBuildId,
+    actionClasses: approvedActionClasses,
+    policyProfile: approvedPolicyProfile
   }, {
     fieldName: "runExecutionProgramFromApprovedBuildSession.approvalBinding",
     allowMissing: false

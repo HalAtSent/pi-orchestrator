@@ -5,11 +5,15 @@ import { access, link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { createTaskPacket, validateWorkerResult } from "../src/contracts.js";
+import { RUN_CONTEXT_BUDGET_LIMITS, runPlannedWorkflow } from "../src/auto-workflow.js";
+import { createInitialWorkflow } from "../src/orchestrator.js";
 import {
   BOUNDARY_TRUNCATION_MARKER_PREFIX,
-  BOUNDARY_TRUNCATION_MARKER_SUFFIX
+  BOUNDARY_TRUNCATION_MARKER_SUFFIX,
+  REDACTION_SECRET_MATERIAL_PLACEHOLDER
 } from "../src/redaction.js";
 import {
   createPiCliLauncher,
@@ -638,6 +642,41 @@ test("process backend records weaker observation-only evidence for explicit unsa
   }
 });
 
+test("process backend fails unsandboxed runs that mutate the repository outside controlled apply", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-unsandboxed-drift-"));
+
+  try {
+    const outsideRepositoryPath = join(repositoryRoot, "src", "outside.js");
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath, repositoryRoot: launcherRepositoryRoot }) => {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "allowed workspace update", "utf8");
+        await mkdir(join(launcherRepositoryRoot, "src"), { recursive: true });
+        await writeFile(outsideRepositoryPath, "direct repo mutation", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "created process output",
+          stderr: "",
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /unsandboxed launcher modified repository files/i);
+    assert.equal(result.evidence.includes("repository_drift_checked: true"), true);
+    assert.equal(result.evidence.includes("allowlist_enforced: false"), true);
+    assert.equal(result.evidence.some((entry) => entry === "repository_drift_files: src/outside.js"), true);
+    assert.deepEqual(result.changedFiles, ["test/fixtures/process-worker-output.md"]);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
 test("mutating the returned trusted macos provider cannot force a plain unsandboxed spawn plan", async () => {
   const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-mutated-official-provider-"));
   const provider = createMacOSSandboxExecProvider();
@@ -962,6 +1001,51 @@ test("process backend redacts launcher-derived repo/workspace/external absolute 
     assert.equal(result.redaction.repoPathRewrites > 0, true);
     assert.equal(result.redaction.workspacePathRewrites > 0, true);
     assert.equal(result.redaction.externalPathRewrites > 0, true);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend scrubs secret-looking launcher stdout and stderr before evidence leaves the boundary", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-secret-redaction-"));
+
+  try {
+    const rawAwsSecret = "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const rawOpenAiKey = "sk-abcdefghijklmnopqrstuvwxyz123456";
+    const rawQuotedSecret = "API_KEY=\"quoted-secret-value\"";
+    const rawBearerHeader = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456";
+    const rawBasicHeader = "Authorization: Basic dXNlcjpwYXNz";
+    const rawPasswordProse = "password is hunter2";
+    const rawJwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.sflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ targetAbsolutePath }) => {
+        await mkdir(dirname(targetAbsolutePath), { recursive: true });
+        await writeFile(targetAbsolutePath, "updated from process backend", "utf8");
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: `stdout secret ${rawAwsSecret} ${rawQuotedSecret} ${rawBearerHeader}\n${rawBasicHeader}`,
+          stderr: `stderr secret ${rawOpenAiKey} ${rawJwt}\n${rawPasswordProse}`,
+          commandsRun: ["fake-worker --write-output"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer"), {
+      workflowId: "process-secret-redaction-workflow"
+    });
+
+    assert.equal(result.status, "success");
+    assert.equal(result.evidence.some((entry) => entry.includes(rawAwsSecret)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawOpenAiKey)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawQuotedSecret)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawBearerHeader)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawBasicHeader)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawPasswordProse)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(rawJwt)), false);
+    assert.equal(result.evidence.some((entry) => entry.includes(REDACTION_SECRET_MATERIAL_PLACEHOLDER)), true);
+    assert.equal(result.redaction.secretMaterialRewrites, 7);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -1732,7 +1816,7 @@ test("process backend rolls back repository writes when apply fails mid-commit",
     });
 
     assert.equal(result.status, "failed");
-    assert.match(result.summary, /failed to apply changed files atomically/i);
+    assert.match(result.summary, /failed to apply changed files transactionally/i);
     assert.deepEqual(result.providerModelSelection, {
       requestedProvider: "openai-codex",
       requestedModel: "gpt-5.3-codex",
@@ -1744,6 +1828,55 @@ test("process backend rolls back repository writes when apply fails mid-commit",
     const repoB = await readFile(join(repositoryRoot, "examples", "b.md"), "utf8");
     assert.equal(repoA, "repo a original");
     assert.equal(repoB, "repo b original");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend blocks launch when an incomplete apply transaction journal is present", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-incomplete-apply-"));
+
+  try {
+    await mkdir(join(repositoryRoot, "src"), { recursive: true });
+    await writeFile(join(repositoryRoot, "src", "helpers.js"), "export const helper = 1;\n", "utf8");
+    const staleTransactionRoot = join(repositoryRoot, ".pi-orchestrator-apply-stale");
+    await mkdir(staleTransactionRoot, { recursive: true });
+    await writeFile(join(staleTransactionRoot, "apply-journal.json"), JSON.stringify({
+      artifactType: "pi_orchestrator_apply_transaction_journal",
+      version: 1,
+      state: "commit_started",
+      operations: [
+        {
+          changedFile: "src/helpers.js"
+        }
+      ]
+    }), "utf8");
+
+    let launcherCallCount = 0;
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async () => {
+        launcherCallCount += 1;
+        return {
+          launcher: "fake_launcher",
+          exitCode: 0,
+          stdout: "should not launch",
+          stderr: "",
+          commandsRun: ["fake-worker --should-not-run"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["src/helpers.js"]
+    }), {
+      workflowId: "incomplete-apply-preflight"
+    });
+
+    assert.equal(result.status, "blocked");
+    assert.match(result.summary, /incomplete changed-file apply transaction/i);
+    assert.equal(result.evidence.includes("changed_file_apply_transaction_preflight: blocked"), true);
+    assert.equal(launcherCallCount, 0);
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -2042,6 +2175,70 @@ test("process backend accepts nested changed files when allowlist contains a dir
     assert.deepEqual(result.changedFiles, ["docs/guide.md"]);
     const repoGuide = await readFile(join(repositoryRoot, "docs", "guide.md"), "utf8");
     assert.equal(repoGuide, "updated guide");
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend blocks protected nested writes under directory allowlists before apply", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-protected-nested-"));
+
+  try {
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        await mkdir(join(workspaceRoot, "src"), { recursive: true });
+        await writeFile(join(workspaceRoot, "src", ".env"), "API_KEY=worker-secret\n", "utf8");
+        return {
+          exitCode: 0,
+          stdout: "wrote nested protected file",
+          stderr: "",
+          commandsRun: ["fake-worker --write-protected"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["src/"]
+    }), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /protected files/i);
+    assert.equal(await exists(join(repositoryRoot, "src", ".env")), false);
+  } finally {
+    await rm(repositoryRoot, { recursive: true, force: true });
+  }
+});
+
+test("process backend rejects stale worker output when repository destination changed after seeding", async () => {
+  const repositoryRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-stale-destination-"));
+
+  try {
+    await mkdir(join(repositoryRoot, "src"), { recursive: true });
+    await writeFile(join(repositoryRoot, "src", "helper.js"), "export const value = 1;\n", "utf8");
+
+    const backend = createProcessWorkerBackend({
+      repositoryRoot,
+      launcher: async ({ workspaceRoot }) => {
+        await writeFile(join(workspaceRoot, "src", "helper.js"), "export const value = 2;\n", "utf8");
+        await writeFile(join(repositoryRoot, "src", "helper.js"), "export const value = 99;\n", "utf8");
+        return {
+          exitCode: 0,
+          stdout: "updated helper",
+          stderr: "",
+          commandsRun: ["fake-worker --write-helper"]
+        };
+      }
+    });
+
+    const result = await backend.run(createPacket("implementer", {
+      allowedFiles: ["src/helper.js"]
+    }), {});
+
+    assert.equal(result.status, "failed");
+    assert.match(result.summary, /unsandboxed launcher modified repository files/i);
+    assert.equal(result.evidence.includes("repository_drift_checked: true"), true);
+    assert.equal(await readFile(join(repositoryRoot, "src", "helper.js"), "utf8"), "export const value = 99;\n");
   } finally {
     await rm(repositoryRoot, { recursive: true, force: true });
   }
@@ -2369,6 +2566,129 @@ test("explorer launcher prompt treats a missing target file as inspectable conte
   }
 });
 
+test("process launcher sanitizes child environment instead of inheriting parent secrets", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-env-"));
+  const previousSecret = process.env.PI_ORCHESTRATOR_TEST_SECRET;
+  const previousNodeOptions = process.env.NODE_OPTIONS;
+
+  try {
+    process.env.PI_ORCHESTRATOR_TEST_SECRET = "parent-secret-must-not-leak";
+    process.env.NODE_OPTIONS = "--require parent-secret-hook";
+    const currentFilePath = fileURLToPath(import.meta.url);
+    const launcher = createPiCliLauncher({
+      argsBuilder: async () => [
+        "-e",
+        [
+          "process.stdout.write(JSON.stringify({",
+          "secret: process.env.PI_ORCHESTRATOR_TEST_SECRET || null,",
+          "providerSecret: process.env.PI_ORCHESTRATOR_PROVIDER_SECRET || null,",
+          "nodeOptions: process.env.NODE_OPTIONS || null,",
+          "home: process.env.HOME || null,",
+          "tmpdir: process.env.TMPDIR || null,",
+          "path: process.env.PATH || process.env.Path || null,",
+          "envKeys: Object.keys(process.env).sort()",
+          "}));"
+        ].join("")
+      ],
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: [],
+        launcher: "test_node_launcher",
+        launcherPath: process.execPath,
+        piScriptPath: currentFilePath,
+        piPackageRoot: dirname(currentFilePath),
+        resolutionMessage: "test node resolution"
+      })
+    });
+    const sandboxProvider = {
+      id: "test-provider-env-filter",
+      async prepareSpawn({ command, args, cwd }) {
+        return {
+          command,
+          args,
+          spawnOptions: {
+            cwd,
+            detached: process.platform !== "win32",
+            shell: false,
+            stdio: ["ignore", "pipe", "pipe"],
+            env: {
+              PATH: "/provider/bin",
+              PI_ORCHESTRATOR_PROVIDER_SECRET: "provider-secret-must-not-leak",
+              NODE_OPTIONS: "--require provider-secret-hook"
+            }
+          },
+          evidence: ["test_provider_env_filter: true"]
+        };
+      }
+    };
+
+    const result = await launcher({
+      packet: createPacket("verifier"),
+      context: {},
+      sandboxProvider,
+      workspaceRoot
+    });
+
+    assert.equal(result.exitCode, 0, JSON.stringify({
+      error: result.error?.message,
+      stdout: result.stdout,
+      stderr: result.stderr,
+      args: result.args
+    }));
+    assert.equal(result.stdout.length > 0, true, JSON.stringify({
+      error: result.error?.message,
+      stderr: result.stderr,
+      args: result.args
+    }));
+    const childEnv = JSON.parse(result.stdout);
+
+    assert.equal(childEnv.secret, null);
+    assert.equal(childEnv.providerSecret, null);
+    assert.equal(childEnv.nodeOptions, null);
+    assert.equal(childEnv.home, workspaceRoot);
+    assert.equal(childEnv.tmpdir, workspaceRoot);
+    assert.equal(typeof childEnv.path, "string");
+    assert.equal(childEnv.path.length > 0, true);
+    const allowedKeys = new Set([
+      "FORCE_COLOR",
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "LC_CTYPE",
+      "NO_COLOR",
+      "PATH",
+      "PATHEXT",
+      "Path",
+      "SystemRoot",
+      "TEMP",
+      "TERM",
+      "TMP",
+      "TMPDIR",
+      "WINDIR",
+      "XDG_CACHE_HOME",
+      "XDG_CONFIG_HOME",
+      "XDG_DATA_HOME",
+      "__CF_USER_TEXT_ENCODING"
+    ]);
+    assert.deepEqual(
+      childEnv.envKeys.filter((key) => !allowedKeys.has(key)),
+      []
+    );
+  } finally {
+    if (previousSecret === undefined) {
+      delete process.env.PI_ORCHESTRATOR_TEST_SECRET;
+    } else {
+      process.env.PI_ORCHESTRATOR_TEST_SECRET = previousSecret;
+    }
+    if (previousNodeOptions === undefined) {
+      delete process.env.NODE_OPTIONS;
+    } else {
+      process.env.NODE_OPTIONS = previousNodeOptions;
+    }
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
 test("launcher prompt includes advisory common and role-specific contract guidance for each worker role", async () => {
   const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-role-contract-prompts-"));
   const roleExpectations = [
@@ -2479,6 +2799,336 @@ test("launcher prompt includes advisory common and role-specific contract guidan
         assert.doesNotMatch(prompts[0], legacySnippet);
       }
     }
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process launcher prompt includes forwarded repair-loop workflow context", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-repair-context-prompt-"));
+  const prompts = [];
+
+  try {
+    const launcher = createPromptCaptureLauncher({ prompts });
+
+    await launcher({
+      packet: createPacket("implementer", {
+        id: "repair-implementer",
+        goal: "Address review findings and stop.",
+        allowedFiles: ["src/worker.js"]
+      }),
+      context: {
+        priorResults: [
+          {
+            packetId: "impl-1",
+            role: "implementer",
+            status: "success",
+            summary: "Changed src/worker.js without retry coverage.",
+            changedFiles: ["src/worker.js"],
+            commandsRun: ["node --test test/worker.test.js"],
+            evidence: ["tests passed before review"],
+            openQuestions: []
+          }
+        ],
+        reviewResult: {
+          status: "repair_required",
+          summary: "Reviewer found missing retry assertion.",
+          evidence: ["finding: src/worker.js does not prove retry behavior"],
+          openQuestions: ["Add a focused retry-loop test."]
+        },
+        changedSurfaceContext: [
+          {
+            packetId: "impl-1",
+            role: "implementer",
+            paths: ["src/worker.js"]
+          }
+        ],
+        contextBudget: {
+          priorResultsTruncated: false,
+          reviewResultTruncated: false,
+          changedSurfaceTruncated: false,
+          truncationCount: {
+            priorResults: 0,
+            evidenceEntries: 0,
+            commandEntries: 0,
+            changedFiles: 0,
+            reviewResultEvidenceEntries: 0,
+            reviewResultOpenQuestionEntries: 0,
+            changedSurfacePaths: 0
+          }
+        }
+      },
+      workspaceRoot
+    });
+
+    assert.equal(prompts.length, 1);
+    assert.match(prompts[0], /WORKFLOW_CONTEXT:/u);
+    assert.match(prompts[0], /WORKFLOW_CONTEXT_JSON:/u);
+    assert.match(prompts[0], /Reviewer found missing retry assertion/u);
+    assert.match(prompts[0], /finding: src\/worker\.js does not prove retry behavior/u);
+    assert.match(prompts[0], /Add a focused retry-loop test/u);
+    assert.match(prompts[0], /changedSurfaceContext/u);
+    assert.match(prompts[0], /src\/worker\.js/u);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process launcher keeps oversized workflow context JSON valid and records prompt truncation", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-valid-truncated-context-"));
+  const prompts = [];
+
+  try {
+    const launcher = createPromptCaptureLauncher({ prompts });
+    const largeOpenQuestions = new Array(16)
+      .fill(null)
+      .map((_, index) => `question-${index}: ${"x".repeat(2000)}`);
+
+    await launcher({
+      packet: createPacket("implementer", {
+        id: "large-context-implementer",
+        allowedFiles: ["src/worker.js"]
+      }),
+      context: {
+        priorResults: [
+          {
+            packetId: "impl-large",
+            role: "implementer",
+            status: "success",
+            summary: "Prior result with oversized questions.",
+            changedFiles: ["src/worker.js"],
+            commandsRun: [],
+            evidence: [],
+            openQuestions: largeOpenQuestions
+          }
+        ],
+        reviewResult: null,
+        changedSurfaceContext: [],
+        contextBudget: {
+          priorResultsTruncated: false,
+          truncatedPriorResultPacketIds: [],
+          perResultEvidenceTruncated: false,
+          perResultCommandsTruncated: false,
+          perResultChangedFilesTruncated: false,
+          perResultOpenQuestionsTruncated: true,
+          reviewResultTruncated: false,
+          changedSurfaceTruncated: false,
+          promptContextTruncated: false,
+          truncationCount: {
+            priorResults: 0,
+            evidenceEntries: 0,
+            commandEntries: 0,
+            changedFiles: 0,
+            openQuestionEntries: 8,
+            reviewResultEvidenceEntries: 0,
+            reviewResultOpenQuestionEntries: 0,
+            changedSurfacePaths: 0,
+            promptContextChars: 0
+          }
+        }
+      },
+      workspaceRoot
+    });
+
+    const prompt = prompts[0];
+    const start = prompt.indexOf("WORKFLOW_CONTEXT_JSON:\n") + "WORKFLOW_CONTEXT_JSON:\n".length;
+    const end = prompt.indexOf("\n\nALLOWED_FILES:", start);
+    const workflowContextJson = prompt.slice(start, end);
+    const parsed = JSON.parse(workflowContextJson);
+
+    assert.equal(parsed.contextBudget.promptContextTruncated, true);
+    assert.equal(parsed.contextBudget.truncationCount.promptContextChars > 0, true);
+    assert.equal(workflowContextJson.length <= 12_000, true);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process verifier prompt includes packet verification commands", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-verifier-commands-"));
+  const prompts = [];
+
+  try {
+    const launcher = createPromptCaptureLauncher({ prompts });
+
+    await launcher({
+      packet: createPacket("verifier", {
+        id: "verifier-with-plan",
+        allowedFiles: ["src/worker.js"],
+        commands: ["node test/critical.test.js"]
+      }),
+      context: {},
+      workspaceRoot
+    });
+
+    assert.match(prompts[0], /VERIFICATION_PLAN:\n- node test\/critical\.test\.js/u);
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process launcher caps truncated prior-result ids in prompt fallback context", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-truncated-id-context-"));
+  const prompts = [];
+
+  try {
+    const launcher = createPromptCaptureLauncher({ prompts });
+    const oversizedPacketIds = new Array(200)
+      .fill(null)
+      .map((_, index) => `omitted-packet-${index}-${"x".repeat(160)}`);
+
+    await launcher({
+      packet: createPacket("implementer", {
+        id: "large-id-context-implementer",
+        allowedFiles: ["src/worker.js"]
+      }),
+      context: {
+        priorResults: [],
+        reviewResult: null,
+        changedSurfaceContext: [],
+        contextBudget: {
+          priorResultsTruncated: true,
+          truncatedPriorResultPacketIds: oversizedPacketIds,
+          perResultEvidenceTruncated: false,
+          perResultCommandsTruncated: false,
+          perResultChangedFilesTruncated: false,
+          perResultOpenQuestionsTruncated: false,
+          reviewResultTruncated: false,
+          changedSurfaceTruncated: false,
+          promptContextTruncated: false,
+          truncationCount: {
+            priorResults: oversizedPacketIds.length,
+            evidenceEntries: 0,
+            commandEntries: 0,
+            changedFiles: 0,
+            openQuestionEntries: 0,
+            reviewResultEvidenceEntries: 0,
+            reviewResultOpenQuestionEntries: 0,
+            changedSurfacePaths: 0,
+            promptContextChars: 0
+          }
+        }
+      },
+      workspaceRoot
+    });
+
+    const prompt = prompts[0];
+    const start = prompt.indexOf("WORKFLOW_CONTEXT_JSON:\n") + "WORKFLOW_CONTEXT_JSON:\n".length;
+    const end = prompt.indexOf("\n\nALLOWED_FILES:", start);
+    const workflowContextJson = prompt.slice(start, end);
+    const parsed = JSON.parse(workflowContextJson);
+
+    assert.equal(workflowContextJson.length <= 12_000, true);
+    assert.equal(parsed.contextBudget.promptContextTruncated, true);
+    assert.equal(
+      parsed.contextBudget.truncatedPriorResultPacketIds.length <= RUN_CONTEXT_BUDGET_LIMITS.maxTruncatedPriorResultPacketIds,
+      true
+    );
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true });
+  }
+});
+
+test("process implementer sees review findings during a planned repair loop", async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), "pi-process-backend-planned-repair-prompt-"));
+  const promptCaptures = [];
+  let activePacket = null;
+  let activeContext = null;
+
+  try {
+    const workflow = createInitialWorkflow({
+      goal: "Update the worker retry behavior inside the implementation directory",
+      allowedFiles: [
+        "src/auto-workflow.js",
+        "src/contracts.js",
+        "src/helpers.js",
+        "src/orchestrator.js",
+        "src/path-scopes.js",
+        "src/policies.js",
+        "src/worker-runner.js"
+      ]
+    });
+    const launcher = createPiCliLauncher({
+      argsBuilder: async ({ prompt }) => {
+        promptCaptures.push({
+          role: activePacket?.role,
+          repairCount: activeContext?.repairCount,
+          prompt
+        });
+        return ["-p", "--no-session", "--thinking", "off", prompt];
+      },
+      spawnCommandResolver: async () => ({
+        command: process.execPath,
+        argsPrefix: [],
+        launcher: "test_launcher",
+        launcherPath: process.execPath,
+        piScriptPath: "C:/fake/pi.js",
+        piPackageRoot: "C:/fake",
+        resolutionMessage: "test resolution"
+      }),
+      runCommandFn: async () => ({
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "ok",
+        stderr: "",
+        error: null,
+        durationMs: 1
+      })
+    });
+    const roleCounts = new Map();
+    const runner = {
+      async run(packet, context) {
+        activePacket = packet;
+        activeContext = context;
+        await launcher({
+          packet,
+          context,
+          workspaceRoot
+        });
+
+        const count = (roleCounts.get(packet.role) ?? 0) + 1;
+        roleCounts.set(packet.role, count);
+        if (packet.role === "reviewer" && count === 1) {
+          return {
+            status: "repair_required",
+            summary: "Reviewer found missing retry assertion.",
+            changedFiles: [],
+            commandsRun: ["git diff -- src/worker.js"],
+            evidence: ["finding: repair implementer must add retry assertion in src/worker.js"],
+            openQuestions: ["Add a focused retry-loop test before final verification."]
+          };
+        }
+
+        return {
+          status: "success",
+          summary: `${packet.role} completed.`,
+          changedFiles: packet.role === "implementer" ? ["src/worker-runner.js"] : [],
+          commandsRun: packet.role === "verifier" ? ["node --test test/worker.test.js"] : [],
+          evidence: [`${packet.role} evidence`],
+          openQuestions: []
+        };
+      }
+    };
+
+    const execution = await runPlannedWorkflow({
+      workflow,
+      context: {},
+      maxRepairLoops: 1
+    }, {
+      runner
+    });
+    const repairImplementerPrompt = promptCaptures.find((entry) => (
+      entry.role === "implementer" && entry.repairCount === 1
+    ))?.prompt;
+
+    assert.equal(execution.status, "success");
+    assert.equal(execution.repairCount, 1);
+    assert.equal(typeof repairImplementerPrompt, "string");
+    assert.match(repairImplementerPrompt, /WORKFLOW_CONTEXT:/u);
+    assert.match(repairImplementerPrompt, /Reviewer found missing retry assertion/u);
+    assert.match(repairImplementerPrompt, /finding: repair implementer must add retry assertion in src\/worker\.js/u);
+    assert.match(repairImplementerPrompt, /Add a focused retry-loop test before final verification/u);
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true });
   }

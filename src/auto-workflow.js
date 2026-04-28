@@ -19,6 +19,7 @@ import {
   isTrustedProviderModelSelectionResult
 } from "./auto-backend-runner.js";
 import { createBoundaryPathRedactor, mergeRedactionMetadata } from "./redaction.js";
+import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
 
 const READ_ONLY_ROLES = new Set(["explorer", "reviewer", "verifier"]);
 const RUN_CONTEXT_ADMISSION_ERROR_PREFIX = "runtime context assembly invalid or drifted from contextManifest[]";
@@ -150,6 +151,7 @@ function sanitizePriorResults(runs, { redactor }) {
       fieldName: `${fieldPrefix}.openQuestions`
     });
     const redaction = mergeRedactionMetadata(
+      result.redaction,
       summary.redaction,
       changedFiles.redaction,
       commandsRun.redaction,
@@ -178,16 +180,20 @@ function createContextBudget() {
     perResultEvidenceTruncated: false,
     perResultCommandsTruncated: false,
     perResultChangedFilesTruncated: false,
+    perResultOpenQuestionsTruncated: false,
     reviewResultTruncated: false,
     changedSurfaceTruncated: false,
+    promptContextTruncated: false,
     truncationCount: {
       priorResults: 0,
       evidenceEntries: 0,
       commandEntries: 0,
       changedFiles: 0,
+      openQuestionEntries: 0,
       reviewResultEvidenceEntries: 0,
       reviewResultOpenQuestionEntries: 0,
-      changedSurfacePaths: 0
+      changedSurfacePaths: 0,
+      promptContextChars: 0
     }
   };
 }
@@ -216,7 +222,8 @@ function applyPriorResultContextBudget(priorResults) {
     budget.priorResultsTruncated = true;
     budget.truncatedPriorResultPacketIds = droppedResults
       .map((entry) => entry?.packetId)
-      .filter((packetId) => typeof packetId === "string" && packetId.trim().length > 0);
+      .filter((packetId) => typeof packetId === "string" && packetId.trim().length > 0)
+      .slice(0, RUN_CONTEXT_BUDGET_LIMITS.maxTruncatedPriorResultPacketIds);
     budget.truncationCount.priorResults = droppedResults.length;
     boundedPriorResults = boundedPriorResults.slice(-RUN_CONTEXT_BUDGET_LIMITS.maxPriorResults);
   }
@@ -236,12 +243,16 @@ function applyPriorResultContextBudget(priorResults) {
         priorResult?.evidence,
         RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
       ),
-      openQuestions: clone(priorResult?.openQuestions)
+      openQuestions: truncateStringArray(
+        priorResult?.openQuestions,
+        RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions
+      )
     };
 
     const changedFilesLength = Array.isArray(priorResult?.changedFiles) ? priorResult.changedFiles.length : 0;
     const commandLength = Array.isArray(priorResult?.commandsRun) ? priorResult.commandsRun.length : 0;
     const evidenceLength = Array.isArray(priorResult?.evidence) ? priorResult.evidence.length : 0;
+    const openQuestionLength = Array.isArray(priorResult?.openQuestions) ? priorResult.openQuestions.length : 0;
 
     if (changedFilesLength > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultChangedFiles) {
       budget.perResultChangedFilesTruncated = true;
@@ -261,6 +272,13 @@ function applyPriorResultContextBudget(priorResults) {
       budget.perResultEvidenceTruncated = true;
       budget.truncationCount.evidenceEntries += (
         evidenceLength - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultEvidence
+      );
+    }
+
+    if (openQuestionLength > RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions) {
+      budget.perResultOpenQuestionsTruncated = true;
+      budget.truncationCount.openQuestionEntries += (
+        openQuestionLength - RUN_CONTEXT_BUDGET_LIMITS.maxPriorResultOpenQuestions
       );
     }
 
@@ -308,6 +326,7 @@ function sanitizeReviewResult(reviewResult, { redactor, contextBudget }) {
     fieldName: `${fieldPrefix}.openQuestions`
   });
   const redaction = mergeRedactionMetadata(
+    reviewResult.redaction,
     summary.redaction,
     evidence.redaction,
     openQuestions.redaction
@@ -489,6 +508,13 @@ function resolveContextRepositoryRoot() {
   return process.cwd();
 }
 
+function sanitizeWorkflowWorkerResult(result) {
+  return sanitizeWorkerResultForBoundary(result, {
+    repositoryRoot: resolveContextRepositoryRoot(),
+    mergeExistingRedaction: true
+  });
+}
+
 function toContextAdmissionFailureReason(error) {
   const message = toErrorMessage(error);
 
@@ -660,6 +686,7 @@ async function executePacket({
       failureKind: "context_admission",
       reason: toContextAdmissionFailureReason(error)
     });
+    result = sanitizeWorkflowWorkerResult(result);
     const run = {
       packet: clone(packet),
       result: clone(result),
@@ -740,6 +767,7 @@ async function executePacket({
     providerModelSelectionTrusted = false;
   }
 
+  result = sanitizeWorkflowWorkerResult(result);
   const run = {
     packet: clone(packet),
     result: clone(result),
@@ -774,12 +802,6 @@ function stopExecution({ workflow, runs, repairCount, maxRepairLoops, status, st
     maxRepairLoops,
     runs: clone(runs)
   };
-}
-
-function parseEvidenceValue(evidenceEntries, key) {
-  const prefix = `${key}: `;
-  const entry = evidenceEntries.find((item) => typeof item === "string" && item.startsWith(prefix));
-  return entry ? entry.slice(prefix.length).trim() : null;
 }
 
 function mergeStringFields(...values) {
@@ -838,9 +860,12 @@ export function summarizeWorkflowLaunchSelection(execution) {
 
   const roleSelections = new Map();
   for (const run of execution.runs) {
-    const evidenceEntries = Array.isArray(run?.result?.evidence) ? run.result.evidence : [];
-    const selectedProvider = parseEvidenceValue(evidenceEntries, "selected_provider");
-    const selectedModel = parseEvidenceValue(evidenceEntries, "selected_model");
+    const selection = run?.result?.providerModelSelection;
+    if (run?.provenance?.providerModelSelectionTrusted !== true || !selection) {
+      continue;
+    }
+    const selectedProvider = selection.selectedProvider;
+    const selectedModel = selection.selectedModel;
 
     if (selectedProvider || selectedModel) {
       roleSelections.set(run.packet.role, {

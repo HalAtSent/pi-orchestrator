@@ -546,6 +546,7 @@ export function validateCompiledContractExecutionPlan(plan) {
   assertStringArray("compiledContractExecutionPlan.constraints", plan.constraints);
   assertStringArray("compiledContractExecutionPlan.nonGoals", plan.nonGoals);
   assertStringArray("compiledContractExecutionPlan.acceptanceChecks", plan.acceptanceChecks);
+  assertStringArray("compiledContractExecutionPlan.verificationPlan", plan.verificationPlan);
   assertStringArray("compiledContractExecutionPlan.stopConditions", plan.stopConditions);
   assertPlainObject("compiledContractExecutionPlan.workflow", plan.workflow);
 

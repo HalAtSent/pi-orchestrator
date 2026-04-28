@@ -17,6 +17,8 @@ import {
   POLICY_ENFORCED_ACTION_CLASSES
 } from "./policy-profiles.js";
 import { isPathWithinScope } from "./path-scopes.js";
+import { truncateBoundaryString } from "./redaction.js";
+import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
 
 const IMPLEMENTER_ROLE = "implementer";
 const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_REQUIRED = "required";
@@ -24,6 +26,8 @@ const PROVIDER_MODEL_EVIDENCE_REQUIREMENT_UNKNOWN = "unknown";
 const COMMAND_OBSERVATION_SOURCE_WORKER_REPORTED = "worker_reported";
 const COMMAND_OBSERVATION_SOURCE_PROCESS_BACKEND_LAUNCHER = "process_backend_launcher";
 const REVIEW_ORIENTED_ROLES = new Set(["reviewer", "verifier"]);
+const MAX_PERSISTED_WORKER_EVIDENCE_PER_RUN = 12;
+const MAX_PERSISTED_WORKER_EVIDENCE_CHARS = 1_000;
 
 function assert(condition, message) {
   if (!condition) {
@@ -70,6 +74,88 @@ function normalizeContractStatus(status) {
   return "failed";
 }
 
+function sanitizeWorkflowExecutionForContractBoundary(execution) {
+  return {
+    ...execution,
+    runs: Array.isArray(execution?.runs)
+      ? execution.runs.map((run) => ({
+        ...run,
+        packet: structuredClone(run.packet),
+        result: sanitizeWorkerResultForBoundary(run.result, {
+          repositoryRoot: process.cwd(),
+          mergeExistingRedaction: true
+        }),
+        provenance: structuredClone(run.provenance ?? {})
+      }))
+      : []
+  };
+}
+
+function boundedWorkerEvidenceLine(run, evidence, index) {
+  const role = typeof run?.packet?.role === "string" && run.packet.role.trim().length > 0
+    ? run.packet.role.trim()
+    : "unknown";
+  const packetId = typeof run?.packet?.id === "string" && run.packet.id.trim().length > 0
+    ? run.packet.id.trim()
+    : "unknown-packet";
+  const boundedEvidence = truncateBoundaryString(String(evidence).trim(), {
+    maxLength: MAX_PERSISTED_WORKER_EVIDENCE_CHARS,
+    fieldName: `contractExecutionResult.workerEvidence[${packetId}][${index}]`
+  });
+  return `run ${role} evidence (${packetId}): ${boundedEvidence}`;
+}
+
+function createWorkerEvidenceLines(run) {
+  const workerEvidence = Array.isArray(run?.result?.evidence) ? run.result.evidence : [];
+  const boundedEvidence = workerEvidence
+    .filter((entry) => typeof entry === "string" && entry.trim().length > 0)
+    .slice(0, MAX_PERSISTED_WORKER_EVIDENCE_PER_RUN)
+    .map((entry, index) => boundedWorkerEvidenceLine(run, entry, index));
+
+  if (workerEvidence.length > MAX_PERSISTED_WORKER_EVIDENCE_PER_RUN) {
+    const role = typeof run?.packet?.role === "string" && run.packet.role.trim().length > 0
+      ? run.packet.role.trim()
+      : "unknown";
+    boundedEvidence.push(
+      `run ${role} evidence_truncated: ${workerEvidence.length - MAX_PERSISTED_WORKER_EVIDENCE_PER_RUN} entr${workerEvidence.length - MAX_PERSISTED_WORKER_EVIDENCE_PER_RUN === 1 ? "y" : "ies"} omitted`
+    );
+  }
+
+  return boundedEvidence;
+}
+
+function normalizeCommandText(command) {
+  return typeof command === "string" ? command.trim() : "";
+}
+
+function getRequiredVerificationCommands(compiledPlan) {
+  return unique(
+    (Array.isArray(compiledPlan?.verificationPlan) ? compiledPlan.verificationPlan : [])
+      .map(normalizeCommandText)
+      .filter((command) => command.length > 0)
+  );
+}
+
+function getVerifierCommandsRun(execution) {
+  return unique(
+    (Array.isArray(execution?.runs) ? execution.runs : [])
+      .filter((run) => run?.packet?.role === "verifier")
+      .flatMap((run) => Array.isArray(run?.result?.commandsRun) ? run.result.commandsRun : [])
+      .map(normalizeCommandText)
+      .filter((command) => command.length > 0)
+  );
+}
+
+function findMissingVerificationCommands(compiledPlan, execution) {
+  const requiredCommands = getRequiredVerificationCommands(compiledPlan);
+  if (requiredCommands.length === 0) {
+    return [];
+  }
+
+  const verifierCommandsRun = new Set(getVerifierCommandsRun(execution));
+  return requiredCommands.filter((command) => !verifierCommandsRun.has(command));
+}
+
 function createExecutionEvidence(compiledPlan, execution) {
   const runEvidence = execution.runs.flatMap((run) => {
     const evidence = [`run ${run.packet.role}: ${run.result.status}`];
@@ -82,13 +168,18 @@ function createExecutionEvidence(compiledPlan, execution) {
       evidence.push(`run ${run.packet.role} command: ${command.trim()}`);
     }
 
+    evidence.push(...createWorkerEvidenceLines(run));
     return evidence;
   });
 
+  const verificationPlan = getRequiredVerificationCommands(compiledPlan);
   return [
     `compiled workflow: ${compiledPlan.workflow.workflowId}`,
     `risk: ${compiledPlan.risk}`,
     `roles: ${compiledPlan.intendedRoleSequence.join(" -> ")}`,
+    ...(verificationPlan.length > 0
+      ? verificationPlan.map((command) => `required verification command: ${command}`)
+      : []),
     ...runEvidence
   ];
 }
@@ -359,18 +450,35 @@ function deriveReviewFindings(execution) {
 function mapWorkflowExecutionToContractResult(contractId, compiledPlan, execution, {
   policyDecision = null
 } = {}) {
-  const status = normalizeContractStatus(execution.status);
-  const evidence = createExecutionEvidence(compiledPlan, execution);
-  const openQuestions = createExecutionOpenQuestions(execution);
-  const changedSurface = deriveChangedSurface(execution);
+  const sanitizedExecution = sanitizeWorkflowExecutionForContractBoundary(execution);
+  const missingVerificationCommands = findMissingVerificationCommands(compiledPlan, sanitizedExecution);
+  const terminalSuccessBlockedByVerification = sanitizedExecution.status === "success" && missingVerificationCommands.length > 0;
+  const status = terminalSuccessBlockedByVerification
+    ? "blocked"
+    : normalizeContractStatus(sanitizedExecution.status);
+  const evidence = [
+    ...createExecutionEvidence(compiledPlan, sanitizedExecution),
+    ...(missingVerificationCommands.length > 0
+      ? [`missing_verification_commands: ${missingVerificationCommands.join(" | ")}`]
+      : [])
+  ];
+  const openQuestions = unique([
+    ...createExecutionOpenQuestions(sanitizedExecution),
+    ...(terminalSuccessBlockedByVerification
+      ? ["Run the required verificationPlan command(s) and report them in verifier commandsRun before claiming success."]
+      : [])
+  ]);
+  const changedSurface = deriveChangedSurface(sanitizedExecution);
   const scopeOwnership = deriveScopeOwnership(compiledPlan, changedSurface);
-  const commandObservations = deriveCommandObservations(execution);
-  const providerModelSelections = deriveProviderModelSelections(execution);
-  const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(execution);
-  const reviewFindings = deriveReviewFindings(execution);
+  const commandObservations = deriveCommandObservations(sanitizedExecution);
+  const providerModelSelections = deriveProviderModelSelections(sanitizedExecution);
+  const providerModelEvidenceRequirement = deriveProviderModelEvidenceRequirement(sanitizedExecution);
+  const reviewFindings = deriveReviewFindings(sanitizedExecution);
   const summary = status === "success"
-    ? `Executed ${contractId} through ${execution.runs.length} bounded packet run(s).`
-    : `Contract ${contractId} ${status}: ${execution.stopReason ?? "execution stopped without an explicit reason"}`;
+    ? `Executed ${contractId} through ${sanitizedExecution.runs.length} bounded packet run(s).`
+    : terminalSuccessBlockedByVerification
+      ? `Contract ${contractId} blocked: required verificationPlan command(s) were not reported by the verifier.`
+      : `Contract ${contractId} ${status}: ${sanitizedExecution.stopReason ?? "execution stopped without an explicit reason"}`;
 
   const contractResult = {
     status,
@@ -555,7 +663,10 @@ export function createProgramContractExecutor({
         workflow: compiledPlan.workflow,
         approvedHighRisk: invocationApprovedHighRisk,
         maxRepairLoops,
-        context
+        context: {
+          ...context,
+          contractVerificationPlan: compiledPlan.verificationPlan
+        }
       }, {
         runner,
         onProgress,

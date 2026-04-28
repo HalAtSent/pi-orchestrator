@@ -8,7 +8,7 @@ const AUTO_BACKEND_MODE_LOW_RISK_PROCESS_IMPLEMENTER = "low_risk_process_impleme
 const AUTO_BACKEND_MODE_PROCESS_SUBAGENTS = "process_subagents";
 const TRUSTED_CHANGED_SURFACE_OBSERVATION_RESULTS = new WeakSet();
 const TRUSTED_PROVIDER_MODEL_SELECTION_RESULTS = new WeakSet();
-const TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS = new WeakSet();
+const TRUSTED_EXTERNAL_SIDE_EFFECT_CAPABILITIES = new WeakMap();
 
 export const AUTO_BACKEND_MODES = Object.freeze({
   PI_RUNTIME: AUTO_BACKEND_MODE_PI_RUNTIME,
@@ -40,7 +40,11 @@ function markTrustedProcessBackendResult(workerResult, provenance) {
   }
 
   if (provenance?.osSandbox === true && provenance?.trustBoundary === "os_sandbox") {
-    TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS.add(workerResult);
+    TRUSTED_EXTERNAL_SIDE_EFFECT_CAPABILITIES.set(workerResult, Object.freeze({
+      filesystemWritesConfinedToWorkspace: true,
+      networkDenied: true,
+      processGroupCleanupAttempted: provenance?.processGroupCleanupAttempted === true
+    }));
   }
 
   return workerResult;
@@ -67,7 +71,28 @@ export function isTrustedExternalSideEffectConfinementResult(workerResult) {
     return false;
   }
 
-  return TRUSTED_EXTERNAL_SIDE_EFFECT_CONFINEMENT_RESULTS.has(workerResult);
+  return false;
+}
+
+export function getTrustedExternalSideEffectCapabilities(workerResult) {
+  if (!isObject(workerResult)) {
+    return null;
+  }
+
+  const capabilities = TRUSTED_EXTERNAL_SIDE_EFFECT_CAPABILITIES.get(workerResult);
+  return capabilities ? clone(capabilities) : null;
+}
+
+export function isTrustedFilesystemWriteConfinementResult(workerResult) {
+  return getTrustedExternalSideEffectCapabilities(workerResult)?.filesystemWritesConfinedToWorkspace === true;
+}
+
+export function isTrustedNetworkDeniedResult(workerResult) {
+  return getTrustedExternalSideEffectCapabilities(workerResult)?.networkDenied === true;
+}
+
+export function isTrustedProcessGroupCleanupAttemptedResult(workerResult) {
+  return getTrustedExternalSideEffectCapabilities(workerResult)?.processGroupCleanupAttempted === true;
 }
 
 function clone(value) {

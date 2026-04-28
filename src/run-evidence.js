@@ -444,7 +444,7 @@ function splitCommandSegments(command) {
   }
 
   return normalized
-    .split(/&&|\|\||;|\r?\n/gu)
+    .split(/&&|\|\||\||;|\r?\n/gu)
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0);
 }
@@ -504,6 +504,58 @@ function nextNonOptionToken(tokens, startIndex = 0) {
   return null;
 }
 
+function nextSubcommandToken(tokens, startIndex = 0, optionsWithValues = new Set()) {
+  for (let index = startIndex; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token.startsWith("-")) {
+      return token;
+    }
+
+    const optionName = token.includes("=")
+      ? token.slice(0, token.indexOf("="))
+      : token;
+    if (optionsWithValues.has(optionName) && !token.includes("=")) {
+      index += 1;
+    }
+  }
+  return null;
+}
+
+const NPM_GLOBAL_OPTIONS_WITH_VALUE = Object.freeze(new Set([
+  "--prefix",
+  "--workspace",
+  "-w",
+  "--userconfig",
+  "--cache",
+  "--registry",
+  "--config",
+  "-C"
+]));
+
+const PNPM_GLOBAL_OPTIONS_WITH_VALUE = Object.freeze(new Set([
+  "--filter",
+  "-F",
+  "--dir",
+  "-C",
+  "--config",
+  "--store-dir",
+  "--registry"
+]));
+
+const YARN_GLOBAL_OPTIONS_WITH_VALUE = Object.freeze(new Set([
+  "--cwd",
+  "--focus",
+  "--modules-folder",
+  "--registry",
+  "--cache-folder"
+]));
+
+const BUN_GLOBAL_OPTIONS_WITH_VALUE = Object.freeze(new Set([
+  "--cwd",
+  "--filter",
+  "--registry"
+]));
+
 function includesPythonPipInstall(tokens) {
   for (let index = 1; index < tokens.length - 2; index += 1) {
     if (tokens[index] === "-m" && tokens[index + 1] === "pip" && tokens[index + 2] === "install") {
@@ -523,6 +575,19 @@ function includesUvPipInstall(tokens) {
 }
 
 function isInstallDependencyCommand(command) {
+  const normalizedCommand = normalizeString(command).toLowerCase();
+  if (
+    /\b(?:npm|pnpm)\s+(?:install|i|ci|add)\b/u.test(normalizedCommand)
+    || /\b(?:yarn|bun)\s+(?:install|add)\b/u.test(normalizedCommand)
+    || /\b(?:pip|pip3)\s+install\b/u.test(normalizedCommand)
+    || /\b(?:python|python3|py)\s+-m\s+pip\s+install\b/u.test(normalizedCommand)
+    || /\buv\s+pip\s+install\b/u.test(normalizedCommand)
+    || /\bpoetry\s+(?:add|install)\b/u.test(normalizedCommand)
+    || /\bgo\s+get\b/u.test(normalizedCommand)
+  ) {
+    return true;
+  }
+
   const segments = splitCommandSegments(command);
   for (const segment of segments) {
     const tokens = unwrapCommandWrapper(tokenizeCommandSegment(segment));
@@ -532,7 +597,7 @@ function isInstallDependencyCommand(command) {
 
     const executable = tokens[0];
     if (executable === "npm") {
-      const subcommand = nextNonOptionToken(tokens, 1);
+      const subcommand = nextSubcommandToken(tokens, 1, NPM_GLOBAL_OPTIONS_WITH_VALUE);
       if (subcommand && ["install", "i", "ci", "add"].includes(subcommand)) {
         return true;
       }
@@ -540,7 +605,7 @@ function isInstallDependencyCommand(command) {
     }
 
     if (executable === "pnpm") {
-      const subcommand = nextNonOptionToken(tokens, 1);
+      const subcommand = nextSubcommandToken(tokens, 1, PNPM_GLOBAL_OPTIONS_WITH_VALUE);
       if (subcommand && ["install", "i", "add"].includes(subcommand)) {
         return true;
       }
@@ -548,7 +613,11 @@ function isInstallDependencyCommand(command) {
     }
 
     if (executable === "yarn" || executable === "bun") {
-      const subcommand = nextNonOptionToken(tokens, 1);
+      const subcommand = nextSubcommandToken(
+        tokens,
+        1,
+        executable === "yarn" ? YARN_GLOBAL_OPTIONS_WITH_VALUE : BUN_GLOBAL_OPTIONS_WITH_VALUE
+      );
       if (subcommand && ["install", "add"].includes(subcommand)) {
         return true;
       }
@@ -684,6 +753,11 @@ function isMutatingGitSubcommand(subcommand, args) {
 }
 
 function isMutateGitStateCommand(command) {
+  const normalizedCommand = normalizeString(command).toLowerCase();
+  if (/\bgit(?:\s+-[^\s]+(?:\s+[^\s]+)?)*\s+(?:add|am|apply|checkout|cherry-pick|clean|commit|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch)\b/u.test(normalizedCommand)) {
+    return true;
+  }
+
   const segments = splitCommandSegments(command);
   for (const segment of segments) {
     const tokens = unwrapCommandWrapper(tokenizeCommandSegment(segment));
@@ -1863,11 +1937,24 @@ export function normalizeApprovalBinding(value, {
   if (rawApprovalId !== undefined && rawApprovalId !== null && approvalId.length === 0) {
     throw new Error(`${fieldName}.approvalId must be a non-empty string when provided`);
   }
+  const actionClasses = value.actionClasses === undefined || value.actionClasses === null
+    ? null
+    : normalizeExplicitActionClasses(value.actionClasses, {
+      fieldName: `${fieldName}.actionClasses`
+    });
+  const policyProfile = value.policyProfile === undefined || value.policyProfile === null
+    ? null
+    : normalizePolicyProfileId(value.policyProfile, {
+      fieldName: `${fieldName}.policyProfile`,
+      allowMissing: false
+    });
 
   return {
     status,
     source,
     ...(buildId ? { buildId } : {}),
-    ...(approvalId ? { approvalId } : {})
+    ...(approvalId ? { approvalId } : {}),
+    ...(actionClasses ? { actionClasses } : {}),
+    ...(policyProfile ? { policyProfile } : {})
   };
 }

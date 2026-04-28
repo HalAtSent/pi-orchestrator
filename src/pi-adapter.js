@@ -1,5 +1,7 @@
 import { createWorkerResult } from "./contracts.js";
 import { resolvePiWorkerInvoker } from "./pi-runtime-diagnostics.js";
+import { isPathWithinScope, normalizeRelativeScopePath } from "./path-scopes.js";
+import { findProtectedPaths } from "./policies.js";
 import {
   getTrustedForwardedRedactionMetadata,
   getTrustedRuntimeRepositoryRoot,
@@ -7,6 +9,7 @@ import {
   setTrustedRuntimeRepositoryRoot,
   validateRunContext
 } from "./context-manifest.js";
+import { sanitizeWorkerResultForBoundary } from "./worker-result-redaction.js";
 
 const DEFAULT_SUPPORTED_ROLES = Object.freeze(["explorer", "implementer", "reviewer", "verifier"]);
 const SUPPORTED_RESULT_STATUSES = new Set(["success", "blocked", "failed", "repair_required"]);
@@ -22,7 +25,9 @@ function clone(value) {
 }
 
 function normalizePath(path) {
-  return String(path).replace(/\\/g, "/");
+  return normalizeRelativeScopePath(path, {
+    fieldName: "request path"
+  });
 }
 
 function unique(values) {
@@ -85,6 +90,17 @@ function createBlockedResult(request, summary, { evidence = [], openQuestions = 
     commandsRun: [],
     evidence: normalizeStringArray(evidence),
     openQuestions: normalizeStringArray(openQuestions)
+  });
+}
+
+function resolveBoundaryRepositoryRoot(runtimeContext = null) {
+  return getTrustedRuntimeRepositoryRoot(runtimeContext?.workflowContext) ?? process.cwd();
+}
+
+function sanitizeAdapterWorkerResult(result, runtimeContext = null) {
+  return sanitizeWorkerResultForBoundary(result, {
+    repositoryRoot: resolveBoundaryRepositoryRoot(runtimeContext),
+    mergeExistingRedaction: true
   });
 }
 
@@ -246,11 +262,54 @@ function normalizeRuntimeWorkerResult(response, request, invocationLabel) {
     normalizedStringArrayFields[fieldName] = normalizedField.value;
   }
 
+  let changedFiles;
+  try {
+    changedFiles = normalizeFileList(candidate.changedFiles ?? []);
+  } catch (error) {
+    return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned invalid changedFiles.`, {
+      evidence: [error.message]
+    });
+  }
+
+  if (request.role !== "implementer" && changedFiles.length > 0) {
+    return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned writes for read-only ${request.role}.`, {
+      evidence: [`unexpected_read_only_changes: ${changedFiles.join(", ")}`],
+      openQuestions: [`Keep ${request.role} runtime results read-only; changedFiles must be empty.`]
+    });
+  }
+
+  if (request.role === "implementer") {
+    const changedOutsideAllowlist = changedFiles
+      .filter((file) => !request.allowedFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
+    if (changedOutsideAllowlist.length > 0) {
+      return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned changedFiles outside the allowlist.`, {
+        evidence: [`unexpected_files: ${changedOutsideAllowlist.join(", ")}`],
+        openQuestions: ["Return only changedFiles covered by the implementer allowlist."]
+      });
+    }
+
+    const changedForbiddenFiles = changedFiles.filter((file) => request.forbiddenFiles.some((scopeEntry) => isPathWithinScope(file, scopeEntry)));
+    if (changedForbiddenFiles.length > 0) {
+      return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned changedFiles in forbidden paths.`, {
+        evidence: [`forbidden_files_changed: ${changedForbiddenFiles.join(", ")}`],
+        openQuestions: ["Narrow the runtime result to non-forbidden changedFiles."]
+      });
+    }
+
+    const changedProtectedFiles = findProtectedPaths(changedFiles);
+    if (changedProtectedFiles.length > 0) {
+      return createBlockedResult(request, `Pi runtime (${invocationLabel}) returned changedFiles in protected paths.`, {
+        evidence: [`protected_files_changed: ${changedProtectedFiles.join(", ")}`],
+        openQuestions: ["Narrow the runtime result to non-protected repository files."]
+      });
+    }
+  }
+
   try {
     return createWorkerResult({
       status,
       summary,
-      changedFiles: normalizeFileList(candidate.changedFiles ?? []),
+      changedFiles,
       commandsRun: normalizedStringArrayFields.commandsRun,
       evidence: normalizedStringArrayFields.evidence,
       openQuestions: normalizedStringArrayFields.openQuestions,
@@ -294,10 +353,50 @@ function validateRequestSafety(request, supportedRoles) {
     };
   }
 
-  if (request.controls.writePolicy === "allowlist_only" && request.allowedFiles.length === 0) {
+  if (request.role === "implementer" && request.controls.writePolicy !== "allowlist_only") {
     return {
       ok: false,
-      reason: "write-role request must include at least one allowed file"
+      reason: "implementer request must use allowlist_only writePolicy"
+    };
+  }
+
+  if (request.role === "implementer" && request.allowedFiles.length === 0) {
+    return {
+      ok: false,
+      reason: "implementer request must include at least one allowed file"
+    };
+  }
+
+  if (request.role === "implementer" && request.modelProfile?.access !== "write") {
+    return {
+      ok: false,
+      reason: "implementer request must use a write-capable model profile"
+    };
+  }
+
+  if (request.role !== "implementer" && request.controls.writePolicy !== "read_only") {
+    return {
+      ok: false,
+      reason: `${request.role} request must use read_only writePolicy`
+    };
+  }
+
+  if (request.role !== "implementer" && request.modelProfile?.access === "write") {
+    return {
+      ok: false,
+      reason: `${request.role} request must use a read-only model profile`
+    };
+  }
+
+  const protectedPaths = findProtectedPaths([
+    ...request.allowedFiles,
+    ...request.forbiddenFiles,
+    ...request.contextFiles
+  ]);
+  if (protectedPaths.length > 0) {
+    return {
+      ok: false,
+      reason: `request references protected path(s): ${protectedPaths.join(", ")}`
     };
   }
 
@@ -318,16 +417,20 @@ export function createPiAdapter({
       try {
         request = normalizeWorkerRequest(requestInput);
       } catch (error) {
-        return createBlockedResult({ role: "worker" }, `invalid worker request: ${error.message}`);
+        return sanitizeAdapterWorkerResult(
+          createBlockedResult({ role: "worker" }, `invalid worker request: ${error.message}`)
+        );
       }
 
       let runtimeContext;
       try {
         runtimeContext = createRuntimeContext(contextInput, request);
       } catch (error) {
-        return createBlockedResult(request, error.message, {
-          openQuestions: ["Ensure runtime context payloads match contextManifest[] before invocation."]
-        });
+        return sanitizeAdapterWorkerResult(
+          createBlockedResult(request, error.message, {
+            openQuestions: ["Ensure runtime context payloads match contextManifest[] before invocation."]
+          })
+        );
       }
 
       calls.push({
@@ -337,7 +440,7 @@ export function createPiAdapter({
 
       const requestSafety = validateRequestSafety(request, normalizedSupportedRoles);
       if (!requestSafety.ok) {
-        return createBlockedResult(request, requestSafety.reason);
+        return sanitizeAdapterWorkerResult(createBlockedResult(request, requestSafety.reason), runtimeContext);
       }
 
       const runtimeInvoker = resolvePiWorkerInvoker({
@@ -346,23 +449,32 @@ export function createPiAdapter({
       });
 
       if (!runtimeInvoker) {
-        return createBlockedResult(request, "Pi runtime does not expose runWorker(request, context).", {
-          openQuestions: [
-            "Expose host.runWorker(...) in the extension runtime or inject invokeWorker when creating the adapter."
-          ]
-        });
+        return sanitizeAdapterWorkerResult(
+          createBlockedResult(request, "Pi runtime does not expose runWorker(request, context).", {
+            openQuestions: [
+              "Expose host.runWorker(...) in the extension runtime or inject invokeWorker when creating the adapter."
+            ]
+          }),
+          runtimeContext
+        );
       }
 
       let runtimeResponse;
       try {
         runtimeResponse = await runtimeInvoker.invoke(clone(request), clone(runtimeContext));
       } catch (error) {
-        return createBlockedResult(request, `Pi runtime invocation failed (${runtimeInvoker.label}): ${error.message}`, {
-          openQuestions: ["Inspect the runtime worker invocation surface and retry."]
-        });
+        return sanitizeAdapterWorkerResult(
+          createBlockedResult(request, `Pi runtime invocation failed (${runtimeInvoker.label}): ${error.message}`, {
+            openQuestions: ["Inspect the runtime worker invocation surface and retry."]
+          }),
+          runtimeContext
+        );
       }
 
-      return normalizeRuntimeWorkerResult(runtimeResponse, request, runtimeInvoker.label);
+      return sanitizeAdapterWorkerResult(
+        normalizeRuntimeWorkerResult(runtimeResponse, request, runtimeInvoker.label),
+        runtimeContext
+      );
     },
 
     getCalls() {

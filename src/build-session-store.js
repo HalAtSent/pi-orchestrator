@@ -424,9 +424,7 @@ function normalizePersistedBuildSessionRecord(recordInput, { existingCreatedAt, 
     recordInput.formatVersion,
     BUILD_SESSION_STORE_FORMAT_VERSION
   );
-  const normalizedRepositoryRoot = typeof recordInput.repositoryRoot === "string" && recordInput.repositoryRoot.trim().length > 0
-    ? recordInput.repositoryRoot.trim()
-    : repositoryRoot;
+  const normalizedRepositoryRoot = repositoryRoot;
   const programId = execution.programId ?? lifecycle.executionProgram.id;
 
   const createdAt = recordInput.createdAt ?? existingCreatedAt ?? nowIso;

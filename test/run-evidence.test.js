@@ -5,6 +5,7 @@ import {
   deriveCommandObservationsFromCommands,
   derivePlannedActionClassesFromWorkflow,
   inferActionClasses,
+  inferActionClassesFromCommands,
   inferStopReasonCode,
   inferValidationOutcome,
   normalizeActionClasses,
@@ -130,6 +131,18 @@ test("run evidence infers install and git mutation classes only from explicit co
   );
 });
 
+test("run evidence detects package installs after package-manager global options", () => {
+  for (const command of [
+    "npm --prefix ./app install",
+    "npm --workspace app install",
+    "pnpm --filter app add",
+    "yarn --cwd app add",
+    "bun --cwd app add"
+  ]) {
+    assert.deepEqual(inferActionClassesFromCommands([command]), ["install_dependency"], command);
+  }
+});
+
 test("run evidence derives execute/install/git classes from typed command observations", () => {
   assert.deepEqual(
     inferActionClasses({
@@ -146,6 +159,33 @@ test("run evidence derives execute/install/git classes from typed command observ
       ]
     }),
     ["write_allowed", "execute_local_command", "install_dependency", "mutate_git_state"]
+  );
+});
+
+test("run evidence conservatively classifies install and git mutations behind shell pipes", () => {
+  assert.deepEqual(
+    inferActionClasses({
+      contractRuns: [
+        {
+          evidence: [
+            "run implementer: success",
+            "run implementer command: echo ok | npm install left-pad",
+            "run implementer command: echo ok | git push origin HEAD"
+          ]
+        }
+      ]
+    }),
+    ["write_allowed", "install_dependency", "mutate_git_state"]
+  );
+
+  assert.deepEqual(
+    deriveCommandObservationsFromCommands([
+      "echo ok | npm install left-pad",
+      "echo ok | git push origin HEAD"
+    ], {
+      source: "worker_reported"
+    }).map((observation) => observation.actionClasses).flat(),
+    ["execute_local_command", "install_dependency", "execute_local_command", "mutate_git_state"]
   );
 });
 
@@ -290,6 +330,26 @@ test("run evidence normalizes typed approval lineage and fails closed on malform
       source: "build_session",
       buildId: "build-abc123",
       approvalId: "approval-xyz"
+    }
+  );
+
+  assert.deepEqual(
+    normalizeApprovalBinding({
+      status: "approved",
+      source: "build_session",
+      buildId: "build-scoped",
+      actionClasses: ["write_allowed", "read_repo", "write_allowed"],
+      policyProfile: "default"
+    }, {
+      fieldName: "runJournal.approvalBinding",
+      allowMissing: false
+    }),
+    {
+      status: "approved",
+      source: "build_session",
+      buildId: "build-scoped",
+      actionClasses: ["read_repo", "write_allowed"],
+      policyProfile: "default"
     }
   );
 

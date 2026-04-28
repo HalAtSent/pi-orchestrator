@@ -14,7 +14,10 @@ import {
 } from "../src/program-runner.js";
 import { createProgramContractExecutor } from "../src/program-contract-executor.js";
 import { AUTO_BACKEND_MODES, createAutoBackendRunner } from "../src/auto-backend-runner.js";
-import { buildProjectLifecycleArtifacts } from "../src/project-workflows.js";
+import {
+  buildProjectLifecycleArtifacts,
+  deriveExecutionProgramActionClasses
+} from "../src/project-workflows.js";
 import { createBuildSessionStore } from "../src/build-session-store.js";
 import { createRunStore } from "../src/run-store.js";
 import { createLocalWorkerRunner, createScriptedWorkerRunner } from "../src/worker-runner.js";
@@ -206,6 +209,7 @@ test("trusted build-session runner path persists approvalBinding lineage", async
     const runStore = createRunStore({ rootDir });
     const buildSessionStore = createBuildSessionStore({ rootDir });
     const buildSession = await createApprovedBuildSession(buildSessionStore, lifecycle);
+    const expectedActionClasses = deriveExecutionProgramActionClasses(program);
 
     const journal = await runExecutionProgramFromApprovedBuildSession(program, {
       contractExecutor: async (contract) => ({
@@ -222,14 +226,18 @@ test("trusted build-session runner path persists approvalBinding lineage", async
     assert.deepEqual(journal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: buildSession.buildId
+      buildId: buildSession.buildId,
+      actionClasses: expectedActionClasses,
+      policyProfile: "default"
     });
 
     const persisted = await runStore.loadRun(program.id);
     assert.deepEqual(persisted.runJournal.approvalBinding, {
       status: "approved",
       source: "build_session",
-      buildId: buildSession.buildId
+      buildId: buildSession.buildId,
+      actionClasses: expectedActionClasses,
+      policyProfile: "default"
     });
   });
 });
@@ -321,6 +329,72 @@ test("trusted build-session runner rejects unapproved and fingerprint-drifted se
     assert.equal(drifted.status, "blocked");
     assert.match(drifted.stopReason, /fingerprint/i);
     assert.equal(Object.prototype.hasOwnProperty.call(drifted, "approvalBinding"), false);
+  });
+});
+
+test("trusted build-session runner rejects approval scope drift before execution", async () => {
+  await withTempDir("pi-orchestrator-program-runner-", async (rootDir) => {
+    const lifecycle = buildLifecycle();
+    const program = lifecycle.executionProgram;
+    const runStore = createRunStore({ rootDir });
+    const buildSessionStore = createBuildSessionStore({ rootDir });
+    const approvedSession = await createApprovedBuildSession(buildSessionStore, lifecycle);
+    let executedContracts = 0;
+
+    const actionClassDriftStore = {
+      loadBuildSession: async (buildId) => {
+        const session = await buildSessionStore.loadBuildSession(buildId);
+        return {
+          ...session,
+          approval: {
+            ...session.approval,
+            actionClasses: ["read_repo"]
+          }
+        };
+      }
+    };
+    const actionClassDrift = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async () => {
+        executedContracts += 1;
+        throw new Error("should not execute");
+      },
+      runStore,
+      buildSessionStore: actionClassDriftStore,
+      buildId: approvedSession.buildId
+    });
+    assert.equal(actionClassDrift.status, "blocked");
+    assert.match(actionClassDrift.stopReason, /actionClasses/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(actionClassDrift, "approvalBinding"), false);
+
+    const policyProfileDriftStore = {
+      loadBuildSession: async (buildId) => {
+        const session = await buildSessionStore.loadBuildSession(buildId);
+        return {
+          ...session,
+          execution: {
+            ...session.execution,
+            policyProfile: null
+          },
+          approval: {
+            ...session.approval,
+            policyProfile: "unknown-profile"
+          }
+        };
+      }
+    };
+    const policyProfileDrift = await runExecutionProgramFromApprovedBuildSession(program, {
+      contractExecutor: async () => {
+        executedContracts += 1;
+        throw new Error("should not execute");
+      },
+      runStore,
+      buildSessionStore: policyProfileDriftStore,
+      buildId: approvedSession.buildId
+    });
+    assert.equal(policyProfileDrift.status, "blocked");
+    assert.match(policyProfileDrift.stopReason, /policyProfile/i);
+    assert.equal(Object.prototype.hasOwnProperty.call(policyProfileDrift, "approvalBinding"), false);
+    assert.equal(executedContracts, 0);
   });
 });
 

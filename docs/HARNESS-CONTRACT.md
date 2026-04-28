@@ -97,7 +97,7 @@ The harness treats inputs and artifacts by trust class, not by source optimism.
 | `tool_output` | shell output, filesystem reads, test results, adapter responses | evidence-bearing, but still subject to parsing and validation; current process backend may persist truncated stdout/stderr and launcher metadata into evidence |
 | `external_content` | network content, MCP/tool connector results, downloaded files | untrusted by default |
 | `prior_run_artifact` | persisted run journals, build sessions, cached evidence | trusted only after schema validation and lineage checks |
-| `secret_material` | `.env`, credentials, tokens, private keys | protected; never exposed beyond explicitly authorized boundaries |
+| `secret_material` | `.env`, credentials, tokens, private keys | protected; never intentionally exposed beyond explicitly authorized boundaries; secret-looking narrative output is scrubbed at enforced redaction boundaries |
 | `verification_output` | verifier output, review findings, audit reports | evidence-bearing, but not self-authorizing |
 
 ## Boundary Crossings
@@ -146,12 +146,13 @@ Current implementation notes:
   - repo-absolute paths become repo-relative
   - recognized process-workspace paths become `<process_workspace>` placeholders
   - other absolute paths become `<absolute_path>`
+  - common secret assignments and token-shaped values become `<secret_material>`
 - repo-relative path rewrites are bound to the repository root known at each
   concrete boundary (not always `process.cwd()`).
 - runtime-context admission in `src/auto-workflow.js` treats repository-root
   truth as code-owned (`process.cwd()` at that boundary), not caller-overridable
   runtime context input.
-- this is not a repository-wide secret-scrubbing pipeline. Broader redaction hardening remains in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
+- this is not a repository-wide secret discovery pipeline. Broader redaction hardening remains in [HARDENING-ROADMAP.md](./HARDENING-ROADMAP.md).
 
 ## Control-Plane Boundary
 
