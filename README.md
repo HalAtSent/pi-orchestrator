@@ -104,7 +104,9 @@ Process execution now has an explicit sandbox policy. `processSandbox: "required
 See [`docs/OPERATING-GUIDE.md`](./docs/OPERATING-GUIDE.md) for the stage flow, runtime expectations, and remaining limits.
 For non-technical usage, see [`docs/QUICKSTART.md`](./docs/QUICKSTART.md).
 For the repo doctrine and feature bar, see [`docs/HARNESS-PRINCIPLES.md`](./docs/HARNESS-PRINCIPLES.md).
+For the rebuild north star centered on Work Orders, scoped coding execution, independent review, and evidence packs, see [`docs/CODING-QUALITY-HARNESS.md`](./docs/CODING-QUALITY-HARNESS.md).
 For authoritative behavior, state rules, active-profile tightening, and inspectability requirements, see [`docs/HARNESS-CONTRACT.md`](./docs/HARNESS-CONTRACT.md), [`docs/POLICY-PROFILES.md`](./docs/POLICY-PROFILES.md), and [`docs/RUN-EVIDENCE-SCHEMA.md`](./docs/RUN-EVIDENCE-SCHEMA.md).
+For a teardown-and-rebuild guide that preserves the core idea while reducing platform sprawl, see [`docs/REBUILD-GUIDE.md`](./docs/REBUILD-GUIDE.md).
 For future-facing hardening that is not yet enforced, see [`docs/HARDENING-ROADMAP.md`](./docs/HARDENING-ROADMAP.md).
 If a README summary differs from those normative docs, the normative docs win.
 
