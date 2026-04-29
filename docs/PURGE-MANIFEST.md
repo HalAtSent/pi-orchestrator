@@ -2,21 +2,26 @@
 
 ## Purpose
 
-This manifest is a decision ledger for a future purge of the current Pi
-orchestrator repository.
+This manifest is the decision ledger and audit record for the aggressive purge
+that reset the current Pi orchestrator repository.
+
+Post-purge status: the classifications below describe the pre-purge repository
+and the reasoning used to remove or retain surfaces. They are historical
+guidance, not the current active file map and not design authority for the
+rebuilt runtime.
 
 The purge target is not to erase lessons. The target is to remove stale active
 architecture and rebuild around a small coding-quality harness centered on
 Work Orders.
 
-This manifest does not authorize deletion by itself. Files may be deleted,
-archived, or rewritten only after the stop conditions in this document are
-satisfied.
+This manifest did not authorize deletion by itself. The purge was executed only
+after the recovery tag `pre-rebuild-harness` and replacement rebuild docs were
+in place.
 
 This document is not:
 
 - an implementation plan for the rebuild
-- authority to purge files now
+- current design authority for the rebuilt runtime
 - authority to weaken safety invariants
 - a request to refactor runtime code
 

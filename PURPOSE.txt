@@ -1,4 +1,1 @@
-This package is a personal Pi-based autonomous coding harness for
-day-to-day software work. It keeps orchestration, policy, risk control,
-and evidence in code while using bounded workers for scoped task
-execution. It is not part of the Sentimetrics product or runtime.
+This repo is being rebuilt as a coding-quality harness centered on Work Orders, scoped execution, independent review, verification, and Evidence Packs.
