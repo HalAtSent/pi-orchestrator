@@ -15,6 +15,11 @@ The goal is not to preserve current code. The goal is to preserve the parts of t
 
 If rebuilding from scratch, use this guide before writing code.
 
+For the concrete first-pass implementation order, use
+[IMPLEMENTATION-SEQUENCE.md](./IMPLEMENTATION-SEQUENCE.md). That document
+keeps schema validation, path safety, persistence, worker backends, templates,
+and `/build` in the intended order.
+
 ## Rebuild Thesis
 
 The harness should be a small deterministic execution kernel with optional planning layers around it.

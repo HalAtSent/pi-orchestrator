@@ -30,6 +30,7 @@ The current design authority for the rebuild is:
 - [docs/WORK-ORDER-SCHEMA.md](./docs/WORK-ORDER-SCHEMA.md)
 - [docs/EVIDENCE-PACK-SCHEMA.md](./docs/EVIDENCE-PACK-SCHEMA.md)
 - [docs/KERNEL-INVARIANTS.md](./docs/KERNEL-INVARIANTS.md)
+- [docs/IMPLEMENTATION-SEQUENCE.md](./docs/IMPLEMENTATION-SEQUENCE.md)
 
 [docs/PURGE-MANIFEST.md](./docs/PURGE-MANIFEST.md) is retained as the audit
 record for the aggressive purge that reset this branch. It is not current
