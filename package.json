@@ -5,6 +5,6 @@
   "description": "Rebuild workspace for a Work Order based coding-quality harness.",
   "type": "module",
   "scripts": {
-    "test": "echo \"No runtime tests yet; rebuild in progress.\""
+    "test": "node --test"
   }
 }
