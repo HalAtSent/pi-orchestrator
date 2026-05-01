@@ -14,6 +14,13 @@ there is enough information to execute a bounded coding change.
 
 The core handoff artifact is a **Work Order**.
 
+The JSON snippets in this overview are abbreviated examples. They show the
+major controls the harness should care about, not the full persisted artifact
+schemas. Detailed artifact shape authority lives in
+[WORK-ORDER-SCHEMA.md](./WORK-ORDER-SCHEMA.md) and
+[EVIDENCE-PACK-SCHEMA.md](./EVIDENCE-PACK-SCHEMA.md). If this overview omits or
+collapses a field, the detailed schema document wins.
+
 ## Mission
 
 The harness exists to maximize output quality from any model by combining:
@@ -128,7 +135,11 @@ A Work Order is the structured input to the harness.
 It must tell the harness exactly what outcome is wanted, what scope is allowed,
 what context matters, and how success should be judged.
 
-### Work Order Shape
+### Abbreviated Work Order Overview Example
+
+This compact example is not the full Work Order schema. Use
+[WORK-ORDER-SCHEMA.md](./WORK-ORDER-SCHEMA.md) as the detailed Work Order
+artifact shape authority.
 
 ```json
 {
@@ -645,7 +656,11 @@ The Evidence Pack is the output of the harness.
 It should be useful for a human reviewer deciding whether the patch is
 merge-grade.
 
-Evidence Pack shape:
+Abbreviated Evidence Pack overview example:
+
+This compact example is not the full Evidence Pack schema. Use
+[EVIDENCE-PACK-SCHEMA.md](./EVIDENCE-PACK-SCHEMA.md) as the detailed Evidence
+Pack artifact shape authority.
 
 ```json
 {
@@ -659,7 +674,10 @@ Evidence Pack shape:
     "policyProfile": "default"
   },
   "status": "success|blocked|failed|repair_required",
-  "reviewability": "reviewable|not_reviewable|unknown",
+  "reviewability": {
+    "status": "reviewable|not_reviewable|unknown",
+    "reasons": []
+  },
   "summary": "",
   "readinessEvidence": {},
   "runConfiguration": {
