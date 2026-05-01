@@ -234,6 +234,21 @@ Only promote action classes and evidence fields when there is a detector, owner,
 
 Vocabulary without enforcement creates false confidence.
 
+### Avoid Ignoring WIP Limits
+
+Rebuild sequencing should keep work in progress narrow enough to review.
+
+Default limits:
+
+- one active Work Order per repository during early rebuild
+- no model-backed worker complexity before schema, path safety, artifact store,
+  and deterministic loop are working
+- no template/operator UX expansion before the kernel can emit truthful Evidence
+  Packs
+- no broad refactor while verification commands are placeholders
+
+These are operator/rebuild defaults, not permanent kernel invariants.
+
 ## Template System Direction
 
 The rebuild should not store only monolithic project templates.
@@ -301,6 +316,24 @@ Bad agent uses:
 - claim evidence that was not persisted
 
 The deciding rule is simple: agents can recommend; code authorizes.
+
+## Agent-Readable Infrastructure
+
+The harness should be easy for agents to consume without giving agents
+authority.
+
+Prefer:
+
+- Markdown source maps and source manifests
+- copyable CLI examples
+- structured validation errors
+- machine-readable Work Order and Evidence Pack examples
+- short repo maps and role packet contracts
+- `llms.txt`-style summaries when useful
+
+Kernel-adjacent pieces such as source manifests and validation output should be
+typed and testable. Support docs such as `llms.txt` summaries are operator
+infrastructure and must not become policy authority.
 
 ## Rebuild Stages
 
@@ -441,6 +474,13 @@ Required fixture classes:
 - template missing
 - iOS SwiftUI template composition
 - generic web app template composition
+- model/role/context regression fixtures
+- missing authority fixture
+- ambiguous context fixture
+- patch budget overrun fixture
+- counterexample-review required fixture
+- human-review required fixture
+- rollback/recovery required fixture
 
 For planning/template tests, snapshot the important outputs:
 
@@ -452,6 +492,12 @@ For planning/template tests, snapshot the important outputs:
 - detected project facts
 
 Do not snapshot verbose prose unless the prose is itself the contract.
+
+Agent evaluation fixtures should be saved Work Orders and expected Evidence Pack
+properties, not prompt-vibe comparisons. They should cover model routing, role
+packets, context truncation, scope violations, missing authority, failed
+verification, bounded repair, and reviewer findings that cannot be repaired in
+scope.
 
 ## Documentation Rules
 
@@ -465,6 +511,21 @@ Keep documentation split by authority.
 - Roadmap: future hardening that is not yet enforced.
 
 When rebuilding, do not write target-state promises into the contract until code and tests enforce them.
+
+## Workflow Failure Postmortem Loop
+
+Meaningful workflow failures should create at least one durable improvement:
+
+- schema change
+- validation rule
+- fixture
+- role packet change
+- template change
+- quality-control update
+- documentation correction
+
+Do not solve repeated failures by making agents more autonomous before context,
+scope, evidence, and validation improve.
 
 ## Deletion Guidance
 

@@ -67,6 +67,28 @@ worker output fails closed.
     "sourceRef": null
   },
   "policyProfile": "default",
+  "readiness": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidence": "docs/CODING-QUALITY-HARNESS.md"
+      }
+    ],
+    "blockers": []
+  },
+  "change": {
+    "class": "documentation",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 2,
+      "maxApproxChangedLines": 500,
+      "allowedSurfaces": ["docs"],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false
+    }
+  },
   "scope": {
     "allowed": [
       "docs/WORK-ORDER-SCHEMA.md",
@@ -136,6 +158,32 @@ worker output fails closed.
     "allowDerivedCommands": true,
     "required": true
   },
+  "execution": {
+    "autonomyLevel": "bounded_patch",
+    "modelToolRoute": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "Documentation-only schema update."
+    },
+    "rolePackets": [
+      {
+        "role": "implementer",
+        "packetVersion": "implementer-v1",
+        "required": true
+      },
+      {
+        "role": "reviewer",
+        "packetVersion": "reviewer-v1",
+        "required": true
+      }
+    ],
+    "counterexampleReview": {
+      "required": false,
+      "reason": "Low-risk documentation-only change."
+    }
+  },
   "nonGoals": [
     "Do not refactor runtime code.",
     "Do not purge or archive old docs in this Work Order."
@@ -143,6 +191,19 @@ worker output fails closed.
   "risk": {
     "level": "low",
     "reasons": ["Documentation-only schema target."]
+  },
+  "operationalReadiness": {
+    "observability": {
+      "breakageDetection": "Documentation review and diff checks would catch formatting regressions.",
+      "signals": ["git diff --check"],
+      "manualChecks": ["Inspect rendered Markdown when formatting changes are non-trivial."]
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "plan": null,
+      "recoverySteps": [],
+      "notApplicableReason": "Documentation-only patch can be reverted directly."
+    }
   },
   "reviewFocus": [
     "Scope does not drift into runtime implementation.",
@@ -176,6 +237,10 @@ Minimum executable Work Order fields:
 | `goal` | Must describe a bounded coding outcome. |
 | `repositoryRoot` | Must be an absolute path to the repository root. |
 | `policyProfile` | Must resolve to a known policy profile. Unknown profiles fail closed. |
+| `readiness.status` | Must be `ready` for an executable Work Order. Planned or blocked work stays outside execution. |
+| `change.class` | Must be one supported change class. |
+| `change.reviewDepth` | Must be `low`, `medium`, or `high`. |
+| `change.patchBudget` | Must declare reviewability limits before execution. |
 | `scope.allowed` | Must contain at least one repo-relative path. |
 | `scope.forbidden` | Must be present. It may be empty only if built-in protected paths still apply. |
 | `scope.newFiles` | Must be one of `forbidden`, `allowed`, or `listed_only`. |
@@ -183,7 +248,12 @@ Minimum executable Work Order fields:
 | `context` | Must be present, even if all arrays are empty. |
 | `acceptance` | Must contain at least one required acceptance item. |
 | `verification` | Must be present and internally consistent. |
+| `execution.autonomyLevel` | Must be one supported autonomy level. |
+| `execution.modelToolRoute` | Must be present; it may declare that no model-specific route is required. |
+| `execution.rolePackets` | Must be present; it may be empty only for non-role deterministic or manual paths. |
+| `execution.counterexampleReview` | Must declare whether counterexample review is required. |
 | `risk.level` | Must be `low`, `medium`, or `high`. |
+| `operationalReadiness` | Must record observability/detection and rollback/recovery expectations. |
 | `approval` | Must be present, even when approval is not required. |
 | `repair.maxLoops` | Must be a non-negative integer. |
 
@@ -204,16 +274,94 @@ harness blocks before worker launch.
 | `producer.source` | string or null | Human-readable origin. Informational. |
 | `producer.sourceRef` | string or null | Issue URL, file path, chat id, or adapter id. Informational. |
 | `policyProfile` | string | Code-resolved policy profile. Unknown values fail closed. |
+| `readiness` | object | Definition of Ready summary for activating this Work Order. Does not replace field validation. |
+| `change` | object | Change class, review depth, and patch budget used for routing and review intensity. |
 | `scope` | object | Hard write boundary and new-file policy. |
 | `context` | object | Explicit context inputs and provenance expected by role packets. |
 | `acceptance` | array | Required and optional properties that define successful work. |
 | `verification` | object | Commands and proof expectations for verifier stage. |
+| `execution` | object | Autonomy level, model/tool route, role packet expectations, and counterexample-review requirement. |
 | `nonGoals` | array of strings | Work that must not be done in this run. |
 | `risk` | object | Risk level and reasons used for approval and review intensity. |
+| `operationalReadiness` | object | Breakage detection, observability signals, and rollback/recovery expectations. |
 | `reviewFocus` | array of strings | Specific risks for reviewer attention. Not scope authority. |
 | `approval` | object | Approval requirement and exact binding fields. |
 | `repair` | object | Repair loop limits and widening policy. |
 | `extensions` | object | Reserved extension bag. Non-authoritative until validated by schema-aware code. |
+
+## Definition Of Ready Rules
+
+Executable Work Orders must pass a Definition of Ready gate before any worker
+launch.
+
+`readiness.status` enum:
+
+| Status | Meaning |
+| --- | --- |
+| `ready` | Required authority, scope, acceptance, verification, risk, review, and stop-condition fields are present enough for execution. |
+| `blocked` | The producer knows the Work Order cannot safely execute yet. |
+| `draft` | Human-readable planning artifact, not an executable Work Order. |
+
+`readiness.checks[].status` enum:
+
+- `satisfied`
+- `partial`
+- `missing`
+- `blocked`
+
+Rules:
+
+- Only `ready` Work Orders may execute.
+- Readiness is a gate summary, not a substitute for schema validation.
+- `readiness.checks[]` records producer-side readiness evidence, but code-owned
+  validation still decides whether the artifact can run.
+- Missing authority, ambiguous product behavior, absent write scope,
+  unverifiable acceptance, missing patch budget, or missing stop conditions
+  block before worker launch.
+- A planned Markdown draft should not be canonicalized into an executable Work
+  Order until readiness blockers are resolved.
+
+## Change Class And Patch Budget Rules
+
+`change.class` enum:
+
+| Class | Meaning |
+| --- | --- |
+| `product_behavior` | User-visible or runtime behavior authorized by active product authority. |
+| `contract_schema` | Contract, schema, interface, or persisted artifact shape. |
+| `refactor` | Behavior-preserving code restructuring. |
+| `test_only` | Tests or fixtures without production behavior change. |
+| `documentation` | Documentation that does not itself create product authority unless stored in an authority location. |
+| `infrastructure_tooling` | Build, lint, CI, harness, or developer tooling. |
+| `migration_data_change` | Migration, backfill, data movement, or data-shape change. |
+
+`change.reviewDepth` enum:
+
+- `low`
+- `medium`
+- `high`
+
+`change.patchBudget` declares the reviewability budget before implementation:
+
+| Field | Definition |
+| --- | --- |
+| `expectedFilesChanged` | Approximate expected changed-file count. |
+| `maxApproxChangedLines` | Approximate maximum changed lines before the run should stop or be split. |
+| `allowedSurfaces` | High-level surfaces allowed by the Work Order, such as `docs`, `src`, `tests`, `contracts`, `web`, or `migrations`. |
+| `mayMixSurfaces` | Whether unrelated architectural surfaces may change in one patch. |
+| `incidentalRefactors` | Whether drive-by refactors are allowed. |
+
+Rules:
+
+- Product behavior changes require active product authority in context or
+  acceptance.
+- Refactors require behavior-preservation evidence.
+- Contract or schema changes require compatibility and consumer-impact review.
+- Migration or data changes require rollback or recovery notes.
+- Patch budget violations must be recorded in the Evidence Pack and should make
+  the result `not_reviewable`, `blocked`, or require a fresh Work Order.
+- Higher risk, wider patch budgets, and mixed surfaces require lower autonomy
+  and stronger review.
 
 ## Path Rules
 
@@ -483,6 +631,49 @@ Rules:
 - Advisory commands may improve evidence but cannot satisfy required acceptance unless mapped to a required claim.
 - Skipped required commands must be listed in the Evidence Pack as commands not run.
 
+## Execution Control Rules
+
+Execution controls constrain how much authority a worker receives. They do not
+grant write scope, approve action classes, or prove correctness.
+
+`execution.autonomyLevel` enum:
+
+| Level | Meaning |
+| --- | --- |
+| `assist` | Suggestions or explanation only; no repository writes. |
+| `scoped_edit` | One selected area or file, usually human-directed. |
+| `bounded_patch` | Worker may produce a patch only inside Work Order scope. Default for implementation Work Orders. |
+| `supervised_agent` | Worker may edit and run commands with explicit review checkpoints. |
+| `autonomous_run` | Only for low-risk, well-tested, strongly scoped tasks with code-owned safeguards. |
+
+`execution.modelToolRoute` records the intended route when it affects quality or
+safety. If no route matters, `routeRequired` should be `false` and the reason
+should say why.
+
+Minimum model/tool route fields:
+
+| Field | Definition |
+| --- | --- |
+| `routeRequired` | Whether a specific model, provider, tool, or worker route is required. |
+| `preferredWorker` | `deterministic_local`, `process_model`, `manual`, or another code-owned worker id. |
+| `preferredModels` | Per-role model preferences when model-backed workers are used. |
+| `tools` | Expected tool or action-class vocabulary for this Work Order. |
+| `rationale` | Why the route is appropriate for the change class and risk. |
+
+Rules:
+
+- Autonomy level must not exceed what scope, risk, patch budget, and approval
+  allow.
+- Model/tool routing is evidence-bearing metadata, not permission.
+- A stronger model does not relax scope, verification, or review requirements.
+- Role packet entries identify expected role output contracts; prompt text or
+  skill text cannot widen role permissions.
+- Counterexample review should be required for high-risk work and for any
+  medium-risk work with ambiguity, broad patch budget, weak verification, or
+  product-authority risk.
+- LLM-council or multi-model disagreement may be recorded as review signal, but
+  model agreement is not evidence.
+
 ## Risk Rules
 
 `risk.level` enum:
@@ -501,6 +692,47 @@ Rules:
 - High-risk work requires approval unless policy blocks it entirely.
 - Risk escalation examples include protected path contact, broader action classes, missing sandbox for sandbox-required runs, schema migration, persistence format changes, and destructive commands.
 
+## Operational Readiness Rules
+
+`operationalReadiness` records how breakage would be noticed and how the change
+would be rolled back or recovered. It is input to review and evidence; it does
+not authorize unsafe actions.
+
+`operationalReadiness.observability` shape:
+
+```json
+{
+  "breakageDetection": "How a regression would be noticed.",
+  "signals": ["tests, logs, metrics, traces, contract checks, or manual inspections"],
+  "manualChecks": ["Any human checks expected after the run."]
+}
+```
+
+`operationalReadiness.rollbackRecovery` shape:
+
+```json
+{
+  "required": true,
+  "plan": "How to roll back or recover if this change breaks.",
+  "recoverySteps": ["Concrete rollback, revert, migration, backfill, or mitigation steps."],
+  "notApplicableReason": null
+}
+```
+
+Rules:
+
+- Medium-risk and high-risk Work Orders must include meaningful observability
+  and rollback/recovery notes.
+- Migration, persistence, deploy, external-integration, data-loss, auth,
+  permission, publish, or destructive work requires `rollbackRecovery.required`
+  to be true unless policy blocks the Work Order entirely.
+- Low-risk Work Orders may mark rollback/recovery not applicable, but the reason
+  must be explicit.
+- Observability signals may be manual before production, but missing detection
+  for medium-risk or high-risk work should block or downgrade reviewability.
+- Rollback/recovery notes do not authorize destructive, deploy, network, or git
+  mutation action classes. Those still require policy and approval.
+
 ## Approval Rules
 
 Approval is required when policy, risk, action classes, or environment gates
@@ -513,15 +745,14 @@ Approval binding fields:
 | `approvalId` | Stable approval record id. |
 | `approvedAt` | Timestamp of approval. |
 | `approvedBy` | Human or system actor that approved. |
-| `workOrderId` | Must match `id`. |
-| `approvedFingerprint` | Must match canonical Work Order fingerprint. |
-| `repositoryRoot` | Must match the canonical absolute repository root. |
-| `approvedScope` | Exact allowed, forbidden, and new-file scope approved. |
-| `approvedActionClasses` | Exact action classes approved. |
-| `policyProfile` | Exact policy profile approved. |
+| `approvedFingerprint` | Must match the normalized canonical Work Order policy fingerprint. |
+| `approvedActionClasses` | Must equal the canonical requested command action-class set after de-duplication and sorting. |
 
 Approval authorizes only the exact Work Order identity, fingerprint, repository
-root, action scope, and policy profile.
+root, action scope, and policy profile. Work Order id, repository root, scope,
+policy profile, risk, verification requirements, and repair limits are bound
+through `approvedFingerprint`; action-class coverage is also checked directly by
+canonical `approvedActionClasses` equality.
 
 Approval does not authorize:
 
@@ -649,12 +880,17 @@ Canonicalization expectations:
 - Normalize paths to repo-relative `/` separators.
 - Resolve `repositoryRoot` to a stable absolute root.
 - Sort order-insensitive arrays where schema declares order irrelevant.
+- De-duplicate and sort action-class arrays before hashing.
 - Preserve order-sensitive arrays such as acceptance and command lists.
 - Remove presentation-only fields from the policy fingerprint only if schema
   explicitly marks them non-binding.
-- Include schema version, id, goal, repository root, policy profile, scope,
-  context requirements, acceptance, verification requirements, risk, approval
-  requirements, non-goals, and repair limits.
+- Neutralize volatile approval record fields before hashing:
+  `approvalId`, `approvedAt`, `approvedBy`, and `approvedFingerprint`.
+- Include schema version, id, goal, repository root, policy profile, readiness,
+  change class, review depth, patch budget, scope, context requirements,
+  acceptance, verification requirements, execution controls, risk, operational
+  readiness, approval requirements, canonical approved action classes,
+  non-goals, and repair limits.
 - Include extension fields only when schema-aware code validates and declares
   them binding.
 - Hash the canonical JSON representation with a documented algorithm.
@@ -672,6 +908,28 @@ the canonical fingerprint they were built from.
   "goal": "Fix a typo in docs/README-NOTES.md.",
   "repositoryRoot": "/absolute/path/to/repo",
   "policyProfile": "default",
+  "readiness": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidence": "docs/README-NOTES.md"
+      }
+    ],
+    "blockers": []
+  },
+  "change": {
+    "class": "documentation",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 1,
+      "maxApproxChangedLines": 20,
+      "allowedSurfaces": ["docs"],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false
+    }
+  },
   "scope": {
     "allowed": ["docs/README-NOTES.md"],
     "forbidden": [".git/", ".pi/", "node_modules/", ".env"],
@@ -715,10 +973,38 @@ the canonical fingerprint they were built from.
     "allowDerivedCommands": true,
     "required": true
   },
+  "execution": {
+    "autonomyLevel": "scoped_edit",
+    "modelToolRoute": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "A deterministic local edit is enough for a typo fix."
+    },
+    "rolePackets": [],
+    "counterexampleReview": {
+      "required": false,
+      "reason": "Low-risk documentation typo fix."
+    }
+  },
   "nonGoals": ["Do not edit runtime files."],
   "risk": {
     "level": "low",
     "reasons": ["Single documentation edit."]
+  },
+  "operationalReadiness": {
+    "observability": {
+      "breakageDetection": "A reviewer would notice an incorrect typo fix in the rendered docs or diff.",
+      "signals": ["git diff --check"],
+      "manualChecks": ["Inspect the changed sentence."]
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "plan": null,
+      "recoverySteps": [],
+      "notApplicableReason": "Single-file documentation edit can be reverted directly."
+    }
   },
   "reviewFocus": ["Confirm no runtime files changed."],
   "approval": {
@@ -844,7 +1130,11 @@ Why it blocks:
   },
   "approval": {
     "required": true,
-    "approvalId": "approval-1"
+    "approvalId": "approval-1",
+    "approvedAt": "2026-04-29T12:00:00.000Z",
+    "approvedBy": "reviewer",
+    "approvedFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "approvedActionClasses": []
   },
   "repair": {
     "maxLoops": 0,

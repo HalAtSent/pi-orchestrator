@@ -30,9 +30,17 @@ doc changes them.
   after code declares and tests that exclusion
 - Initial action classes: `read_repository`, `write_repository`,
   `execute_local_command`
+- Initial change classes: `product_behavior`, `contract_schema`, `refactor`,
+  `test_only`, `documentation`, `infrastructure_tooling`,
+  `migration_data_change`
+- Initial autonomy levels: `assist`, `scoped_edit`, `bounded_patch`,
+  `supervised_agent`, `autonomous_run`
+- Initial review depths: `low`, `medium`, `high`
 - New action classes require a detector, owner, tests, and review meaning before
   they become policy vocabulary
 - Runtime artifacts live under ignored `.pi/runs/`
+- Early rebuild WIP limit: do not add model-backed workers, template UX, or
+  `/build` surfaces before earlier kernel acceptance gates are met
 
 ## First Commit Target
 
@@ -46,7 +54,9 @@ Build:
 - canonical JSON and fingerprint calculation
 - fail-closed load helpers for persisted artifacts
 - focused invariant tests for missing fields, enum drift, malformed paths,
-  unknown policy profiles, and bad approval bindings
+  unknown policy profiles, bad approval bindings, readiness status, change
+  class, patch budget, autonomy level, model/tool route, and counterexample
+  review declarations
 
 Do not build:
 
@@ -65,6 +75,10 @@ Acceptance gate:
 - canonical fingerprint output is stable across object key order
 - unknown policy profile blocks
 - approval fingerprint mismatch blocks
+- non-ready Work Orders block
+- missing change class, patch budget, autonomy level, or model/tool route blocks
+- missing observability or rollback/recovery fields blocks when required by risk
+  or change class
 
 ## Pass 2: Scope And Path Safety
 
@@ -118,12 +132,13 @@ adding real model workers.
 Build:
 
 - load Work Order
-- validate policy and scope
+- validate readiness, policy, change class, patch budget, autonomy, model/tool
+  route, and scope
 - preflight repository root
 - execute one scoped write-capable step through an adapter interface
 - capture changed surface from repository diff
 - run declared verification commands
-- emit Evidence Pack
+- emit Evidence Pack with run configuration and fast verification loop evidence
 
 Acceptance gate:
 
@@ -131,6 +146,9 @@ Acceptance gate:
 - an out-of-scope write blocks or fails with evidence
 - no-op success without changed-surface or other proof is not reviewable
 - commands actually run are distinguished from commands planned but skipped
+- patch budget overrun and autonomy drift affect reviewability
+- observability, rollback/recovery, human review, and accepted debt evidence are
+  represented in the emitted Evidence Pack
 
 ## Pass 5: Real Worker Backend
 
@@ -161,6 +179,7 @@ Build:
 - explorer packet: read-only context gathering
 - implementer packet: scoped patch
 - reviewer packet: independent critique
+- counterexample reviewer packet: structured attempt to disprove the patch when required
 - verifier packet: read-only evidence check
 - bounded repair packet
 
@@ -168,6 +187,8 @@ Acceptance gate:
 
 - role prompts cannot change role permissions
 - reviewer findings can trigger repair only inside original scope
+- required counterexample review is recorded before reviewable success
+- required human review is recorded before reviewable success
 - repair loop count is enforced by code
 - repair cannot widen scope, action classes, approval, or protected-path access
 - unresolved blocking findings produce `repair_required` or `blocked`
@@ -190,6 +211,32 @@ Acceptance gate:
 - completed, failed, blocked, or repair-required programs do not resume
 - approval binding persists through every step
 - each step still emits its own Evidence Pack
+
+## Pass 7A: Agent Evaluation Fixtures
+
+Add model/role/context regression fixtures after role packet behavior is typed
+and before optimizing model-backed routes.
+
+Build fixture Work Orders for:
+
+- simple scoped edit
+- out-of-scope write attempt
+- missing authority
+- ambiguous context
+- context truncation
+- patch budget overrun
+- failed verification and bounded repair
+- counterexample review required
+- human review required
+- rollback/recovery required
+- reviewer finding that cannot be repaired in scope
+
+Acceptance gate:
+
+- fixtures assert expected status, reviewability, scope evidence, command
+  evidence, and stop reasons
+- fixtures compare role/model/context strategy by Evidence Pack properties, not
+  by persuasive prose
 
 ## Pass 8: Template Fragment System
 
@@ -227,6 +274,8 @@ Acceptance gate:
 
 - every operator command returns structured details first
 - human text only renders persisted truth
+- validation output and status rendering are agent-readable enough to feed a
+  future Work Order producer without scraping prose
 - deleting `/build` would not delete the execution kernel
 - `/build` blocks on missing templates or unsafe ambiguity
 
@@ -241,4 +290,3 @@ Stop and repair the rebuild direction if any early pass starts depending on:
 - broad action-class vocabulary without detector-backed enforcement
 - formatter text to determine status or reviewability
 - agent judgment to authorize scope, approval, or repair widening
-

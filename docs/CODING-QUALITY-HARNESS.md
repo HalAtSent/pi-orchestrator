@@ -39,6 +39,26 @@ quality constraints that still matter for real software work:
 - no hidden scope widening
 - no unearned confidence
 
+## Workflow Controls
+
+The rebuild should make the most important workflow controls explicit in Work
+Orders and Evidence Packs:
+
+- Definition of Ready before execution
+- context pack provenance and truncation truth
+- change class
+- patch budget
+- risk-appropriate review depth
+- declared autonomy level
+- model/tool route when it affects quality or safety
+- fast verification loop evidence
+- counterexample review for risky or ambiguous work
+- agent scorecard data for model-backed runs
+
+These controls are not product authority. They are execution and review
+constraints that help the harness decide whether to run, stop, repair, or report
+`not_reviewable`.
+
 ## Core Principle
 
 The harness does not decide what product to build.
@@ -113,10 +133,20 @@ what context matters, and how success should be judged.
 ```json
 {
   "schemaVersion": 1,
+  "kind": "work_order",
   "id": "work-order-unique-id",
   "title": "Short human-readable title",
   "goal": "Exact coding outcome wanted.",
   "repositoryRoot": "/absolute/path/to/repo",
+  "policyProfile": "default",
+  "readiness": {
+    "status": "ready"
+  },
+  "change": {
+    "class": "product_behavior|contract_schema|refactor|test_only|documentation|infrastructure_tooling|migration_data_change",
+    "reviewDepth": "low|medium|high",
+    "patchBudget": {}
+  },
   "scope": {
     "allowed": ["relative/path/or/directory"],
     "forbidden": ["relative/path/or/directory"],
@@ -136,12 +166,24 @@ what context matters, and how success should be judged.
     "allowDerivedCommands": true,
     "required": true
   },
+  "execution": {
+    "autonomyLevel": "assist|scoped_edit|bounded_patch|supervised_agent|autonomous_run",
+    "modelToolRoute": {},
+    "rolePackets": [],
+    "counterexampleReview": {
+      "required": false
+    }
+  },
   "nonGoals": [
     "Things that must not be changed."
   ],
   "risk": {
     "level": "low|medium|high",
     "reasons": ["Why this may be tricky or hazardous."]
+  },
+  "operationalReadiness": {
+    "observability": {},
+    "rollbackRecovery": {}
   },
   "reviewFocus": [
     "Specific failure modes the reviewer should hunt."
@@ -157,14 +199,24 @@ what context matters, and how success should be judged.
 
 Minimum executable Work Order:
 
+- `schemaVersion`
+- `kind`
 - `id`
 - `goal`
 - `repositoryRoot`
+- `policyProfile`
+- `readiness.status`
+- `change.class`
+- `change.reviewDepth`
+- `change.patchBudget`
 - `scope.allowed`
 - `scope.forbidden`
 - `acceptance`
 - `verification`
+- `execution.autonomyLevel`
+- `execution.modelToolRoute`
 - `risk.level`
+- `operationalReadiness`
 
 If any minimum field is missing, the harness should block before worker launch.
 
@@ -339,6 +391,10 @@ The loop should be boring, strict, and repeatable.
 Before worker launch, validate:
 
 - Work Order schema
+- Definition of Ready status
+- change class, review depth, and patch budget
+- autonomy level and model/tool route declaration
+- observability and rollback/recovery declaration
 - repository root exists
 - repository root is not protected runtime/dependency directory
 - allowed and forbidden paths are relative and non-escaping
@@ -347,6 +403,7 @@ Before worker launch, validate:
 - context files exist when required
 - verification commands are declared or derivable
 - risk and approval state are consistent
+- counterexample-review requirement is declared
 - policy profile is valid
 
 If validation fails, return `blocked`.
@@ -593,10 +650,32 @@ Evidence Pack shape:
 ```json
 {
   "schemaVersion": 1,
-  "workOrderId": "work-order-id",
+  "kind": "evidence_pack",
+  "id": "evidence-pack-id",
+  "workOrder": {
+    "id": "work-order-id",
+    "fingerprint": "sha256:canonical-work-order-hash",
+    "repositoryRoot": "/absolute/path/to/repo",
+    "policyProfile": "default"
+  },
   "status": "success|blocked|failed|repair_required",
   "reviewability": "reviewable|not_reviewable|unknown",
   "summary": "",
+  "readinessEvidence": {},
+  "runConfiguration": {
+    "changeClass": "",
+    "reviewDepth": "",
+    "patchBudget": {},
+    "autonomyLevelPlanned": "",
+    "autonomyLevelUsed": "",
+    "modelToolRoutePlanned": {},
+    "modelToolRouteUsed": {},
+    "counterexampleReview": {}
+  },
+  "operationalReadinessEvidence": {
+    "observability": {},
+    "rollbackRecovery": {}
+  },
   "changedFiles": [],
   "diffRef": "",
   "scope": {
@@ -607,30 +686,72 @@ Evidence Pack shape:
   "claims": [
     {
       "claim": "",
-      "status": "proven|partial|unproven|not_applicable",
+      "status": "proven|manually_inspected|partial|inferred|unproven|skipped|failed|not_applicable",
       "evidenceRefs": []
     }
   ],
   "commandsRun": [],
+  "fastVerificationLoop": {},
   "reviewFindings": [],
+  "counterexampleFindings": [],
+  "humanReview": {},
   "repairs": [],
   "verification": {},
   "unresolvedQuestions": [],
   "stopReason": null,
-  "modelEvidence": []
+  "modelEvidence": [],
+  "agentScorecard": [],
+  "debtRegister": [],
+  "residualRisk": []
 }
 ```
 
 The Evidence Pack must distinguish:
 
+- planned readiness and actual readiness evidence
+- planned autonomy and actual autonomy used
+- planned model/tool route and actual route used
+- planned breakage detection and actual detection evidence
+- planned rollback/recovery and actual recovery evidence
 - observed facts
 - worker claims
 - verifier-proven claims
 - unproven claims
 - planned scope
 - actual changed surface
+- patch budget respected versus exceeded
+- human review evidence when required
+- accepted debt and cleanup triggers
+- residual risk
 
 Do not let summaries blur those categories.
+
+## Definition Of Done
+
+Definition of Done is a named gate over existing evidence. It is not a terminal
+status and it must not bypass the Evidence Pack.
+
+A run is done only when:
+
+- the Work Order validated and was ready before execution
+- the Evidence Pack validates on write and load
+- scope, forbidden paths, and protected paths were respected
+- changed-surface evidence was captured or the gap is explicit
+- required commands ran successfully, or skipped/failed commands are explained
+- required acceptance claims are proven or manually inspected, or their limits
+  are explicit
+- reviewability was computed from typed evidence
+- required counterexample review was performed or explicitly missing
+- required human review was recorded
+- observability and rollback/recovery expectations were reviewed for the risk
+- residual risk is recorded
+- accepted debt has a cleanup trigger
+- the stop reason explains why the run ended
+
+`success` does not imply done. A successful run can still fail Definition of
+Done when evidence is missing, reviewability is downgraded, human review is
+required but absent, recovery is unreviewed, or debt is accepted without a
+cleanup trigger.
 
 ## State Machine
 
@@ -671,6 +792,12 @@ A run can structurally finish with `success` but still be `not_reviewable` if:
 - changed surface was not observed
 - provider/model evidence is missing when required
 - required claims are unproven
+- patch budget was exceeded
+- actual autonomy exceeded planned autonomy
+- required counterexample review was not performed
+- required human review was not recorded
+- observability or rollback/recovery evidence is missing for the risk
+- accepted debt lacks a cleanup trigger
 - reviewer findings are unresolved
 
 The harness should prefer:
@@ -766,6 +893,17 @@ Suggested defaults:
 - implementer: strong coding model, medium/high reasoning based on risk
 - reviewer: strongest available reasoning
 - verifier: deterministic tools first, model only to interpret evidence
+
+Autonomy defaults:
+
+- `assist`: no write-capable execution
+- `scoped_edit`: one selected file or area
+- `bounded_patch`: default for implementation Work Orders
+- `supervised_agent`: requires review checkpoints
+- `autonomous_run`: only for low-risk, strongly scoped, well-tested work
+
+The actual autonomy level used must be recorded. Model strength never widens
+scope or lowers the evidence bar.
 
 ## Tool And Command Policy
 
@@ -894,14 +1032,18 @@ Incorrect template behavior:
 The smallest useful rebuild should support:
 
 1. Load a Work Order from JSON or command input.
-2. Validate scope and protected paths.
+2. Validate Definition of Ready, change class, patch budget, autonomy, scope,
+   protected paths, risk, and approval.
 3. Run explorer read-only.
 4. Run implementer with allowlist writes.
 5. Observe changed files.
-6. Run reviewer read-only.
+6. Run reviewer read-only, including counterexample review when required.
 7. Run one repair loop if needed.
-8. Run verifier.
-9. Persist Evidence Pack.
+8. Run verifier and record the fast verification loop.
+9. Persist Evidence Pack with run configuration and scorecard data when
+   model-backed workers ran.
+10. Record human review, observability, rollback/recovery, residual risk, and
+    accepted debt evidence when required.
 
 Everything else can wait.
 
@@ -947,17 +1089,29 @@ Required early tests:
 - rejects empty allowed scope
 - rejects path traversal
 - rejects protected paths
+- blocks Work Orders that are not ready
+- blocks missing change class, patch budget, or autonomy level
 - blocks missing acceptance criteria
 - blocks missing approval for high-risk work
+- records model/tool route and provider/model evidence when model-backed workers run
 - read-only worker write is detected
 - implementer out-of-scope write is rejected
 - implementer no-op success without evidence is not reviewable
+- patch budget overrun is surfaced as blocked, repair-required, or not-reviewable
+- actual autonomy exceeding planned autonomy is not reviewable
 - reviewer blocking finding triggers repair
+- required counterexample review is recorded or reviewability is downgraded
+- required human review is recorded or reviewability is downgraded
+- missing rollback/recovery or observability evidence affects reviewability for
+  medium-risk and high-risk work
 - repair cannot widen scope
 - verifier records commands run
+- fast verification loop records inspect/test/repair iterations
 - failed verification yields not-reviewable result
 - terminal run cannot resume
-- final Evidence Pack separates proven and unproven claims
+- final Evidence Pack separates proven, manually inspected, inferred, unproven,
+  skipped, and failed claims
+- accepted debt requires a cleanup trigger
 
 ## Quality Metrics
 

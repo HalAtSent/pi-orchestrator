@@ -61,6 +61,89 @@ widen scope, prove claims, approve actions, or replace command observations.
     "reasons": []
   },
   "summary": "Created rebuild target Work Order and Evidence Pack schema docs.",
+  "readinessEvidence": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidenceRefs": ["context-001"]
+      }
+    ],
+    "blockers": []
+  },
+  "runConfiguration": {
+    "changeClass": "documentation",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 2,
+      "maxApproxChangedLines": 500,
+      "allowedSurfaces": ["docs"],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false,
+      "status": "respected"
+    },
+    "autonomyLevelPlanned": "bounded_patch",
+    "autonomyLevelUsed": "bounded_patch",
+    "modelToolRoutePlanned": {
+      "routeRequired": false,
+      "preferredWorker": "process_model",
+      "preferredModels": [
+        {
+          "role": "implementer",
+          "provider": "openai-codex",
+          "model": "gpt-5.5",
+          "reasoning": "medium"
+        }
+      ],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "Documentation-only schema update."
+    },
+    "modelToolRouteUsed": {
+      "worker": "process_model",
+      "models": [
+        {
+          "role": "implementer",
+          "provider": "openai-codex",
+          "model": "gpt-5.5",
+          "reasoning": "medium"
+        }
+      ],
+      "tools": ["read_repository", "execute_local_command"]
+    },
+    "rolePacketVersions": [
+      {
+        "role": "implementer",
+        "packetVersion": "implementer-v1"
+      }
+    ],
+    "counterexampleReview": {
+      "required": false,
+      "performed": false,
+      "reason": "Low-risk documentation-only change."
+    }
+  },
+  "operationalReadinessEvidence": {
+    "observability": {
+      "breakageDetection": "Documentation review and diff checks would catch formatting regressions.",
+      "signalsChecked": ["git diff --check"],
+      "signalsNotChecked": [],
+      "manualChecks": [
+        {
+          "description": "Inspect rendered Markdown when formatting changes are non-trivial.",
+          "status": "not_applicable",
+          "evidenceRefs": []
+        }
+      ]
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "planReviewed": true,
+      "performed": false,
+      "evidenceRefs": [],
+      "residualRecoveryRisk": "Documentation-only patch can be reverted directly."
+    }
+  },
   "scope": {
     "planned": {
       "allowed": [
@@ -81,11 +164,13 @@ widen scope, prove claims, approve actions, or replace command observations.
     "captureStatus": "complete",
     "observed": [
       {
+        "id": "changed-surface-001",
         "path": "docs/WORK-ORDER-SCHEMA.md",
         "changeType": "added",
         "source": "parent_diff"
       },
       {
+        "id": "changed-surface-002",
         "path": "docs/EVIDENCE-PACK-SCHEMA.md",
         "changeType": "added",
         "source": "parent_diff"
@@ -131,7 +216,37 @@ widen scope, prove claims, approve actions, or replace command observations.
     "failedChecks": [],
     "unprovenClaims": []
   },
+  "fastVerificationLoop": {
+    "iterations": [
+      {
+        "loop": 1,
+        "changeRefs": ["changed-surface-001"],
+        "inspection": "completed",
+        "commandsRun": ["cmd-001"],
+        "failedChecks": [],
+        "repairsAttempted": [],
+        "result": "passed"
+      }
+    ],
+    "stopReason": "completed"
+  },
   "reviewFindings": [],
+  "counterexampleFindings": [],
+  "humanReview": {
+    "required": false,
+    "reviews": [
+      {
+        "id": "review-001",
+        "reviewer": "human-reviewer-id",
+        "reviewedAt": "2026-04-29T12:05:00.000Z",
+        "surfacesInspected": ["docs/WORK-ORDER-SCHEMA.md", "docs/EVIDENCE-PACK-SCHEMA.md"],
+        "findings": [],
+        "manuallyInspectedClaims": ["claim-001"],
+        "remainingUnprovenClaims": [],
+        "decision": "accepted"
+      }
+    ]
+  },
   "repairs": [],
   "workerModelEvidence": [
     {
@@ -152,12 +267,51 @@ widen scope, prove claims, approve actions, or replace command observations.
   },
   "contextEvidence": [
     {
+      "id": "context-001",
       "kind": "explicit_file",
       "reference": "docs/CODING-QUALITY-HARNESS.md",
       "reason": "North-star harness design.",
       "included": true,
       "truncated": false,
       "budgetNote": null
+    }
+  ],
+  "agentScorecard": [
+    {
+      "role": "implementer",
+      "provider": "openai-codex",
+      "model": "gpt-5.5",
+      "toolRoute": "process_model",
+      "autonomyLevel": "bounded_patch",
+      "changeClass": "documentation",
+      "riskLevel": "low",
+      "result": "success",
+      "reviewability": "reviewable",
+      "scopeViolations": 0,
+      "repairCount": 0,
+      "commandsPassed": 1,
+      "commandsFailed": 0,
+      "unprovenRequiredClaims": 0,
+      "humanOverride": false
+    }
+  ],
+  "debtRegister": [
+    {
+      "id": "debt-001",
+      "description": "Schema is documented before runtime enforcement exists.",
+      "acceptedBy": "human-reviewer-id",
+      "cleanupTrigger": "When schema validation implementation begins, add tests for these documented fields.",
+      "owner": "pi-orchestrator",
+      "status": "open"
+    }
+  ],
+  "residualRisk": [
+    {
+      "id": "risk-001",
+      "description": "Runtime enforcement has not been implemented yet.",
+      "severity": "medium",
+      "acceptedBy": "human-reviewer-id",
+      "evidenceRefs": ["debt-001"]
     }
   ],
   "redactions": {
@@ -193,15 +347,24 @@ widen scope, prove claims, approve actions, or replace command observations.
 | `workOrder.policyProfile` | Must match the policy profile used during validation. |
 | `status` | Must be `success`, `blocked`, `failed`, or `repair_required`. |
 | `reviewability.status` | Must be `reviewable`, `not_reviewable`, or `unknown`. |
+| `readinessEvidence` | Must record the Work Order readiness state observed at execution time. |
+| `runConfiguration` | Must record change class, review depth, patch budget, autonomy, model/tool route, and counterexample-review requirement. |
+| `operationalReadinessEvidence` | Must record observability/detection and rollback/recovery evidence or explicit non-applicability. |
 | `scope.planned` | Must record the planned allowed, forbidden, and new-file scope. |
 | `changedSurface.captureStatus` | Must be `complete`, `partial`, or `not_captured`. |
 | `claims` | Must include all required acceptance claims or an explicit not-applicable record. |
 | `commands` | Must include every command actually run by harness-controlled execution. |
 | `verification` | Must distinguish commands run from commands not run. |
+| `fastVerificationLoop` | Must record inspect/test/repair loop evidence, even for a one-pass run. |
 | `reviewFindings` | Must be present, even if empty. |
+| `counterexampleFindings` | Must be present; may be empty unless counterexample review was required or performed. |
+| `humanReview` | Must record whether manual review was required and any review evidence captured. |
 | `repairs` | Must be present, even if empty. |
 | `approvalEvidence` | Must be present, even when approval was not required. |
 | `contextEvidence` | Must be present, even if empty. |
+| `agentScorecard` | Must be present; may be empty for fully deterministic runs. |
+| `debtRegister` | Must be present; may be empty when no debt was accepted. |
+| `residualRisk` | Must be present; may be empty when no residual risk remains. |
 | `redactions.status` | Must state whether redaction was code-verified. |
 | `persistence` | Must record schema validation status. |
 | `stop.reason` | Must state why execution stopped. |
@@ -242,6 +405,9 @@ Common `not_reviewable` reasons:
 - `required_command_not_run`
 - `required_command_failed`
 - `required_claim_unproven`
+- `patch_budget_exceeded`
+- `autonomy_level_exceeded`
+- `counterexample_review_required_not_run`
 - `review_finding_unresolved`
 - `provider_model_missing`
 - `approval_evidence_missing`
@@ -255,6 +421,92 @@ Rules:
 - No-op implementer success without changed-surface evidence, explicit validation evidence, or a required no-op acceptance claim is not reviewable.
 - Reviewability must be computed from typed evidence, not formatter optimism.
 - A human or future policy may still reject a reviewable result.
+
+## Run Configuration And Readiness Evidence
+
+The Evidence Pack records both planned controls and controls actually used.
+
+`readinessEvidence` records the Definition of Ready state observed when the run
+started. It does not retroactively make an invalid Work Order valid.
+
+`readinessEvidence.checks[].status` uses the Work Order readiness check status
+vocabulary: `satisfied`, `partial`, `missing`, or `blocked`.
+
+`runConfiguration` records:
+
+- change class
+- review depth
+- patch budget and whether it was respected
+- autonomy level planned and used
+- model/tool route planned and used
+- role packet versions
+- counterexample-review requirement and result
+
+Rules:
+
+- If `readinessEvidence.status` was not `ready`, execution should normally be
+  `blocked`.
+- If the actual autonomy level exceeds the planned level, reviewability is
+  `not_reviewable` unless a code-owned policy explicitly approved the change.
+- Patch budget overrun must be visible and should cause `blocked`,
+  `repair_required`, or `not_reviewable` unless a fresh Work Order authorizes
+  the wider patch.
+- Model/tool route drift is not automatically a failure, but the Evidence Pack
+  must explain it and cannot use model choice as proof.
+- Role packet versions and worker result references are audit metadata, not
+  permission or product authority.
+
+## Operational Readiness Evidence
+
+`operationalReadinessEvidence` records how the run treated the Work Order's
+breakage-detection and rollback/recovery expectations.
+
+Observability entry shape:
+
+```json
+{
+  "breakageDetection": "How a regression would be noticed.",
+  "signalsChecked": ["cmd-001", "metric-name", "log-name"],
+  "signalsNotChecked": [
+    {
+      "signal": "production metric",
+      "reason": "not available in local rebuild"
+    }
+  ],
+  "manualChecks": [
+    {
+      "description": "Inspect rendered Markdown.",
+      "status": "passed",
+      "evidenceRefs": ["review-001"]
+    }
+  ]
+}
+```
+
+Rollback/recovery entry shape:
+
+```json
+{
+  "required": true,
+  "planReviewed": true,
+  "performed": false,
+  "evidenceRefs": ["review-001"],
+  "residualRecoveryRisk": "Rollback requires a follow-up migration if data has already been written."
+}
+```
+
+Rules:
+
+- Medium-risk and high-risk runs should not be reviewable unless observability
+  and rollback/recovery expectations were reviewed or explicitly marked
+  inapplicable.
+- Migration, persistence, deploy, external-integration, data-loss, auth,
+  permission, publish, or destructive changes require rollback/recovery
+  evidence.
+- `performed: false` is normal for a successful run; it means rollback was not
+  needed, not that rollback was ignored.
+- Missing detection or recovery evidence must be reflected in reviewability
+  reasons or residual risk.
 
 ## Changed Surface
 
@@ -272,6 +524,7 @@ Observed entry shape:
 
 ```json
 {
+  "id": "changed-surface-001",
   "path": "src/example.js",
   "changeType": "modified",
   "source": "parent_diff",
@@ -311,8 +564,12 @@ Claim status enum:
 | Status | Meaning |
 | --- | --- |
 | `proven` | Evidence directly supports the claim. |
+| `manually_inspected` | Human or explicit review inspected the claim, but deterministic proof is unavailable or inappropriate. |
 | `partial` | Evidence supports part of the claim or supports it under stated limits. |
+| `inferred` | Plausible from code or artifact inspection, but not directly verified. |
 | `unproven` | Claim is required or asserted, but evidence is missing or insufficient. |
+| `skipped` | Claim was intentionally not checked and the reason is recorded. |
+| `failed` | Evidence contradicts the claim or a required check failed. |
 | `not_applicable` | Claim is not applicable for this run, with a recorded reason. |
 
 Claim entry shape:
@@ -343,7 +600,8 @@ Rules:
 
 - Worker confidence is not evidence.
 - Planned commands are not evidence until observed as run.
-- Unproven required claims make reviewability `not_reviewable` or `unknown`.
+- Required claims with status `unproven`, `skipped`, or `failed` make
+  reviewability `not_reviewable` or `unknown`.
 - Claim evidence references must resolve to commands, changed-surface observations, review findings, approval records, context evidence, or other typed artifacts.
 
 ## Command Observations
@@ -402,7 +660,7 @@ Command source enum:
 Minimum action classes:
 
 - `read_repository`
-- `write_allowed_files`
+- `write_repository`
 - `execute_local_command`
 - `install_dependency`
 - `mutate_git_state`
@@ -456,6 +714,35 @@ Rules:
 - Advisory skipped commands must be visible but need not block reviewability.
 - Verifier is read-only and cannot patch files to make checks pass.
 
+## Fast Verification Loop
+
+`fastVerificationLoop` records the generate, inspect, test, repair-or-stop loop
+that happened during the run.
+
+Iteration entry shape:
+
+```json
+{
+  "loop": 1,
+  "changeRefs": ["changed-surface-001"],
+  "inspection": "completed",
+  "commandsRun": ["cmd-001"],
+  "failedChecks": [],
+  "repairsAttempted": [],
+  "result": "passed"
+}
+```
+
+Rules:
+
+- A one-pass run still records one loop iteration.
+- Failed checks, skipped required checks, and repairs attempted must be visible.
+- Repair attempts must reference bounded repair records when files changed.
+- The loop stop reason must agree with top-level `status`, `verification`, and
+  `stop.reason`.
+- The loop is evidence about process quality; it is not proof unless it
+  references typed command, changed-surface, review, or claim evidence.
+
 ## Review Findings
 
 Review findings are independent critique records.
@@ -494,6 +781,71 @@ Rules:
 - File and line are optional only when the finding is not location-specific.
 - Reviewer output cannot widen repair scope.
 - Unresolved blocking findings lead to `repair_required` or `not_reviewable`.
+
+## Human Review
+
+`humanReview` records manual review as evidence. It does not replace typed
+verification, and human acceptance does not make an unproven required claim
+proven.
+
+Review entry shape:
+
+```json
+{
+  "id": "review-001",
+  "reviewer": "human-reviewer-id",
+  "reviewedAt": "2026-04-29T12:05:00.000Z",
+  "surfacesInspected": ["src/example.js", "test/example.test.js"],
+  "findings": ["finding-001"],
+  "manuallyInspectedClaims": ["claim-001"],
+  "remainingUnprovenClaims": ["claim-002"],
+  "decision": "accepted|rejected|changes_requested|deferred"
+}
+```
+
+Rules:
+
+- If a Work Order or policy requires human review, missing `humanReview`
+  evidence makes reviewability `not_reviewable` or `unknown`.
+- `surfacesInspected` must be specific enough for another reviewer to understand
+  what was actually checked.
+- Claims may be marked `manually_inspected` only when a review entry names the
+  claim or points to a concrete finding/evidence reference.
+- Human review can reject a technically successful run.
+- Human review cannot widen scope, approve missing required commands, or turn
+  model confidence into evidence.
+
+## Counterexample Findings
+
+Counterexample review is a structured review mode that tries to prove the patch
+wrong, contradicted, out of scope, or insufficiently evidenced.
+
+Entry shape:
+
+```json
+{
+  "id": "counterexample-001",
+  "severity": "blocking",
+  "question": "What active authority contradicts this change?",
+  "finding": "The Work Order cites no active product authority for the behavior.",
+  "evidenceRefs": ["context-001"],
+  "statusAfterRepair": "unresolved"
+}
+```
+
+Rules:
+
+- If the Work Order required counterexample review, absence of
+  `counterexampleFindings` evidence makes reviewability `not_reviewable` or
+  `unknown`.
+- Counterexample findings use the same blocking versus non-blocking semantics as
+  review findings.
+- A counterexample reviewer cannot approve missing evidence by agreement or
+  widen repair scope.
+- LLM-council or multi-model disagreement may be recorded here as review signal,
+  but it is not proof.
+- LLM-council output affects reviewability only when it is promoted into a
+  concrete unresolved finding, unproven claim, or open question.
 
 ## Repair Records
 
@@ -563,6 +915,82 @@ Rules:
 - Provider/model evidence is useful for review, but it is not proof that claims are true.
 - Role prompts and skills do not define permissions.
 
+## Agent Scorecard
+
+`agentScorecard` records model and role performance for later routing decisions.
+It is operational evidence about the agent run, not proof that the patch is
+correct.
+
+Recommended fields:
+
+| Field | Definition |
+| --- | --- |
+| `role` | Worker role evaluated. |
+| `provider` | Provider used for the role, if model-backed. |
+| `model` | Model used for the role, if model-backed. |
+| `toolRoute` | Worker or tool route actually used. |
+| `autonomyLevel` | Autonomy level actually used. |
+| `changeClass` | Work Order change class. |
+| `riskLevel` | Work Order risk level. |
+| `result` | Role or run result. |
+| `reviewability` | Final reviewability status relevant to this role. |
+| `scopeViolations` | Count of detected scope violations. |
+| `repairCount` | Repair attempts attributed to this role or run. |
+| `commandsPassed` | Count of passed command observations. |
+| `commandsFailed` | Count of failed command observations. |
+| `unprovenRequiredClaims` | Count of required claims still unproven. |
+| `humanOverride` | Whether a human rejected, overrode, or corrected the run. |
+
+Rules:
+
+- Scorecards help choose future model/tool routes based on evidence.
+- Scorecards do not override Work Order validation, scope, approval, or
+  reviewability.
+- Deterministic non-model runs may leave `agentScorecard` empty unless policy
+  wants local-run metrics.
+
+## Residual Risk And Debt
+
+`debtRegister` records accepted debt and the condition that forces cleanup.
+Accepted debt must not be hidden in prose summaries.
+
+Entry shape:
+
+```json
+{
+  "id": "debt-001",
+  "description": "Temporary local-only verification command.",
+  "acceptedBy": "human-reviewer-id",
+  "cleanupTrigger": "Before running production implementation Work Orders.",
+  "owner": "pi-orchestrator",
+  "status": "open|closed|superseded"
+}
+```
+
+`residualRisk` records risks that remain after verification and review:
+
+```json
+{
+  "id": "risk-001",
+  "description": "Focused tests passed, but integration behavior was not exercised.",
+  "severity": "low|medium|high",
+  "acceptedBy": "human-reviewer-id",
+  "evidenceRefs": ["cmd-001", "review-001"]
+}
+```
+
+Rules:
+
+- Accepted debt requires a cleanup trigger.
+- High-risk accepted debt should make reviewability `not_reviewable` unless a
+  human explicitly accepts the residual risk.
+- Debt records are not permission to keep widening scope in future Work Orders.
+- Closing debt requires evidence in a later Evidence Pack or explicit human
+  review record.
+- Residual risk must be specific; generic "some risk remains" is not useful.
+- High residual risk should make reviewability `not_reviewable` unless policy
+  allows human acceptance for that risk class.
+
 ## Approval Evidence
 
 Approval evidence records what was approved, not whether the patch is correct.
@@ -595,6 +1023,7 @@ Entry shape:
 
 ```json
 {
+  "id": "context-001",
   "kind": "explicit_file",
   "reference": "docs/CODING-QUALITY-HARNESS.md",
   "reason": "North-star harness design.",
@@ -738,6 +1167,58 @@ Rules:
     "reasons": []
   },
   "summary": "Fixed a docs typo.",
+  "readinessEvidence": {
+    "status": "ready",
+    "checks": [],
+    "blockers": []
+  },
+  "runConfiguration": {
+    "changeClass": "documentation",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 1,
+      "maxApproxChangedLines": 20,
+      "allowedSurfaces": ["docs"],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false,
+      "status": "respected"
+    },
+    "autonomyLevelPlanned": "scoped_edit",
+    "autonomyLevelUsed": "scoped_edit",
+    "modelToolRoutePlanned": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "Small docs edit."
+    },
+    "modelToolRouteUsed": {
+      "worker": "deterministic_local",
+      "models": [],
+      "tools": ["read_repository", "execute_local_command"]
+    },
+    "rolePacketVersions": [],
+    "counterexampleReview": {
+      "required": false,
+      "performed": false,
+      "reason": "Low-risk docs edit."
+    }
+  },
+  "operationalReadinessEvidence": {
+    "observability": {
+      "breakageDetection": "Documentation review and diff checks would catch formatting regressions.",
+      "signalsChecked": ["cmd-001"],
+      "signalsNotChecked": [],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "planReviewed": true,
+      "performed": false,
+      "evidenceRefs": [],
+      "residualRecoveryRisk": "Single-file documentation edit can be reverted directly."
+    }
+  },
   "scope": {
     "planned": {
       "allowed": ["docs/README-NOTES.md"],
@@ -752,6 +1233,7 @@ Rules:
     "captureStatus": "complete",
     "observed": [
       {
+        "id": "changed-surface-001",
         "path": "docs/README-NOTES.md",
         "changeType": "modified",
         "source": "parent_diff"
@@ -767,7 +1249,7 @@ Rules:
       "text": "Only the target docs file changed.",
       "required": true,
       "status": "proven",
-      "evidenceRefs": ["changed-surface"]
+      "evidenceRefs": ["changed-surface-001"]
     }
   ],
   "commands": [
@@ -797,7 +1279,26 @@ Rules:
     "failedChecks": [],
     "unprovenClaims": []
   },
+  "fastVerificationLoop": {
+    "iterations": [
+      {
+        "loop": 1,
+        "changeRefs": ["changed-surface-001"],
+        "inspection": "completed",
+        "commandsRun": ["cmd-001"],
+        "failedChecks": [],
+        "repairsAttempted": [],
+        "result": "passed"
+      }
+    ],
+    "stopReason": "completed"
+  },
   "reviewFindings": [],
+  "counterexampleFindings": [],
+  "humanReview": {
+    "required": false,
+    "reviews": []
+  },
   "repairs": [],
   "workerModelEvidence": [],
   "approvalEvidence": {
@@ -809,6 +1310,9 @@ Rules:
     "policyProfile": "default"
   },
   "contextEvidence": [],
+  "agentScorecard": [],
+  "debtRegister": [],
+  "residualRisk": [],
   "redactions": {
     "status": "verified",
     "rulesApplied": ["repo_relative_paths"],
@@ -848,6 +1352,63 @@ Rules:
     "reasons": ["changed_surface_not_captured", "required_command_not_run"]
   },
   "summary": "Worker reported completion, but required evidence is missing.",
+  "readinessEvidence": {
+    "status": "ready",
+    "checks": [],
+    "blockers": []
+  },
+  "runConfiguration": {
+    "changeClass": "product_behavior",
+    "reviewDepth": "medium",
+    "patchBudget": {
+      "expectedFilesChanged": 1,
+      "maxApproxChangedLines": 80,
+      "allowedSurfaces": ["src", "tests"],
+      "mayMixSurfaces": true,
+      "incidentalRefactors": false,
+      "status": "unknown"
+    },
+    "autonomyLevelPlanned": "bounded_patch",
+    "autonomyLevelUsed": "bounded_patch",
+    "modelToolRoutePlanned": {
+      "routeRequired": false,
+      "preferredWorker": "process_model",
+      "preferredModels": [],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "Narrow behavior change."
+    },
+    "modelToolRouteUsed": {
+      "worker": "process_model",
+      "models": [],
+      "tools": ["read_repository", "execute_local_command"]
+    },
+    "rolePacketVersions": [],
+    "counterexampleReview": {
+      "required": false,
+      "performed": false,
+      "reason": "Not required by this Work Order."
+    }
+  },
+  "operationalReadinessEvidence": {
+    "observability": {
+      "breakageDetection": "Required verification would detect this behavior, but it did not run.",
+      "signalsChecked": [],
+      "signalsNotChecked": [
+        {
+          "signal": "verify-unit",
+          "reason": "command_not_run"
+        }
+      ],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "planReviewed": false,
+      "performed": false,
+      "evidenceRefs": [],
+      "residualRecoveryRisk": "Recovery was not reviewed because required evidence was missing."
+    }
+  },
   "scope": {
     "planned": {
       "allowed": ["src/example.js"],
@@ -889,7 +1450,26 @@ Rules:
     "failedChecks": [],
     "unprovenClaims": ["claim-001"]
   },
+  "fastVerificationLoop": {
+    "iterations": [
+      {
+        "loop": 1,
+        "changeRefs": [],
+        "inspection": "not_captured",
+        "commandsRun": [],
+        "failedChecks": [],
+        "repairsAttempted": [],
+        "result": "missing_required_evidence"
+      }
+    ],
+    "stopReason": "completed_without_required_evidence"
+  },
   "reviewFindings": [],
+  "counterexampleFindings": [],
+  "humanReview": {
+    "required": false,
+    "reviews": []
+  },
   "repairs": [],
   "workerModelEvidence": [],
   "approvalEvidence": {
@@ -901,6 +1481,17 @@ Rules:
     "policyProfile": "default"
   },
   "contextEvidence": [],
+  "agentScorecard": [],
+  "debtRegister": [],
+  "residualRisk": [
+    {
+      "id": "risk-001",
+      "description": "Required evidence was missing, so behavior remains unproven.",
+      "severity": "medium",
+      "acceptedBy": null,
+      "evidenceRefs": ["claim-001"]
+    }
+  ],
   "redactions": {
     "status": "verified",
     "rulesApplied": [],
@@ -940,6 +1531,64 @@ Rules:
     "reasons": ["invalid_work_order", "scope_violation"]
   },
   "summary": "Blocked before worker launch because scope escaped the repository root.",
+  "readinessEvidence": {
+    "status": "blocked",
+    "checks": [
+      {
+        "id": "scope-valid",
+        "status": "blocked",
+        "evidenceRefs": ["scope-violation-001"]
+      }
+    ],
+    "blockers": ["scope.allowed escapes repository root"]
+  },
+  "runConfiguration": {
+    "changeClass": "infrastructure_tooling",
+    "reviewDepth": "high",
+    "patchBudget": {
+      "expectedFilesChanged": 1,
+      "maxApproxChangedLines": 20,
+      "allowedSurfaces": ["external"],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false,
+      "status": "not_evaluated"
+    },
+    "autonomyLevelPlanned": "bounded_patch",
+    "autonomyLevelUsed": "assist",
+    "modelToolRoutePlanned": {
+      "routeRequired": false,
+      "preferredWorker": "none",
+      "preferredModels": [],
+      "tools": [],
+      "rationale": "Validation blocked before worker launch."
+    },
+    "modelToolRouteUsed": {
+      "worker": "none",
+      "models": [],
+      "tools": []
+    },
+    "rolePacketVersions": [],
+    "counterexampleReview": {
+      "required": false,
+      "performed": false,
+      "reason": "Validation blocked before review."
+    }
+  },
+  "operationalReadinessEvidence": {
+    "observability": {
+      "breakageDetection": "Validation blocked before runtime detection was relevant.",
+      "signalsChecked": [],
+      "signalsNotChecked": [],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "planReviewed": false,
+      "performed": false,
+      "evidenceRefs": [],
+      "residualRecoveryRisk": "No worker launched and no repository change was applied."
+    }
+  },
   "scope": {
     "planned": {
       "allowed": ["../outside-repo/file.js"],
@@ -950,6 +1599,7 @@ Rules:
     "protectedDenied": [".git/", ".pi/"],
     "violations": [
       {
+        "id": "scope-violation-001",
         "path": "../outside-repo/file.js",
         "type": "repo_root_escape",
         "detectedBy": "work_order_validation",
@@ -972,7 +1622,16 @@ Rules:
     "failedChecks": [],
     "unprovenClaims": []
   },
+  "fastVerificationLoop": {
+    "iterations": [],
+    "stopReason": "invalid_work_order"
+  },
   "reviewFindings": [],
+  "counterexampleFindings": [],
+  "humanReview": {
+    "required": false,
+    "reviews": []
+  },
   "repairs": [],
   "workerModelEvidence": [],
   "approvalEvidence": {
@@ -984,6 +1643,9 @@ Rules:
     "policyProfile": "default"
   },
   "contextEvidence": [],
+  "agentScorecard": [],
+  "debtRegister": [],
+  "residualRisk": [],
   "redactions": {
     "status": "verified",
     "rulesApplied": ["repo_relative_paths"],
@@ -1023,6 +1685,58 @@ Rules:
     "reasons": ["review_finding_unresolved", "repair_exhausted"]
   },
   "summary": "Blocking reviewer finding remains after the allowed repair loop.",
+  "readinessEvidence": {
+    "status": "ready",
+    "checks": [],
+    "blockers": []
+  },
+  "runConfiguration": {
+    "changeClass": "product_behavior",
+    "reviewDepth": "medium",
+    "patchBudget": {
+      "expectedFilesChanged": 2,
+      "maxApproxChangedLines": 120,
+      "allowedSurfaces": ["src", "tests"],
+      "mayMixSurfaces": true,
+      "incidentalRefactors": false,
+      "status": "respected"
+    },
+    "autonomyLevelPlanned": "bounded_patch",
+    "autonomyLevelUsed": "bounded_patch",
+    "modelToolRoutePlanned": {
+      "routeRequired": false,
+      "preferredWorker": "process_model",
+      "preferredModels": [],
+      "tools": ["read_repository", "execute_local_command"],
+      "rationale": "Narrow bug fix."
+    },
+    "modelToolRouteUsed": {
+      "worker": "process_model",
+      "models": [],
+      "tools": ["read_repository", "execute_local_command"]
+    },
+    "rolePacketVersions": [],
+    "counterexampleReview": {
+      "required": true,
+      "performed": true,
+      "reason": "Behavior change with failing verification."
+    }
+  },
+  "operationalReadinessEvidence": {
+    "observability": {
+      "breakageDetection": "Focused test failure detects the unresolved null-input behavior.",
+      "signalsChecked": ["cmd-001"],
+      "signalsNotChecked": [],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": true,
+      "planReviewed": true,
+      "performed": false,
+      "evidenceRefs": ["finding-001"],
+      "residualRecoveryRisk": "Do not merge until the unresolved behavior is repaired or reverted."
+    }
+  },
   "scope": {
     "planned": {
       "allowed": ["src/example.js", "test/example.test.js"],
@@ -1037,6 +1751,7 @@ Rules:
     "captureStatus": "complete",
     "observed": [
       {
+        "id": "changed-surface-001",
         "path": "src/example.js",
         "changeType": "modified",
         "source": "parent_diff"
@@ -1082,6 +1797,20 @@ Rules:
     "failedChecks": ["cmd-001"],
     "unprovenClaims": ["claim-001"]
   },
+  "fastVerificationLoop": {
+    "iterations": [
+      {
+        "loop": 1,
+        "changeRefs": ["changed-surface-001"],
+        "inspection": "completed",
+        "commandsRun": ["cmd-001"],
+        "failedChecks": ["cmd-001"],
+        "repairsAttempted": [1],
+        "result": "repair_exhausted"
+      }
+    ],
+    "stopReason": "repair_exhausted"
+  },
   "reviewFindings": [
     {
       "id": "finding-001",
@@ -1094,6 +1823,30 @@ Rules:
       "statusAfterRepair": "unresolved"
     }
   ],
+  "counterexampleFindings": [
+    {
+      "id": "counterexample-001",
+      "severity": "blocking",
+      "question": "What input still breaks this?",
+      "finding": "The null input path still fails according to verification.",
+      "evidenceRefs": ["cmd-001", "finding-001"],
+      "statusAfterRepair": "unresolved"
+    }
+  ],
+  "humanReview": {
+    "required": true,
+    "reviews": [
+      {
+        "reviewer": "human-reviewer-id",
+        "reviewedAt": "2026-04-29T12:05:00.000Z",
+        "surfacesInspected": ["src/example.js", "test/example.test.js"],
+        "findings": ["finding-001", "counterexample-001"],
+        "manuallyInspectedClaims": [],
+        "remainingUnprovenClaims": ["claim-001"],
+        "decision": "changes_requested"
+      }
+    ]
+  },
   "repairs": [
     {
       "loop": 1,
@@ -1121,6 +1874,17 @@ Rules:
     "policyProfile": "default"
   },
   "contextEvidence": [],
+  "agentScorecard": [],
+  "debtRegister": [],
+  "residualRisk": [
+    {
+      "id": "risk-001",
+      "description": "Blocking null-input behavior remains unresolved.",
+      "severity": "medium",
+      "acceptedBy": null,
+      "evidenceRefs": ["finding-001", "counterexample-001"]
+    }
+  ],
   "redactions": {
     "status": "verified",
     "rulesApplied": ["repo_relative_paths", "secret_pattern_scrub"],

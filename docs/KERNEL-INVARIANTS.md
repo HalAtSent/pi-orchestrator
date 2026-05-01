@@ -11,6 +11,9 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - The output is a truthful Evidence Pack.
 - Planning surfaces may produce Work Orders, but they do not own kernel policy.
 - Prompt text, role docs, skills, model narration, and formatter prose are never policy authority.
+- Executable Work Orders must be ready before worker launch.
+- Work Orders declare change class, patch budget, review depth, autonomy level, and model/tool route.
+- Work Orders declare observability and rollback/recovery expectations.
 - All paths are repo-relative unless explicitly absolute as `repositoryRoot`.
 - Path traversal, symlink escape, realpath escape, and repo-root escape fail closed.
 - Write-capable workers require explicit allowlists.
@@ -20,6 +23,7 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - Explorer, reviewer, and verifier roles are read-only.
 - Implementer writes only inside Work Order scope.
 - Worker output cannot widen scope, action classes, approval, role capability, or repair authority.
+- Model/tool routing and autonomy declarations cannot widen scope, action classes, approval, role capability, or repair authority.
 - Invalid worker output fails closed.
 - Runtime context drift fails closed.
 - Persisted artifacts validate on load; invalid persisted artifacts fail closed.
@@ -27,10 +31,15 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - Approval does not authorize future replans, wider repair, technical correctness, or reviewable success.
 - Changed-surface evidence distinguishes observed paths from planned scope.
 - Verification evidence distinguishes commands run from commands merely planned.
+- Patch budget and autonomy drift are recorded as evidence and affect reviewability.
+- Required counterexample review must be recorded or explicitly missing.
+- Required human review must be recorded or explicitly missing.
+- Accepted debt must include a cleanup trigger.
 - Success and reviewability are separate.
 - No-op implementer success without evidence is not reviewable.
 - Repair loops are bounded and cannot widen scope.
 - Terminal runs do not resume.
 - Process backend workspace isolation, apply, rollback, sandbox, symlink, hardlink, stale-output, and changed-surface lessons must survive rebuild.
 - Provider and model evidence is recorded when model-backed workers run.
+- Agent scorecards are operational metrics, not proof of correctness.
 - Redaction happens at concrete trust boundaries and records code-verified metadata.

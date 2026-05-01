@@ -23,7 +23,7 @@ Planning surface -> Work Order -> Coding Quality Harness -> Evidence Pack
 
 ## Active Rebuild Docs
 
-The current design authority for the rebuild is:
+The current target design authority for the rebuild is:
 
 - [docs/CODING-QUALITY-HARNESS.md](./docs/CODING-QUALITY-HARNESS.md)
 - [docs/REBUILD-GUIDE.md](./docs/REBUILD-GUIDE.md)
@@ -31,6 +31,9 @@ The current design authority for the rebuild is:
 - [docs/EVIDENCE-PACK-SCHEMA.md](./docs/EVIDENCE-PACK-SCHEMA.md)
 - [docs/KERNEL-INVARIANTS.md](./docs/KERNEL-INVARIANTS.md)
 - [docs/IMPLEMENTATION-SEQUENCE.md](./docs/IMPLEMENTATION-SEQUENCE.md)
+
+These documents define the intended design, but only executable code and tests
+enforce harness behavior.
 
 [docs/PURGE-MANIFEST.md](./docs/PURGE-MANIFEST.md) is retained as the audit
 record for the aggressive purge that reset this branch. It is not current
@@ -42,6 +45,11 @@ The rebuilt harness should start from a precise Work Order, enforce scoped
 execution boundaries, use isolated worker roles, perform independent review,
 run bounded repair, capture verification evidence, and emit a truthful Evidence
 Pack.
+
+The first implementation target also treats readiness, context-pack provenance,
+change class, patch budget, review depth, autonomy level, model/tool routing,
+counterexample review, human review, observability, rollback/recovery, accepted
+debt, and agent scorecard data as first-class review controls.
 
 Planning surfaces may produce Work Orders later. They do not belong inside the
 execution kernel.
