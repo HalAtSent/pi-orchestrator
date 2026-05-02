@@ -33,6 +33,10 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - Verification evidence distinguishes commands run from commands merely planned.
 - Validation warnings are durable and must be carried into Evidence Packs.
 - Patch budget and autonomy drift are recorded as evidence and affect reviewability.
+- Harness implementation Work Orders default to one invariant, one code surface,
+  one test surface, and no opportunistic adjacent fixes.
+- More than two repair or audit passes means the Work Order should stop and
+  split.
 - Required counterexample review must be recorded or explicitly missing.
 - Required human review must be recorded or explicitly missing.
 - Accepted debt must include a cleanup trigger.

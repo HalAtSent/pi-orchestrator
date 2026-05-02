@@ -42,11 +42,17 @@ doc changes them.
 - Runtime artifacts live under ignored `.pi/runs/`
 - Early rebuild WIP limit: do not add model-backed workers, template UX, or
   `/build` surfaces before earlier kernel acceptance gates are met
+- `pi-orchestrator` harness implementation Work Orders default to `micro`
+  narrowness: one invariant, one implementation file, one test file, and no docs
+  unless correcting a contradiction
+- Default harness audit budget: expected audit passes `1`, maximum audit passes
+  `2`; a third audit means the Work Order was probably too broad
 
-## First Commit Target
+## First Implementation Phase Target
 
-The first implementation commit should contain schema validation and invariant
-tests only.
+The first implementation phase should contain schema validation and invariant
+tests only. This is a phase target, not permission to bundle every listed item
+into one Work Order.
 
 Build:
 
@@ -81,55 +87,195 @@ Acceptance gate:
 - missing observability or rollback/recovery fields blocks when required by risk
   or change class
 
-## Pass 1A: Validation Result Contract And CLI
+## Harness Work Order Discipline
 
-Build the kernel inspection surface before any worker, repair, or operator UX
-surface exists. This CLI reports validation truth; it is not rich UX.
+Harness implementation Work Orders must be small enough that a failed audit
+identifies either a bug in the named invariant or an out-of-scope follow-up.
+
+Default pattern:
+
+```text
+One Work Order = one enforceable invariant, one code surface, one test surface.
+```
+
+Required operating rules:
+
+- Write or update tests for the single named invariant first.
+- Implement only enough code to satisfy those tests.
+- Run the focused test.
+- Run full `npm test`.
+- Stop.
+- Do not opportunistically fix adjacent validator behavior unless it blocks the
+  named invariant.
+
+Split triggers are hard stop conditions:
+
+- CLI and validator logic in the same Work Order.
+- Evidence Pack and Work Order logic in the same Work Order.
+- Schema fields and policy interactions in the same Work Order.
+- Fixtures and new validator behavior in the same Work Order.
+- Canonical fingerprinting and validation behavior in the same Work Order.
+- Path normalization and protected-path policy in the same Work Order.
+- More than three acceptance criteria.
+- More than two repair or audit passes.
+
+For validator work, one Work Order should introduce at most one failure-code
+family.
+
+## Pass 1A: State Validation Only
+
+Enforce artifact state enum: `planned`, `active`, or `completed`.
 
 Build:
 
-- validation result shape
-- `hardFailures` versus `warnings`
-- executable yes/no
-- artifact state reporting
-- canonical fingerprint display
-- validation summary
-- `pi validate-work-order <file>`
+- `state` field schema validation
+- focused tests for missing, unsupported, and valid `active` state
 
 Do not build:
 
-- worker execution
-- repair
-- Evidence Pack emission
-- model-backed paths
-- template UX
-- `/build`
+- executable derivation
+- `hardFailures` or `warnings` reshape
+- CLI
+- fixtures
+- canonical fingerprint changes
+- Evidence Pack behavior
 
 Acceptance gate:
 
-- invalid artifacts produce typed hard failures
-- warnings are preserved without making an artifact executable by themselves
-- `executable` is `true` only for `active` plus `ready` plus `valid`
-- the CLI prints only rules implemented by schema, validation code, tests, or
-  persisted artifacts
-- unimplemented vault policy rules are omitted from current enforcement output
-  or explicitly marked as target behavior
+- missing `state` hard-fails at `$.state`
+- unsupported `state` hard-fails at `$.state`
+- valid `active` state preserves existing valid Work Order behavior
 
-## Pass 1B: Validator Fixture Suite
+## Pass 1B: Executable Derivation Only
 
-Add the workflow-vault policy examples as validator fixtures before model-backed
-execution is trusted.
+Compute `executable` from artifact state, readiness, and hard failures.
 
-Initial fixture use:
+Build:
 
-- schema and policy validation expectations only
-- no model behavior evaluation yet
-- no worker execution required
+- `executable` derivation
+- focused tests for active, planned, completed, blocked, and draft cases
 
-Build validator fixtures for:
+Do not build:
 
-- valid small docs change
-- valid test-only change
+- validation error vocabulary changes
+- warning rules
+- CLI
+- fixture suite
+
+Acceptance gate:
+
+- `active` plus `ready` plus valid validation state returns `executable: true`
+- `planned` plus `ready` plus valid validation state returns `executable: false`
+- `completed` plus `ready` plus valid validation state returns `executable: false`
+- blocked or draft readiness returns `executable: false`
+
+## Pass 1C: Hard Failure Result Shape Only
+
+Expose existing validation errors as `hardFailures`.
+
+Build:
+
+- validation result `hardFailures`
+- validation result `warnings`
+- compatibility alias for existing error output if needed
+
+Do not build:
+
+- warning rules
+- new validation policy
+- CLI
+
+Acceptance gate:
+
+- `hardFailures` exists
+- `warnings` exists and is empty
+- `status` is `valid` or `invalid`
+- existing errors remain available through a compatibility alias if consumers
+  need it
+
+## Pass 1D: Minimal Validation Summary Only
+
+Expose summary fields already present in the Work Order.
+
+Build:
+
+- `summary.changeClass`
+- `summary.riskLevel`
+- `summary.autonomyLevel`
+- `summary.reviewDepth`
+- `summary.patchBudget`
+- `summary.verificationCommands`
+- `summary.counterexampleReviewRequired`
+
+Do not build:
+
+- inferred policy
+- warning rules
+- CLI
+
+Acceptance gate:
+
+- summary fields are copied from validated Work Order fields
+- missing source fields are represented by existing hard failures, not inferred
+  defaults
+- summary output does not claim policy enforcement that code has not implemented
+
+## Pass 1E: CLI Wrapper Only
+
+Render the existing validation result through `pi validate-work-order <file>`.
+
+Build:
+
+- CLI command wrapper
+- JSON output for the existing validation result
+- exit code mapping
+
+Do not build:
+
+- fixture suite
+- new validator rules
+- worker execution
+
+Acceptance gate:
+
+- valid file exits `0`
+- invalid file exits nonzero
+- JSON output contains `status`, `executable`, `hardFailures`, `warnings`, and
+  `summary`
+- CLI does not claim unimplemented policy enforcement
+
+## Pass 1F: Fixture Suite Skeleton Only
+
+Create the validator fixture structure and the first valid fixtures.
+
+Build:
+
+- fixture directory structure
+- valid active fixture
+- planned fixture
+- completed fixture
+
+Do not build:
+
+- all negative fixtures
+- model behavior evaluation
+- worker execution
+- new validator behavior
+
+Acceptance gate:
+
+- fixture directory exists
+- valid active fixture validates and is executable
+- planned fixture is valid but non-executable
+- completed fixture is valid but non-executable
+
+## Pass 1G+: One Negative Validator Fixture Per Work Order
+
+After the fixture skeleton exists, add one negative fixture family per Work
+Order.
+
+Candidate fixture families:
+
 - missing authority
 - ambiguous product behavior
 - out-of-scope write attempt
@@ -142,11 +288,11 @@ Build validator fixtures for:
 
 Acceptance gate:
 
-- fixtures assert validation `status`, `executable`, hard failures, warnings,
-  canonical fingerprint availability, and stop conditions
-- fixtures distinguish planned, active, and completed artifacts
-- fixtures do not assert role quality, model behavior, worker output, or Evidence
-  Pack content yet
+- each Work Order adds one fixture family only
+- fixture assertions cover validation `status`, `executable`, hard failures,
+  warnings, and stop conditions for that family
+- fixture Work Orders do not assert role quality, model behavior, worker output,
+  or Evidence Pack content
 
 ## Pass 2: Scope And Path Safety
 

@@ -93,6 +93,12 @@ Gate ownership:
 Each gate should reject insufficient work early. The preferred failure is a
 typed `blocked` result, not agent improvisation.
 
+`pi-orchestrator` harness implementation Work Orders also pass a Narrowness Gate
+before activation. That gate verifies one invariant, limited acceptance, one
+primary implementation file, one primary test file, no mixed CLI, fixture, path,
+fingerprinting, or Evidence Pack behavior, and an audit budget of at most two
+passes.
+
 ## Validation Result Contract
 
 The target validation result is a stable kernel inspection contract for code,
@@ -119,6 +125,7 @@ Minimum result fields:
 | `forbiddenSources` | Sources that were explicitly rejected as policy authority. |
 | `verificationCommands` | Planned commands and required action classes. |
 | `counterexampleReviewRequired` | Whether counterexample review is required by policy or Work Order. |
+| `auditBudget` | Expected audit passes, maximum audit passes, and audit-discovered split triggers. |
 | `stopConditions` | Conditions that require blocking, repair, or a fresh Work Order. |
 
 Hard failures block activation or execution. Warnings do not block activation by
@@ -296,6 +303,17 @@ record them.
     "maxLoops": 1,
     "mayWidenScope": false
   },
+  "auditBudget": {
+    "expectedAuditPasses": 1,
+    "maxAuditPasses": 2,
+    "stopIfAuditReveals": [
+      "new_invariant",
+      "second_validation_rule_family",
+      "unnamed_path_scope_issue",
+      "unnamed_cli_behavior",
+      "unnamed_fixture_behavior"
+    ]
+  },
   "extensions": {}
 }
 ```
@@ -332,6 +350,7 @@ Minimum executable Work Order fields:
 | `operationalReadiness` | Must record observability/detection and rollback/recovery expectations. |
 | `approval` | Must be present, even when approval is not required. |
 | `repair.maxLoops` | Must be a non-negative integer. |
+| `auditBudget` | Required for `pi-orchestrator` harness implementation Work Orders. |
 
 If a required field is missing, malformed, ambiguous, or unsupported, the
 harness blocks before worker launch.
@@ -364,6 +383,7 @@ harness blocks before worker launch.
 | `reviewFocus` | array of strings | Specific risks for reviewer attention. Not scope authority. |
 | `approval` | object | Approval requirement and exact binding fields. |
 | `repair` | object | Repair loop limits and widening policy. |
+| `auditBudget` | object | Audit pass budget and audit-discovered split triggers. |
 | `extensions` | object | Reserved extension bag. Non-authoritative until validated by schema-aware code. |
 
 ## Artifact State Rules
@@ -461,6 +481,76 @@ Rules:
   the result `not_reviewable`, `blocked`, or require a fresh Work Order.
 - Higher risk, wider patch budgets, and mixed surfaces require lower autonomy
   and stronger review.
+
+### Harness Implementation Narrowness
+
+`pi-orchestrator` harness implementation Work Orders use stricter budgets than
+the general workflow defaults because policy, validation, path safety, worker
+execution, and evidence behavior are easy to couple accidentally.
+
+Default rule:
+
+```text
+One Work Order = one enforceable invariant, one code surface, one test surface.
+```
+
+A harness Work Order is too broad if it includes more than one of these:
+
+- new schema field
+- new validation result shape
+- new validation rule family
+- new CLI surface
+- new fixture suite
+- new path or scope algorithm
+- new fingerprinting behavior
+- new Evidence Pack behavior
+- new worker behavior
+
+Harness patch budget tiers:
+
+| Tier | Budget |
+| --- | --- |
+| `micro` | One implementation file, one test file, 30-100 changed lines, one invariant, no docs unless correcting a contradiction. |
+| `small` | One or two implementation files, one or two test files, 100-180 changed lines, one result shape or one rule family. |
+| `medium` | Only by explicit approval; two to four files, 180-300 changed lines, and must not include CLI, schema, and fixtures together. |
+
+Most `pi-orchestrator` implementation Work Orders should be `micro` until the
+validator, scope safety, artifact store, and deterministic loop have all proven
+stable.
+
+Narrowness Gate:
+
+- The Work Order changes one invariant only.
+- The Work Order has no more than three required acceptance criteria.
+- The Work Order has one primary implementation file.
+- The Work Order has one primary test file.
+- Docs are touched only if required to resolve a contradiction.
+- No CLI, fixture suite, path containment, fingerprinting, or Evidence Pack
+  behavior is mixed unless it is the sole invariant.
+- Max repair or audit loops is two.
+- If the second audit finds a new class of bug, stop and create a follow-up Work
+  Order.
+
+Split triggers:
+
+- The Work Order touches both CLI and validator logic.
+- The Work Order touches both Evidence Pack and Work Order logic.
+- The Work Order adds both schema fields and policy interactions.
+- The Work Order adds both fixtures and new validator behavior.
+- The Work Order changes canonical fingerprinting and validation behavior.
+- The Work Order changes path normalization and protected-path policy.
+- The Work Order requires more than three acceptance criteria.
+- The Work Order needs more than two repair or audit passes.
+
+No opportunistic correction rule:
+
+- If implementation reveals adjacent invalid behavior not named in acceptance
+  criteria, do not fix it in the patch unless it blocks the named invariant.
+  Record a follow-up Work Order instead.
+
+For validator work, one Work Order should introduce at most one failure-code
+family. Adding state errors, authority errors, scope errors, context errors,
+counterexample errors, and approval errors together is too broad.
 
 ## Path Rules
 
@@ -671,6 +761,9 @@ Entry shape:
 Rules:
 
 - At least one acceptance item must be required.
+- `pi-orchestrator` harness implementation Work Orders should have no more than
+  three required acceptance criteria unless explicitly approved as non-micro
+  work.
 - Acceptance items must be observable by code review, diff inspection, command output, or explicit human review.
 - Vague acceptance such as "make it better" blocks.
 - Acceptance cannot require work outside scope.
@@ -940,6 +1033,43 @@ Rules:
 - If findings require wider scope, stop with `repair_required` or `blocked` and request a new Work Order.
 - Repair output is subject to the same validation as initial implementer output.
 
+## Audit Budget
+
+Patch budget controls file and line size. Audit budget controls how many rounds
+of bug discovery may happen before the Work Order is treated as too broad.
+
+Audit budget shape:
+
+```json
+{
+  "auditBudget": {
+    "expectedAuditPasses": 1,
+    "maxAuditPasses": 2,
+    "stopIfAuditReveals": [
+      "new_invariant",
+      "second_validation_rule_family",
+      "unnamed_path_scope_issue",
+      "unnamed_cli_behavior",
+      "unnamed_fixture_behavior"
+    ]
+  }
+}
+```
+
+Rules:
+
+- For `pi-orchestrator` harness implementation, the default expected audit pass
+  count is one.
+- For `pi-orchestrator` harness implementation, the default maximum audit pass
+  count is two.
+- A second audit may fix the named Work Order.
+- A third audit means the Work Order was probably too broad and should stop.
+- If an audit finds a new invariant, a second validation rule family, an
+  unnamed path or scope issue, unnamed CLI behavior, or unnamed fixture behavior,
+  stop and create a follow-up Work Order.
+- An audit that can discover five different valid classes of bug is evidence
+  that the Work Order was too broad.
+
 ## Status And Failure Behavior
 
 Pre-worker validation statuses:
@@ -989,7 +1119,7 @@ Canonicalization expectations:
   readiness, change class, review depth, patch budget, scope, context requirements,
   acceptance, verification requirements, execution controls, risk, operational
   readiness, approval requirements, canonical approved action classes,
-  non-goals, and repair limits.
+  non-goals, repair limits, and audit budget.
 - Include extension fields only when schema-aware code validates and declares
   them binding.
 - Hash the canonical JSON representation with a documented algorithm.
@@ -1118,6 +1248,11 @@ the canonical fingerprint they were built from.
   "repair": {
     "maxLoops": 1,
     "mayWidenScope": false
+  },
+  "auditBudget": {
+    "expectedAuditPasses": 1,
+    "maxAuditPasses": 2,
+    "stopIfAuditReveals": ["new_invariant"]
   },
   "extensions": {}
 }

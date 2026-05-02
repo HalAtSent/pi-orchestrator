@@ -254,6 +254,22 @@ A bad Work Order says:
 
 The harness may help diagnose a bad Work Order, but it should not execute it.
 
+### Harness Implementation Narrowness
+
+For `pi-orchestrator` harness implementation, a good Work Order is narrower
+than the general workflow default:
+
+```text
+one enforceable invariant
+one code surface
+one test surface
+```
+
+It should not mix CLI, fixtures, path containment, fingerprinting, Evidence Pack
+behavior, and validator policy unless that mixed behavior is the single named
+invariant. More than two audit or repair passes is a stop signal, not a reason
+to keep widening the patch.
+
 ## Scope Model
 
 Scope is a hard boundary.
