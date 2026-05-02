@@ -11,7 +11,7 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - The output is a truthful Evidence Pack.
 - Planning surfaces may produce Work Orders, but they do not own kernel policy.
 - Prompt text, role docs, skills, model narration, and formatter prose are never policy authority.
-- Executable Work Orders must be ready before worker launch.
+- Executable Work Orders must be active, ready, and valid before worker launch.
 - Work Orders declare change class, patch budget, review depth, autonomy level, and model/tool route.
 - Work Orders declare observability and rollback/recovery expectations.
 - All paths are repo-relative unless explicitly absolute as `repositoryRoot`.
@@ -31,6 +31,7 @@ Status: rebuild target guidance, not a current implementation guarantee.
 - Approval does not authorize future replans, wider repair, technical correctness, or reviewable success.
 - Changed-surface evidence distinguishes observed paths from planned scope.
 - Verification evidence distinguishes commands run from commands merely planned.
+- Validation warnings are durable and must be carried into Evidence Packs.
 - Patch budget and autonomy drift are recorded as evidence and affect reviewability.
 - Required counterexample review must be recorded or explicitly missing.
 - Required human review must be recorded or explicitly missing.

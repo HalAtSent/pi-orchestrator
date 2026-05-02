@@ -72,6 +72,7 @@ widen scope, prove claims, approve actions, or replace command observations.
     ],
     "blockers": []
   },
+  "validationWarnings": [],
   "runConfiguration": {
     "changeClass": "documentation",
     "reviewDepth": "low",
@@ -348,6 +349,7 @@ widen scope, prove claims, approve actions, or replace command observations.
 | `status` | Must be `success`, `blocked`, `failed`, or `repair_required`. |
 | `reviewability.status` | Must be `reviewable`, `not_reviewable`, or `unknown`. |
 | `readinessEvidence` | Must record the Work Order readiness state observed at execution time. |
+| `validationWarnings` | Must carry forward Work Order validation warnings. It may be empty. |
 | `runConfiguration` | Must record change class, review depth, patch budget, autonomy, model/tool route, and counterexample-review requirement. |
 | `operationalReadinessEvidence` | Must record observability/detection and rollback/recovery evidence or explicit non-applicability. |
 | `scope.planned` | Must record the planned allowed, forbidden, and new-file scope. |
@@ -455,6 +457,32 @@ Rules:
   must explain it and cannot use model choice as proof.
 - Role packet versions and worker result references are audit metadata, not
   permission or product authority.
+
+## Validation Warnings
+
+`validationWarnings[]` carries warnings from Work Order validation into the
+final evidence artifact.
+
+Warning entry shape:
+
+```json
+{
+  "id": "warn-001",
+  "source": "work_order_validation",
+  "text": "Verification is partially manual.",
+  "status": "carried_forward",
+  "evidenceRefs": []
+}
+```
+
+Rules:
+
+- Warnings do not block activation by default.
+- Validation warnings must not be dropped when execution starts.
+- Successful runs must still record the warnings that were present at
+  validation time.
+- A warning affects reviewability only when code-owned policy maps that warning
+  to reviewability, residual risk, or required human review.
 
 ## Operational Readiness Evidence
 
@@ -1172,6 +1200,7 @@ Rules:
     "checks": [],
     "blockers": []
   },
+  "validationWarnings": [],
   "runConfiguration": {
     "changeClass": "documentation",
     "reviewDepth": "low",
@@ -1357,6 +1386,7 @@ Rules:
     "checks": [],
     "blockers": []
   },
+  "validationWarnings": [],
   "runConfiguration": {
     "changeClass": "product_behavior",
     "reviewDepth": "medium",
@@ -1542,6 +1572,7 @@ Rules:
     ],
     "blockers": ["scope.allowed escapes repository root"]
   },
+  "validationWarnings": [],
   "runConfiguration": {
     "changeClass": "infrastructure_tooling",
     "reviewDepth": "high",
@@ -1690,6 +1721,7 @@ Rules:
     "checks": [],
     "blockers": []
   },
+  "validationWarnings": [],
   "runConfiguration": {
     "changeClass": "product_behavior",
     "reviewDepth": "medium",

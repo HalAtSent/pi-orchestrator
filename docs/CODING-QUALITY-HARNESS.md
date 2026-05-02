@@ -145,6 +145,7 @@ artifact shape authority.
 {
   "schemaVersion": 1,
   "kind": "work_order",
+  "state": "planned|active|completed",
   "id": "work-order-unique-id",
   "title": "Short human-readable title",
   "goal": "Exact coding outcome wanted.",
@@ -212,6 +213,7 @@ Minimum executable Work Order:
 
 - `schemaVersion`
 - `kind`
+- `state`
 - `id`
 - `goal`
 - `repositoryRoot`

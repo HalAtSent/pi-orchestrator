@@ -33,6 +33,7 @@ doc changes them.
 - Initial change classes: `product_behavior`, `contract_schema`, `refactor`,
   `test_only`, `documentation`, `infrastructure_tooling`,
   `migration_data_change`
+- Initial artifact states: `planned`, `active`, `completed`
 - Initial autonomy levels: `assist`, `scoped_edit`, `bounded_patch`,
   `supervised_agent`, `autonomous_run`
 - Initial review depths: `low`, `medium`, `high`
@@ -54,9 +55,9 @@ Build:
 - canonical JSON and fingerprint calculation
 - fail-closed load helpers for persisted artifacts
 - focused invariant tests for missing fields, enum drift, malformed paths,
-  unknown policy profiles, bad approval bindings, readiness status, change
-  class, patch budget, autonomy level, model/tool route, and counterexample
-  review declarations
+  unknown policy profiles, bad approval bindings, artifact state, readiness
+  status, change class, patch budget, autonomy level, model/tool route, and
+  counterexample review declarations
 
 Do not build:
 
@@ -75,10 +76,77 @@ Acceptance gate:
 - canonical fingerprint output is stable across object key order
 - unknown policy profile blocks
 - approval fingerprint mismatch blocks
-- non-ready Work Orders block
+- non-active or non-ready Work Orders block
 - missing change class, patch budget, autonomy level, or model/tool route blocks
 - missing observability or rollback/recovery fields blocks when required by risk
   or change class
+
+## Pass 1A: Validation Result Contract And CLI
+
+Build the kernel inspection surface before any worker, repair, or operator UX
+surface exists. This CLI reports validation truth; it is not rich UX.
+
+Build:
+
+- validation result shape
+- `hardFailures` versus `warnings`
+- executable yes/no
+- artifact state reporting
+- canonical fingerprint display
+- validation summary
+- `pi validate-work-order <file>`
+
+Do not build:
+
+- worker execution
+- repair
+- Evidence Pack emission
+- model-backed paths
+- template UX
+- `/build`
+
+Acceptance gate:
+
+- invalid artifacts produce typed hard failures
+- warnings are preserved without making an artifact executable by themselves
+- `executable` is `true` only for `active` plus `ready` plus `valid`
+- the CLI prints only rules implemented by schema, validation code, tests, or
+  persisted artifacts
+- unimplemented vault policy rules are omitted from current enforcement output
+  or explicitly marked as target behavior
+
+## Pass 1B: Validator Fixture Suite
+
+Add the workflow-vault policy examples as validator fixtures before model-backed
+execution is trusted.
+
+Initial fixture use:
+
+- schema and policy validation expectations only
+- no model behavior evaluation yet
+- no worker execution required
+
+Build validator fixtures for:
+
+- valid small docs change
+- valid test-only change
+- missing authority
+- ambiguous product behavior
+- out-of-scope write attempt
+- forbidden path write attempt
+- patch budget exceeded
+- verification command fails
+- agent needs uncited behavior
+- repair would require scope widening
+- counterexample reviewer finds unresolved issue
+
+Acceptance gate:
+
+- fixtures assert validation `status`, `executable`, hard failures, warnings,
+  canonical fingerprint availability, and stop conditions
+- fixtures distinguish planned, active, and completed artifacts
+- fixtures do not assert role quality, model behavior, worker output, or Evidence
+  Pack content yet
 
 ## Pass 2: Scope And Path Safety
 
@@ -132,8 +200,8 @@ adding real model workers.
 Build:
 
 - load Work Order
-- validate readiness, policy, change class, patch budget, autonomy, model/tool
-  route, and scope
+- validate artifact state, readiness, policy, change class, patch budget,
+  autonomy, model/tool route, and scope
 - preflight repository root
 - execute one scoped write-capable step through an adapter interface
 - capture changed surface from repository diff
@@ -261,7 +329,7 @@ Acceptance gate:
 
 ## Pass 9: Operator Surfaces And `/build`
 
-Add user-facing command UX last.
+Add user-facing command UX beyond the kernel validation CLI last.
 
 Build:
 

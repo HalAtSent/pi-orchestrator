@@ -51,12 +51,87 @@ Untrusted model or worker output cannot widen scope, approve actions, add new
 action classes, or convert advisory verification into required proof. Invalid
 worker output fails closed.
 
+## Workflow Policy Source
+
+The workflow-vault Work Order Validation Policy is the advisory source for the
+target validation behavior.
+
+Executable policy authority lives only in `pi-orchestrator` schema, validation
+code, tests, and persisted artifacts.
+
+When the vault policy and implemented harness behavior differ, the harness must
+report only what it actually enforces.
+
+Truthfulness rule:
+
+- The CLI and docs must not claim enforcement before code enforces it.
+- Unimplemented policy rules must be described as target behavior, not current
+  behavior.
+- Validation summaries, worker packets, and Evidence Packs must render persisted
+  truth instead of aspirational policy text.
+
+## Validation Gate Model
+
+Work Order handling moves through these gates:
+
+```text
+Authority Gate
+  -> Readiness Gate
+  -> Execution Gate
+  -> Evidence Gate
+```
+
+Gate ownership:
+
+| Gate | Owns |
+| --- | --- |
+| Authority Gate | Schema and policy validation, required authority context, and change-class rules. |
+| Readiness Gate | `readiness.status`, artifact state, acceptance, verification, patch budget, risk, review depth, and stop conditions. |
+| Execution Gate | Scope and path safety, action classes, autonomy, model/tool route, and repair limits. |
+| Evidence Gate | Evidence Pack validation, commands run versus commands planned, evidence statuses, reviewability, and residual risk. |
+
+Each gate should reject insufficient work early. The preferred failure is a
+typed `blocked` result, not agent improvisation.
+
+## Validation Result Contract
+
+The target validation result is a stable kernel inspection contract for code,
+tests, and the `pi validate-work-order <file>` CLI. It is not a rich operator
+UX surface.
+
+Minimum result fields:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `valid`, `invalid`, or `valid_with_warnings`. |
+| `canonicalFingerprint` | Canonical Work Order fingerprint when the artifact can be canonicalized. |
+| `state` | Artifact lifecycle state: `planned`, `active`, or `completed`. |
+| `executable` | `true` only when state, readiness, schema, policy, scope, and approval checks permit execution. |
+| `hardFailures` | Validation findings that block activation or execution. |
+| `warnings` | Durable findings that do not block activation by default. |
+| `changeClass` | Resolved `change.class`. |
+| `riskLevel` | Resolved `risk.level`. |
+| `autonomyLevel` | Resolved `execution.autonomyLevel`. |
+| `reviewDepth` | Resolved `change.reviewDepth`. |
+| `patchBudget` | Declared patch budget and whether it is internally reviewable. |
+| `contextPackSummary` | Required context, freshness, provenance, and truncation status. |
+| `requiredAuthorityFiles` | Authority context required by the change class and Work Order. |
+| `forbiddenSources` | Sources that were explicitly rejected as policy authority. |
+| `verificationCommands` | Planned commands and required action classes. |
+| `counterexampleReviewRequired` | Whether counterexample review is required by policy or Work Order. |
+| `stopConditions` | Conditions that require blocking, repair, or a fresh Work Order. |
+
+Hard failures block activation or execution. Warnings do not block activation by
+default, but validation output must carry them forward, and Evidence Packs must
+record them.
+
 ## Object Shape
 
 ```json
 {
   "schemaVersion": 1,
   "kind": "work_order",
+  "state": "active",
   "id": "wo-docs-schema-001",
   "title": "Create replacement schema docs",
   "goal": "Create Markdown schema docs for Work Orders and Evidence Packs.",
@@ -233,11 +308,12 @@ Minimum executable Work Order fields:
 | --- | --- |
 | `schemaVersion` | Must be present and equal to a supported schema version. |
 | `kind` | Must be `work_order`. |
+| `state` | Must be `planned`, `active`, or `completed`. Only `active` can be executable. |
 | `id` | Must be unique within the repository's Work Order store. |
 | `goal` | Must describe a bounded coding outcome. |
 | `repositoryRoot` | Must be an absolute path to the repository root. |
 | `policyProfile` | Must resolve to a known policy profile. Unknown profiles fail closed. |
-| `readiness.status` | Must be `ready` for an executable Work Order. Planned or blocked work stays outside execution. |
+| `readiness.status` | Must be `ready` for an executable Work Order. This is separate from artifact lifecycle state. |
 | `change.class` | Must be one supported change class. |
 | `change.reviewDepth` | Must be `low`, `medium`, or `high`. |
 | `change.patchBudget` | Must declare reviewability limits before execution. |
@@ -266,6 +342,7 @@ harness blocks before worker launch.
 | --- | --- | --- |
 | `schemaVersion` | integer | Version of this persisted Work Order schema. |
 | `kind` | string enum | Must be `work_order`. Prevents loading the wrong artifact type. |
+| `state` | string enum | Artifact lifecycle state: `planned`, `active`, or `completed`. |
 | `id` | string | Stable Work Order identity. Must not change during execution. |
 | `title` | string | Short human-readable title. Not policy authority. |
 | `goal` | string | Exact coding outcome requested. Must be executable without product planning. |
@@ -289,10 +366,32 @@ harness blocks before worker launch.
 | `repair` | object | Repair loop limits and widening policy. |
 | `extensions` | object | Reserved extension bag. Non-authoritative until validated by schema-aware code. |
 
+## Artifact State Rules
+
+Artifact state is lifecycle state. It is separate from `readiness.status`, which
+summarizes content quality.
+
+`state` enum:
+
+| State | Meaning |
+| --- | --- |
+| `planned` | Saved draft or planned artifact. It is not executable. |
+| `active` | Candidate execution artifact. It is executable only if validation passes and `readiness.status` is `ready`. |
+| `completed` | Finished or archived artifact. It is not executable without a fresh Work Order. |
+
+Rules:
+
+- `planned` is not `active`.
+- `active` is not `completed`.
+- Only `active` plus `ready` plus `valid` is executable.
+- A Markdown planning note is not an executable artifact unless code-owned
+  canonicalization has produced a valid active Work Order.
+- A completed Work Order cannot be rerun without an explicit new Work Order.
+
 ## Definition Of Ready Rules
 
-Executable Work Orders must pass a Definition of Ready gate before any worker
-launch.
+Executable Work Orders must be active and must pass a Definition of Ready gate
+before any worker launch.
 
 `readiness.status` enum:
 
@@ -300,7 +399,7 @@ launch.
 | --- | --- |
 | `ready` | Required authority, scope, acceptance, verification, risk, review, and stop-condition fields are present enough for execution. |
 | `blocked` | The producer knows the Work Order cannot safely execute yet. |
-| `draft` | Human-readable planning artifact, not an executable Work Order. |
+| `draft` | Content is still an incomplete draft, regardless of artifact lifecycle state. |
 
 `readiness.checks[].status` enum:
 
@@ -311,15 +410,15 @@ launch.
 
 Rules:
 
-- Only `ready` Work Orders may execute.
+- Only `active` Work Orders with `readiness.status` set to `ready` may execute.
 - Readiness is a gate summary, not a substitute for schema validation.
 - `readiness.checks[]` records producer-side readiness evidence, but code-owned
   validation still decides whether the artifact can run.
 - Missing authority, ambiguous product behavior, absent write scope,
   unverifiable acceptance, missing patch budget, or missing stop conditions
   block before worker launch.
-- A planned Markdown draft should not be canonicalized into an executable Work
-  Order until readiness blockers are resolved.
+- A Markdown planning note should not be canonicalized into an executable Work
+  Order until readiness blockers are resolved and the artifact is activated.
 
 ## Change Class And Patch Budget Rules
 
@@ -886,8 +985,8 @@ Canonicalization expectations:
   explicitly marks them non-binding.
 - Neutralize volatile approval record fields before hashing:
   `approvalId`, `approvedAt`, `approvedBy`, and `approvedFingerprint`.
-- Include schema version, id, goal, repository root, policy profile, readiness,
-  change class, review depth, patch budget, scope, context requirements,
+- Include schema version, kind, state, id, goal, repository root, policy profile,
+  readiness, change class, review depth, patch budget, scope, context requirements,
   acceptance, verification requirements, execution controls, risk, operational
   readiness, approval requirements, canonical approved action classes,
   non-goals, and repair limits.
@@ -904,6 +1003,7 @@ the canonical fingerprint they were built from.
 {
   "schemaVersion": 1,
   "kind": "work_order",
+  "state": "active",
   "id": "wo-minimal-doc-edit",
   "goal": "Fix a typo in docs/README-NOTES.md.",
   "repositoryRoot": "/absolute/path/to/repo",
