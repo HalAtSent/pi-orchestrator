@@ -29,6 +29,7 @@ test("missing required fields fail closed", () => {
   const cases = [
     ["schemaVersion", (workOrder) => delete workOrder.schemaVersion, "$.schemaVersion"],
     ["kind", (workOrder) => delete workOrder.kind, "$.kind"],
+    ["state", (workOrder) => delete workOrder.state, "$.state"],
     ["id", (workOrder) => delete workOrder.id, "$.id"],
     ["goal", (workOrder) => delete workOrder.goal, "$.goal"],
     ["repositoryRoot", (workOrder) => delete workOrder.repositoryRoot, "$.repositoryRoot"],
@@ -149,6 +150,7 @@ test("no required acceptance item fails closed", () => {
 
 test("unsupported enum vocabularies fail closed", () => {
   const cases = [
+    ["artifact state", (workOrder) => (workOrder.state = "archived"), "$.state"],
     ["change class", (workOrder) => (workOrder.change.class = "feature"), "$.change.class"],
     ["review depth", (workOrder) => (workOrder.change.reviewDepth = "deep"), "$.change.reviewDepth"],
     ["autonomy level", (workOrder) => (workOrder.execution.autonomyLevel = "unbounded"), "$.execution.autonomyLevel"],
@@ -285,6 +287,7 @@ function validWorkOrder() {
   return {
     schemaVersion: 1,
     kind: "work_order",
+    state: "active",
     id: "wo-minimal-validation",
     goal: "Add focused Work Order schema validation tests.",
     repositoryRoot: "/absolute/path/to/pi-orchestrator",

@@ -3,6 +3,8 @@ import path from "node:path";
 const SUPPORTED_SCHEMA_VERSION = 1;
 const SUPPORTED_POLICY_PROFILE = "default";
 
+const SUPPORTED_ARTIFACT_STATES = new Set(["planned", "active", "completed"]);
+
 const SUPPORTED_CHANGE_CLASSES = new Set([
   "product_behavior",
   "contract_schema",
@@ -66,6 +68,7 @@ class WorkOrderValidator {
 
     this.validateSchemaVersion(workOrder.schemaVersion);
     this.validateKind(workOrder.kind);
+    this.validateEnum(workOrder.state, "$.state", SUPPORTED_ARTIFACT_STATES);
     this.requireNonEmptyString(workOrder.id, "$.id");
     this.requireNonEmptyString(workOrder.goal, "$.goal");
     this.validateRepositoryRoot(workOrder.repositoryRoot);
