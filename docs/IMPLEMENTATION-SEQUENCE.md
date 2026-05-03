@@ -58,12 +58,12 @@ Build:
 
 - Work Order schema validation
 - Evidence Pack schema validation
-- canonical JSON and fingerprint calculation
+- canonical JSON and Work Order fingerprint calculation
 - fail-closed load helpers for persisted artifacts
 - focused invariant tests for missing fields, enum drift, malformed paths,
-  unknown policy profiles, bad approval bindings, artifact state, readiness
-  status, change class, patch budget, autonomy level, model/tool route, and
-  counterexample review declarations
+  unknown policy profiles, approval action-class binding, approval fingerprint
+  binding, artifact state, readiness status, change class, patch budget,
+  autonomy level, model/tool route, and counterexample review declarations
 
 Do not build:
 
@@ -81,6 +81,7 @@ Acceptance gate:
 - invalid Evidence Packs fail on load
 - canonical fingerprint output is stable across object key order
 - unknown policy profile blocks
+- approval action-class mismatch blocks
 - approval fingerprint mismatch blocks
 - non-active or non-ready Work Orders block
 - missing change class, patch budget, autonomy level, or model/tool route blocks
@@ -114,7 +115,8 @@ Split triggers are hard stop conditions:
 - Evidence Pack and Work Order logic in the same Work Order.
 - Schema fields and policy interactions in the same Work Order.
 - Fixtures and new validator behavior in the same Work Order.
-- Canonical fingerprinting and validation behavior in the same Work Order.
+- Canonical fingerprinting and validation behavior in the same Work Order,
+  unless the pass explicitly depends on a completed prior fingerprint pass.
 - Path normalization and protected-path policy in the same Work Order.
 - More than three acceptance criteria.
 - More than two repair or audit passes.
@@ -293,6 +295,109 @@ Acceptance gate:
   warnings, and stop conditions for that family
 - fixture Work Orders do not assert role quality, model behavior, worker output,
   or Evidence Pack content
+
+The following approval-binding passes stay in the first implementation phase but
+remain separate Work Orders. Canonical fingerprinting must land before any pass
+that validates approval against that fingerprint.
+
+## Pass 1H: Canonical JSON And Work Order Fingerprint Only
+
+Implement canonical JSON and the Work Order fingerprint as a reusable primitive
+for later approval checks.
+
+Build:
+
+- canonical JSON serialization for Work Order fingerprint input
+- Work Order fingerprint calculation using `sha256:<hex>`
+- deterministic handling for sorted object keys, declared order-insensitive
+  arrays, and declared presentation-only exclusions
+- focused tests for stable output across object key order and declared
+  order-insensitive action-class order
+
+Do not build:
+
+- approval action-class binding
+- approval fingerprint binding
+- new validation failure-code families beyond fingerprint input errors
+- readiness, state, or executable semantics changes
+- Evidence Pack behavior
+- CLI output changes
+- path safety enforcement, protected-path enforcement, realpath checks, symlink
+  checks, or full scope authorization
+
+Acceptance gate:
+
+- canonical JSON output is stable across object key order
+- Work Order fingerprint output is deterministic and rendered as `sha256:<hex>`
+- fingerprint calculation is exposed for later passes without deciding approval
+  validity
+
+## Pass 1I: Approval Action-Class Binding Only
+
+Bind approval to exactly the requested command authority.
+
+Build:
+
+- canonical requested command action-class set derivation from Work Order
+  commands
+- de-duplication and lexicographic sorting for the requested command
+  action-class set
+- comparison of `approval.approvedActionClasses` to the canonical requested
+  command action-class set
+- focused tests for exact, reordered requested, duplicated requested, missing
+  approved, extra approved, and non-canonical approved action-class lists
+
+Do not build:
+
+- approval fingerprint comparison
+- canonical JSON or fingerprint algorithm changes
+- new command execution or Evidence Pack command observation behavior
+- derived-command approval behavior
+- readiness, state, or executable semantics changes
+- path safety enforcement, protected-path enforcement, realpath checks, symlink
+  checks, or full scope authorization
+
+Acceptance gate:
+
+- `approval.approvedActionClasses` exactly equals the de-duplicated, sorted
+  requested command action-class set
+- missing, extra, duplicated, or differently ordered approved action classes
+  hard-fail
+- reordered or duplicated requested command action classes produce the same
+  expected approved action-class set
+
+## Pass 1J: Approval Fingerprint Binding Only
+
+Bind approval to the canonical Work Order fingerprint produced by Pass 1H.
+
+Build:
+
+- approval fingerprint comparison
+- comparison of `approval.approvedFingerprint` to the canonical Work Order
+  fingerprint
+- focused tests for exact, missing, stale, malformed, and changed-Work-Order
+  fingerprint cases
+
+Do not build:
+
+- canonical JSON or fingerprint algorithm changes
+- approval action-class binding changes
+- readiness, state, or executable semantics changes
+- Evidence Pack behavior
+- CLI output changes
+- path safety enforcement, protected-path enforcement, realpath checks, symlink
+  checks, or full scope authorization
+
+Acceptance gate:
+
+- `approval.approvedFingerprint` exactly equals the canonical Work Order
+  fingerprint
+- missing, stale, or malformed approval fingerprints hard-fail and block
+  execution
+- changing a binding Work Order field changes the fingerprint and makes prior
+  approval stale
+- comparison uses the canonical fingerprint primitive from Pass 1H rather than
+  reimplementing canonicalization in this pass
 
 ## Pass 2: Scope And Path Safety
 
