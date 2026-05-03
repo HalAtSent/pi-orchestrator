@@ -14,6 +14,70 @@ test("valid minimal Work Order passes", () => {
   assert.deepEqual(result.errors, []);
 });
 
+test("valid Work Order result includes non-authoritative summary copied from source fields", () => {
+  const workOrder = validWorkOrder();
+  workOrder.change.class = "infrastructure_tooling";
+  workOrder.change.reviewDepth = "high";
+  workOrder.change.patchBudget = {
+    expectedFilesChanged: 1,
+    maxApproxChangedLines: 42,
+    allowedSurfaces: ["src/kernel/work-order.js"],
+    mayMixSurfaces: true,
+    incidentalRefactors: true,
+  };
+  workOrder.execution.autonomyLevel = "scoped_edit";
+  workOrder.execution.counterexampleReview.required = true;
+  workOrder.risk.level = "medium";
+  workOrder.verification.commands = [
+    {
+      id: "verify-summary",
+      command: "node --test test/work-order-schema.test.js",
+      cwd: ".",
+      required: true,
+      actionClasses: ["read_repository", "execute_local_command"],
+      reason: "Verify copied Work Order summary.",
+    },
+  ];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(result.summary, {
+    changeClass: workOrder.change.class,
+    riskLevel: workOrder.risk.level,
+    autonomyLevel: workOrder.execution.autonomyLevel,
+    reviewDepth: workOrder.change.reviewDepth,
+    patchBudget: workOrder.change.patchBudget,
+    verificationCommands: workOrder.verification.commands,
+    counterexampleReviewRequired: workOrder.execution.counterexampleReview.required,
+  });
+});
+
+test("summary does not default missing source fields or change validation semantics", () => {
+  const workOrder = validWorkOrder();
+  delete workOrder.change.class;
+  delete workOrder.execution.counterexampleReview.required;
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assert.equal(result.status, "invalid");
+  assert.equal(result.executable, false);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.hardFailures, result.errors);
+  assertError(result, "$.change.class", "required");
+  assertError(result, "$.execution.counterexampleReview.required", "required");
+  assert.deepEqual(result.summary, {
+    changeClass: undefined,
+    riskLevel: workOrder.risk.level,
+    autonomyLevel: workOrder.execution.autonomyLevel,
+    reviewDepth: workOrder.change.reviewDepth,
+    patchBudget: workOrder.change.patchBudget,
+    verificationCommands: workOrder.verification.commands,
+    counterexampleReviewRequired: undefined,
+  });
+});
+
 test("active Work Orders are executable only when valid and ready", () => {
   const result = validateWorkOrder(validWorkOrder());
 

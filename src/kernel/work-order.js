@@ -46,14 +46,28 @@ export function validateWorkOrder(workOrder) {
   const validator = new WorkOrderValidator();
   validator.validate(workOrder);
   const success = validator.errors.length === 0;
+  const summary = buildWorkOrderSummary(workOrder);
 
   return {
     success,
     status: success ? "valid" : "invalid",
     executable: success && workOrder.state === "active" && workOrder.readiness.status === "ready",
+    summary,
     hardFailures: validator.errors,
     warnings: [],
     errors: validator.errors,
+  };
+}
+
+function buildWorkOrderSummary(workOrder) {
+  return {
+    changeClass: workOrder?.change?.class,
+    riskLevel: workOrder?.risk?.level,
+    autonomyLevel: workOrder?.execution?.autonomyLevel,
+    reviewDepth: workOrder?.change?.reviewDepth,
+    patchBudget: workOrder?.change?.patchBudget,
+    verificationCommands: workOrder?.verification?.commands,
+    counterexampleReviewRequired: workOrder?.execution?.counterexampleReview?.required,
   };
 }
 
