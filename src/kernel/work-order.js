@@ -45,9 +45,11 @@ const URL_LIKE_PATH = /^[a-z][a-z0-9+.-]*:/i;
 export function validateWorkOrder(workOrder) {
   const validator = new WorkOrderValidator();
   validator.validate(workOrder);
+  const success = validator.errors.length === 0;
 
   return {
-    success: validator.errors.length === 0,
+    success,
+    executable: success && workOrder.state === "active" && workOrder.readiness.status === "ready",
     errors: validator.errors,
   };
 }

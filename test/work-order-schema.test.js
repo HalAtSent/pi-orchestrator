@@ -7,7 +7,21 @@ test("valid minimal Work Order passes", () => {
   const result = validateWorkOrder(validWorkOrder());
 
   assert.equal(result.success, true);
+  assert.equal(result.executable, true);
   assert.deepEqual(result.errors, []);
+});
+
+test("planned and completed Work Orders are valid but not executable", () => {
+  for (const state of ["planned", "completed"]) {
+    const workOrder = validWorkOrder();
+    workOrder.state = state;
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, true, state);
+    assert.equal(result.executable, false, state);
+    assert.deepEqual(result.errors, [], state);
+  }
 });
 
 test("validation result returns structured errors", () => {
@@ -17,6 +31,7 @@ test("validation result returns structured errors", () => {
   });
 
   assert.equal(result.success, false);
+  assert.equal(result.executable, false);
   assert.ok(Array.isArray(result.errors));
   assert.ok(result.errors.length > 0);
   assert.ok(result.errors.every((error) => typeof error.path === "string"));
@@ -93,13 +108,16 @@ test("unknown policyProfile fails closed", () => {
 });
 
 test("non-ready Work Orders fail closed", () => {
-  const workOrder = validWorkOrder();
-  workOrder.readiness.status = "draft";
+  for (const status of ["blocked", "draft"]) {
+    const workOrder = validWorkOrder();
+    workOrder.readiness.status = status;
 
-  const result = validateWorkOrder(workOrder);
+    const result = validateWorkOrder(workOrder);
 
-  assert.equal(result.success, false);
-  assertError(result, "$.readiness.status", "not_ready");
+    assert.equal(result.success, false, status);
+    assert.equal(result.executable, false, status);
+    assertError(result, "$.readiness.status", "not_ready");
+  }
 });
 
 test("missing patchBudget fails closed", () => {
