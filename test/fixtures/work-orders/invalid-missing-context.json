@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "kind": "work_order",
+  "state": "active",
+  "id": "wo-fixture-invalid-missing-context",
+  "goal": "Validate that a Work Order fixture missing context is rejected.",
+  "repositoryRoot": "/absolute/path/to/pi-orchestrator",
+  "policyProfile": "default",
+  "readiness": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidence": "docs/WORK-ORDER-SCHEMA.md"
+      }
+    ],
+    "blockers": []
+  },
+  "change": {
+    "class": "test_only",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 1,
+      "maxApproxChangedLines": 30,
+      "allowedSurfaces": [
+        "test/fixtures/work-orders/invalid-missing-context.json"
+      ],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false
+    }
+  },
+  "scope": {
+    "allowed": [
+      "test/fixtures/work-orders/invalid-missing-context.json"
+    ],
+    "forbidden": [
+      ".git/",
+      ".pi/",
+      "node_modules/",
+      "dist/",
+      ".env"
+    ],
+    "newFiles": "listed_only",
+    "allowedNewFiles": [
+      "test/fixtures/work-orders/invalid-missing-context.json"
+    ]
+  },
+  "acceptance": [
+    {
+      "id": "acc-missing-context-only",
+      "text": "The missing-context fixture is rejected only for the required top-level context field.",
+      "required": true
+    }
+  ],
+  "verification": {
+    "commands": [
+      {
+        "id": "verify-active-fixture",
+        "command": "node --test test/work-order-fixtures.test.js",
+        "cwd": ".",
+        "required": true,
+        "actionClasses": [
+          "read_repository",
+          "execute_local_command"
+        ],
+        "reason": "Run focused Work Order fixture validation tests."
+      }
+    ],
+    "allowDerivedCommands": true,
+    "required": true
+  },
+  "execution": {
+    "autonomyLevel": "bounded_patch",
+    "modelToolRoute": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": [
+        "read_repository",
+        "write_repository",
+        "execute_local_command"
+      ],
+      "rationale": "Local deterministic fixture validation is sufficient."
+    },
+    "rolePackets": [],
+    "counterexampleReview": {
+      "required": false,
+      "reason": "Single-cause negative fixture metadata cleanup."
+    }
+  },
+  "nonGoals": [
+    "Do not change validator behavior.",
+    "Do not change CLI behavior.",
+    "Do not add context to this fixture."
+  ],
+  "risk": {
+    "level": "low",
+    "reasons": [
+      "Fixture metadata cleanup only."
+    ]
+  },
+  "operationalReadiness": {
+    "observability": {
+      "breakageDetection": "Focused node:test coverage catches fixture validation regressions.",
+      "signals": [
+        "node --test test/work-order-fixtures.test.js"
+      ],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "plan": null,
+      "recoverySteps": [],
+      "notApplicableReason": "Small test-only patch can be reverted directly."
+    }
+  },
+  "reviewFocus": [
+    "Confirm context remains omitted and validation fails only at $.context."
+  ],
+  "approval": {
+    "required": false,
+    "approvalId": null,
+    "approvedAt": null,
+    "approvedBy": null,
+    "approvedFingerprint": null,
+    "approvedActionClasses": []
+  },
+  "repair": {
+    "maxLoops": 1,
+    "mayWidenScope": false
+  },
+  "extensions": {}
+}

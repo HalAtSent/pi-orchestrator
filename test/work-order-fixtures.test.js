@@ -29,6 +29,26 @@ test("valid lifecycle Work Order fixtures validate with expected executability",
   }
 });
 
+test("missing context Work Order fixture fails with required context hard failure", async () => {
+  const workOrder = await loadFixture("invalid-missing-context.json");
+  const result = validateWorkOrder(workOrder);
+  const expectedHardFailures = [
+    {
+      path: "$.context",
+      code: "required",
+      message: "$.context is required.",
+    },
+  ];
+
+  assert.equal(result.success, false);
+  assert.equal(result.status, "invalid");
+  assert.equal(result.executable, false);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.hardFailures, expectedHardFailures);
+  assert.deepEqual(result.errors, expectedHardFailures);
+  assert.deepEqual(result.hardFailures, result.errors);
+});
+
 async function loadFixture(fixtureName) {
   const fixturePath = path.join(fixtureDir, fixtureName);
   return JSON.parse(await readFile(fixturePath, "utf8"));
