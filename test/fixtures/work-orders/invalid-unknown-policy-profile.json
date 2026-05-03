@@ -1,0 +1,152 @@
+{
+  "schemaVersion": 1,
+  "kind": "work_order",
+  "state": "active",
+  "id": "wo-fixture-invalid-unknown-policy-profile",
+  "goal": "Validate that a Work Order fixture with an unknown policy profile is rejected.",
+  "repositoryRoot": "/absolute/path/to/pi-orchestrator",
+  "policyProfile": "permissive",
+  "readiness": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidence": "docs/WORK-ORDER-SCHEMA.md"
+      }
+    ],
+    "blockers": []
+  },
+  "change": {
+    "class": "contract_schema",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 2,
+      "maxApproxChangedLines": 120,
+      "allowedSurfaces": [
+        "test/fixtures/work-orders/invalid-unknown-policy-profile.json",
+        "test/work-order-fixtures.test.js"
+      ],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false
+    }
+  },
+  "scope": {
+    "allowed": [
+      "test/fixtures/work-orders/invalid-unknown-policy-profile.json",
+      "test/work-order-fixtures.test.js"
+    ],
+    "forbidden": [
+      ".git/",
+      ".pi/",
+      "node_modules/",
+      "dist/",
+      ".env"
+    ],
+    "newFiles": "listed_only",
+    "allowedNewFiles": [
+      "test/fixtures/work-orders/invalid-unknown-policy-profile.json"
+    ]
+  },
+  "context": {
+    "files": [
+      {
+        "path": "src/kernel/work-order.js",
+        "required": true,
+        "reason": "Validator entrypoint used by fixture tests."
+      }
+    ],
+    "notes": [],
+    "priorArtifacts": [],
+    "manifest": [],
+    "budget": {
+      "maxTokens": 120000,
+      "truncationPolicy": "fail_if_required_context_truncated"
+    }
+  },
+  "acceptance": [
+    {
+      "id": "acc-unknown-policy-profile-only",
+      "text": "The unknown-policy-profile fixture is rejected only for the unsupported policyProfile value.",
+      "required": true
+    }
+  ],
+  "verification": {
+    "commands": [
+      {
+        "id": "verify-unknown-policy-profile-fixture",
+        "command": "node --test test/work-order-fixtures.test.js",
+        "cwd": ".",
+        "required": true,
+        "actionClasses": [
+          "read_repository",
+          "execute_local_command"
+        ],
+        "reason": "Run focused Work Order fixture validation tests."
+      }
+    ],
+    "allowDerivedCommands": true,
+    "required": true
+  },
+  "execution": {
+    "autonomyLevel": "bounded_patch",
+    "modelToolRoute": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": [
+        "read_repository",
+        "write_repository",
+        "execute_local_command"
+      ],
+      "rationale": "Local deterministic fixture validation is sufficient."
+    },
+    "rolePackets": [],
+    "counterexampleReview": {
+      "required": false,
+      "reason": "Single-cause negative fixture for existing policyProfile validation."
+    }
+  },
+  "nonGoals": [
+    "Do not change validator behavior.",
+    "Do not change CLI behavior.",
+    "Do not add policy-profile semantics beyond the single supported default profile."
+  ],
+  "risk": {
+    "level": "low",
+    "reasons": [
+      "Static negative fixture coverage only."
+    ]
+  },
+  "operationalReadiness": {
+    "observability": {
+      "breakageDetection": "Focused node:test coverage catches fixture validation regressions.",
+      "signals": [
+        "node --test test/work-order-fixtures.test.js"
+      ],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "plan": null,
+      "recoverySteps": [],
+      "notApplicableReason": "Small test-only patch can be reverted directly."
+    }
+  },
+  "reviewFocus": [
+    "Confirm policyProfile is the only invalidating mutation and validation fails only at $.policyProfile."
+  ],
+  "approval": {
+    "required": false,
+    "approvalId": null,
+    "approvedAt": null,
+    "approvedBy": null,
+    "approvedFingerprint": null,
+    "approvedActionClasses": []
+  },
+  "repair": {
+    "maxLoops": 1,
+    "mayWidenScope": false
+  },
+  "extensions": {}
+}

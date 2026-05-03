@@ -49,6 +49,28 @@ test("missing context Work Order fixture fails with required context hard failur
   assert.deepEqual(result.hardFailures, result.errors);
 });
 
+test("unknown policyProfile Work Order fixture fails with unsupported policy hard failure", async () => {
+  const workOrder = await loadFixture("invalid-unknown-policy-profile.json");
+  const result = validateWorkOrder(workOrder);
+  const expectedHardFailures = [
+    {
+      path: "$.policyProfile",
+      code: "unsupported_value",
+      message: "Unsupported policyProfile.",
+      supported: ["default"],
+      actual: "permissive",
+    },
+  ];
+
+  assert.equal(result.success, false);
+  assert.equal(result.status, "invalid");
+  assert.equal(result.executable, false);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.hardFailures, expectedHardFailures);
+  assert.deepEqual(result.errors, expectedHardFailures);
+  assert.deepEqual(result.hardFailures, result.errors);
+});
+
 async function loadFixture(fixtureName) {
   const fixturePath = path.join(fixtureDir, fixtureName);
   return JSON.parse(await readFile(fixturePath, "utf8"));
