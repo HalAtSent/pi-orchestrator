@@ -7,8 +7,18 @@ test("valid minimal Work Order passes", () => {
   const result = validateWorkOrder(validWorkOrder());
 
   assert.equal(result.success, true);
+  assert.equal(result.status, "valid");
   assert.equal(result.executable, true);
+  assert.deepEqual(result.hardFailures, []);
+  assert.deepEqual(result.warnings, []);
   assert.deepEqual(result.errors, []);
+});
+
+test("active Work Orders are executable only when valid and ready", () => {
+  const result = validateWorkOrder(validWorkOrder());
+
+  assert.equal(result.success, true);
+  assert.equal(result.executable, true);
 });
 
 test("planned and completed Work Orders are valid but not executable", () => {
@@ -31,9 +41,12 @@ test("validation result returns structured errors", () => {
   });
 
   assert.equal(result.success, false);
+  assert.equal(result.status, "invalid");
   assert.equal(result.executable, false);
+  assert.deepEqual(result.warnings, []);
   assert.ok(Array.isArray(result.errors));
   assert.ok(result.errors.length > 0);
+  assert.deepEqual(result.hardFailures, result.errors);
   assert.ok(result.errors.every((error) => typeof error.path === "string"));
   assert.ok(result.errors.every((error) => typeof error.code === "string"));
   assert.ok(result.errors.every((error) => typeof error.message === "string"));

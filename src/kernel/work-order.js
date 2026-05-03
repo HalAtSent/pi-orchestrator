@@ -49,7 +49,10 @@ export function validateWorkOrder(workOrder) {
 
   return {
     success,
+    status: success ? "valid" : "invalid",
     executable: success && workOrder.state === "active" && workOrder.readiness.status === "ready",
+    hardFailures: validator.errors,
+    warnings: [],
     errors: validator.errors,
   };
 }
