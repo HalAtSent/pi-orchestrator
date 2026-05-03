@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { fingerprintWorkOrder } from "../src/kernel/work-order-fingerprint.js";
 import { validateWorkOrder } from "../src/kernel/work-order.js";
 
 test("valid minimal Work Order passes", () => {
@@ -396,7 +397,7 @@ test("approval-required equivalent requested action classes pass with canonical 
       reason: "Run focused schema tests.",
     },
   ];
-  workOrder.approval = validRequiredApproval({
+  approveWorkOrder(workOrder, {
     approvedActionClasses: ["execute_local_command", "read_repository"],
   });
 
@@ -407,6 +408,44 @@ test("approval-required equivalent requested action classes pass with canonical 
   assert.deepEqual(result.errors, []);
 });
 
+test("approval-required exact canonical fingerprint passes", () => {
+  const workOrder = validWorkOrder();
+  approveWorkOrder(workOrder, {
+    approvedActionClasses: ["execute_local_command", "read_repository"],
+  });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.equal(result.executable, true);
+  assert.deepEqual(result.hardFailures, []);
+  assert.deepEqual(result.errors, []);
+});
+
+test("approval-required stale fingerprint fails closed", () => {
+  const workOrder = validWorkOrder();
+  approveWorkOrder(workOrder);
+  workOrder.goal = "Changed after approval.";
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assert.equal(result.executable, false);
+  assert.deepEqual(result.hardFailures, result.errors);
+  assertError(result, "$.approval.approvedFingerprint", "approval_fingerprint_mismatch");
+});
+
+test("approval-required verification command changes stale prior fingerprint", () => {
+  const workOrder = validWorkOrder();
+  approveWorkOrder(workOrder);
+  workOrder.verification.commands[0].command = "npm test";
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.approval.approvedFingerprint", "approval_fingerprint_mismatch");
+});
+
 test("approval-required valid approvedAt UTC timestamp formats pass", () => {
   const cases = [
     "2024-02-29T00:00:00Z",
@@ -415,7 +454,7 @@ test("approval-required valid approvedAt UTC timestamp formats pass", () => {
 
   for (const approvedAt of cases) {
     const workOrder = validWorkOrder();
-    workOrder.approval = validRequiredApproval({ approvedAt });
+    approveWorkOrder(workOrder, { approvedAt });
 
     const result = validateWorkOrder(workOrder);
 
@@ -591,6 +630,7 @@ function validWorkOrder() {
 
 function validRequiredApproval({
   approvedAt = "2024-02-29T00:00:00Z",
+  approvedFingerprint = `sha256:${"a".repeat(64)}`,
   approvedActionClasses = ["execute_local_command", "read_repository"],
 } = {}) {
   return {
@@ -598,9 +638,14 @@ function validRequiredApproval({
     approvalId: "approval-001",
     approvedAt,
     approvedBy: "reviewer",
-    approvedFingerprint: `sha256:${"a".repeat(64)}`,
+    approvedFingerprint,
     approvedActionClasses,
   };
+}
+
+function approveWorkOrder(workOrder, approval = {}) {
+  workOrder.approval = validRequiredApproval(approval);
+  workOrder.approval.approvedFingerprint = fingerprintWorkOrder(workOrder);
 }
 
 function assertError(result, expectedPath, expectedCode) {

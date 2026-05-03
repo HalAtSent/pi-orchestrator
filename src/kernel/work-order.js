@@ -1,5 +1,7 @@
 import path from "node:path";
 
+import { fingerprintWorkOrder } from "./work-order-fingerprint.js";
+
 const SUPPORTED_SCHEMA_VERSION = 1;
 const SUPPORTED_POLICY_PROFILE = "default";
 
@@ -101,7 +103,7 @@ class WorkOrderValidator {
     this.validateExecution(workOrder.execution);
     this.validateRisk(workOrder.risk);
     this.validateOperationalReadiness(workOrder.operationalReadiness);
-    this.validateApproval(workOrder.approval, canonicalRequestedActionClasses(workOrder.verification));
+    this.validateApproval(workOrder.approval, canonicalRequestedActionClasses(workOrder.verification), workOrder);
     this.validateRepair(workOrder.repair);
   }
 
@@ -488,7 +490,7 @@ class WorkOrderValidator {
     }
   }
 
-  validateApproval(approval, requestedActionClasses) {
+  validateApproval(approval, requestedActionClasses, workOrder) {
     if (!this.requirePlainObject(approval, "$.approval")) {
       return;
     }
@@ -527,6 +529,12 @@ class WorkOrderValidator {
           "$.approval.approvedFingerprint",
           "malformed_approval",
           "approvedFingerprint must use sha256:<64 lowercase hex> format.",
+        );
+      } else if (approval.approvedFingerprint !== fingerprintWorkOrder(workOrder)) {
+        this.addError(
+          "$.approval.approvedFingerprint",
+          "approval_fingerprint_mismatch",
+          "approvedFingerprint must equal the canonical Work Order fingerprint.",
         );
       }
     }
