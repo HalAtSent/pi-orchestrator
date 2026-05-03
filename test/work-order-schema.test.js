@@ -314,7 +314,7 @@ test("approval-required malformed metadata fails closed without fingerprint equa
     approvedAt: "not-a-date",
     approvedBy: "reviewer",
     approvedFingerprint: "sha256:not-valid",
-    approvedActionClasses: ["read_repository"],
+    approvedActionClasses: ["execute_local_command", "read_repository"],
   };
 
   const result = validateWorkOrder(workOrder);
@@ -322,6 +322,89 @@ test("approval-required malformed metadata fails closed without fingerprint equa
   assert.equal(result.success, false);
   assertError(result, "$.approval.approvedAt", "malformed_approval");
   assertError(result, "$.approval.approvedFingerprint", "malformed_approval");
+});
+
+test("approval-required missing approved action class fails closed", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands[0].actionClasses = ["read_repository", "execute_local_command"];
+  workOrder.approval = validRequiredApproval({ approvedActionClasses: ["read_repository"] });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assert.equal(result.executable, false);
+  assertError(result, "$.approval.approvedActionClasses", "approval_action_classes_mismatch");
+});
+
+test("approval-required extra approved action class fails closed", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands[0].actionClasses = ["read_repository"];
+  workOrder.approval = validRequiredApproval({
+    approvedActionClasses: ["read_repository", "execute_local_command"],
+  });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assert.equal(result.executable, false);
+  assertError(result, "$.approval.approvedActionClasses", "approval_action_classes_mismatch");
+});
+
+test("approval-required non-canonical approved action class order fails closed", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands[0].actionClasses = ["read_repository", "execute_local_command"];
+  workOrder.approval = validRequiredApproval({
+    approvedActionClasses: ["read_repository", "execute_local_command"],
+  });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.approval.approvedActionClasses", "approval_action_classes_mismatch");
+});
+
+test("approval-required duplicate approved action class fails closed", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands[0].actionClasses = ["read_repository"];
+  workOrder.approval = validRequiredApproval({
+    approvedActionClasses: ["read_repository", "read_repository"],
+  });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.approval.approvedActionClasses", "approval_action_classes_mismatch");
+});
+
+test("approval-required equivalent requested action classes pass with canonical approval", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands = [
+    {
+      id: "verify-read",
+      command: "git status --short",
+      cwd: ".",
+      required: true,
+      actionClasses: ["read_repository", "execute_local_command", "read_repository"],
+      reason: "Read repository state.",
+    },
+    {
+      id: "verify-test",
+      command: "node --test test/work-order-schema.test.js",
+      cwd: ".",
+      required: true,
+      actionClasses: ["execute_local_command"],
+      reason: "Run focused schema tests.",
+    },
+  ];
+  workOrder.approval = validRequiredApproval({
+    approvedActionClasses: ["execute_local_command", "read_repository"],
+  });
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.equal(result.executable, true);
+  assert.deepEqual(result.errors, []);
 });
 
 test("approval-required valid approvedAt UTC timestamp formats pass", () => {
@@ -506,14 +589,17 @@ function validWorkOrder() {
   };
 }
 
-function validRequiredApproval({ approvedAt }) {
+function validRequiredApproval({
+  approvedAt = "2024-02-29T00:00:00Z",
+  approvedActionClasses = ["execute_local_command", "read_repository"],
+} = {}) {
   return {
     required: true,
     approvalId: "approval-001",
     approvedAt,
     approvedBy: "reviewer",
     approvedFingerprint: `sha256:${"a".repeat(64)}`,
-    approvedActionClasses: ["read_repository"],
+    approvedActionClasses,
   };
 }
 

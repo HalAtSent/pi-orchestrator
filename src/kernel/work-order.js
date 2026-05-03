@@ -101,7 +101,7 @@ class WorkOrderValidator {
     this.validateExecution(workOrder.execution);
     this.validateRisk(workOrder.risk);
     this.validateOperationalReadiness(workOrder.operationalReadiness);
-    this.validateApproval(workOrder.approval);
+    this.validateApproval(workOrder.approval, canonicalRequestedActionClasses(workOrder.verification));
     this.validateRepair(workOrder.repair);
   }
 
@@ -488,18 +488,30 @@ class WorkOrderValidator {
     }
   }
 
-  validateApproval(approval) {
+  validateApproval(approval, requestedActionClasses) {
     if (!this.requirePlainObject(approval, "$.approval")) {
       return;
     }
 
     this.requireBoolean(approval.required, "$.approval.required");
-    if (this.requireArray(approval.approvedActionClasses, "$.approval.approvedActionClasses")) {
+    const approvedActionClassesAreValid =
+      this.requireArray(approval.approvedActionClasses, "$.approval.approvedActionClasses") &&
       this.validateActionClasses(approval.approvedActionClasses, "$.approval.approvedActionClasses");
-    }
 
     if (approval.required !== true) {
       return;
+    }
+
+    if (
+      approvedActionClassesAreValid &&
+      requestedActionClasses !== null &&
+      !arraysEqual(approval.approvedActionClasses, requestedActionClasses)
+    ) {
+      this.addError(
+        "$.approval.approvedActionClasses",
+        "approval_action_classes_mismatch",
+        "approvedActionClasses must equal the canonical requested verification action-class set.",
+      );
     }
 
     this.requireNonEmptyString(approval.approvalId, "$.approval.approvalId");
@@ -720,6 +732,41 @@ function isValidUtcTimestamp(value) {
 
   const expectedIso = `${match[1]}.${match[2] ?? "000"}Z`;
   return new Date(parsed).toISOString() === expectedIso;
+}
+
+function canonicalRequestedActionClasses(verification) {
+  if (!isPlainObject(verification) || !Array.isArray(verification.commands)) {
+    return null;
+  }
+
+  const requestedActionClasses = new Set();
+  for (const command of verification.commands) {
+    if (!isPlainObject(command) || !Array.isArray(command.actionClasses)) {
+      return null;
+    }
+
+    for (const actionClass of command.actionClasses) {
+      if (!SUPPORTED_ACTION_CLASSES.has(actionClass)) {
+        return null;
+      }
+      requestedActionClasses.add(actionClass);
+    }
+  }
+
+  return [...requestedActionClasses].sort();
+}
+
+function arraysEqual(left, right) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  for (let index = 0; index < left.length; index += 1) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function describeType(value) {
