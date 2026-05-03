@@ -4,6 +4,9 @@
   "version": "0.0.1",
   "description": "Rebuild workspace for a Work Order based coding-quality harness.",
   "type": "module",
+  "bin": {
+    "pi": "src/cli/pi.js"
+  },
   "scripts": {
     "test": "node --test"
   }
