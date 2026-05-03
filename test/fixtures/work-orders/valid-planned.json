@@ -1,0 +1,159 @@
+{
+  "schemaVersion": 1,
+  "kind": "work_order",
+  "state": "planned",
+  "id": "wo-fixture-planned",
+  "goal": "Validate a planned Work Order fixture.",
+  "repositoryRoot": "/absolute/path/to/pi-orchestrator",
+  "policyProfile": "default",
+  "readiness": {
+    "status": "ready",
+    "checks": [
+      {
+        "id": "authority-cited",
+        "status": "satisfied",
+        "evidence": "docs/WORK-ORDER-SCHEMA.md"
+      }
+    ],
+    "blockers": []
+  },
+  "change": {
+    "class": "contract_schema",
+    "reviewDepth": "low",
+    "patchBudget": {
+      "expectedFilesChanged": 4,
+      "maxApproxChangedLines": 200,
+      "allowedSurfaces": [
+        "test/fixtures/work-orders/valid-active.json",
+        "test/fixtures/work-orders/valid-planned.json",
+        "test/fixtures/work-orders/valid-completed.json",
+        "test/work-order-fixtures.test.js"
+      ],
+      "mayMixSurfaces": false,
+      "incidentalRefactors": false
+    }
+  },
+  "scope": {
+    "allowed": [
+      "test/fixtures/work-orders/valid-active.json",
+      "test/fixtures/work-orders/valid-planned.json",
+      "test/fixtures/work-orders/valid-completed.json",
+      "test/work-order-fixtures.test.js"
+    ],
+    "forbidden": [
+      ".git/",
+      ".pi/",
+      "node_modules/",
+      "dist/",
+      ".env"
+    ],
+    "newFiles": "listed_only",
+    "allowedNewFiles": [
+      "test/fixtures/work-orders/valid-active.json",
+      "test/fixtures/work-orders/valid-planned.json",
+      "test/fixtures/work-orders/valid-completed.json",
+      "test/work-order-fixtures.test.js"
+    ]
+  },
+  "context": {
+    "files": [
+      {
+        "path": "src/kernel/work-order.js",
+        "required": true,
+        "reason": "Validator entrypoint used by fixture tests."
+      }
+    ],
+    "notes": [],
+    "priorArtifacts": [],
+    "manifest": [],
+    "budget": {
+      "maxTokens": 120000,
+      "truncationPolicy": "fail_if_required_context_truncated"
+    }
+  },
+  "acceptance": [
+    {
+      "id": "acc-planned-fixture",
+      "text": "The planned Work Order fixture validates but is not executable.",
+      "required": true
+    }
+  ],
+  "verification": {
+    "commands": [
+      {
+        "id": "verify-planned-fixture",
+        "command": "node --test test/work-order-fixtures.test.js",
+        "cwd": ".",
+        "required": true,
+        "actionClasses": [
+          "read_repository",
+          "execute_local_command"
+        ],
+        "reason": "Run focused Work Order fixture validation tests."
+      }
+    ],
+    "allowDerivedCommands": true,
+    "required": true
+  },
+  "execution": {
+    "autonomyLevel": "bounded_patch",
+    "modelToolRoute": {
+      "routeRequired": false,
+      "preferredWorker": "deterministic_local",
+      "preferredModels": [],
+      "tools": [
+        "read_repository",
+        "write_repository",
+        "execute_local_command"
+      ],
+      "rationale": "Local deterministic fixture validation is sufficient."
+    },
+    "rolePackets": [],
+    "counterexampleReview": {
+      "required": false,
+      "reason": "Focused positive lifecycle fixture coverage."
+    }
+  },
+  "nonGoals": [
+    "Do not change validator behavior.",
+    "Do not change CLI behavior.",
+    "Do not add negative fixtures."
+  ],
+  "risk": {
+    "level": "low",
+    "reasons": [
+      "Static positive fixture coverage only."
+    ]
+  },
+  "operationalReadiness": {
+    "observability": {
+      "breakageDetection": "Focused node:test coverage catches fixture validation regressions.",
+      "signals": [
+        "node --test test/work-order-fixtures.test.js"
+      ],
+      "manualChecks": []
+    },
+    "rollbackRecovery": {
+      "required": false,
+      "plan": null,
+      "recoverySteps": [],
+      "notApplicableReason": "Small test-only patch can be reverted directly."
+    }
+  },
+  "reviewFocus": [
+    "Confirm the planned fixture validates and remains non-executable."
+  ],
+  "approval": {
+    "required": false,
+    "approvalId": null,
+    "approvedAt": null,
+    "approvedBy": null,
+    "approvedFingerprint": null,
+    "approvedActionClasses": []
+  },
+  "repair": {
+    "maxLoops": 1,
+    "mayWidenScope": false
+  },
+  "extensions": {}
+}
