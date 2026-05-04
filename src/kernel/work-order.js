@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { normalizeRepoRelativePath } from "./path-safety.js";
+import { isProtectedRepoPath, normalizeRepoRelativePath } from "./path-safety.js";
 import { fingerprintWorkOrder } from "./work-order-fingerprint.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -229,6 +229,7 @@ class WorkOrderValidator {
       for (let index = 0; index < scope.allowed.length; index += 1) {
         this.validateRepoRelativePath(scope.allowed[index], `$.scope.allowed[${index}]`, {
           allowDot: false,
+          rejectProtected: true,
           writeScope: true,
         });
       }
@@ -257,6 +258,7 @@ class WorkOrderValidator {
         const currentPath = scope.allowedNewFiles[index];
         this.validateRepoRelativePath(currentPath, `$.scope.allowedNewFiles[${index}]`, {
           allowDot: false,
+          rejectProtected: true,
           writeScope: true,
         });
         if (typeof currentPath === "string" && currentPath.endsWith("/")) {
@@ -581,7 +583,7 @@ class WorkOrderValidator {
   }
 
   validateRepoRelativePath(value, fieldPath, options = {}) {
-    const { allowDot = false, writeScope = false } = options;
+    const { allowDot = false, rejectProtected = false, writeScope = false } = options;
     if (!this.requireNonEmptyString(value, fieldPath)) {
       return false;
     }
@@ -589,6 +591,11 @@ class WorkOrderValidator {
     if (writeScope) {
       const normalized = normalizeRepoRelativePath(value);
       if (!normalized.ok) {
+        this.addError(fieldPath, "invalid_path", "Path must be a safe repo-relative write-scope path.");
+        return false;
+      }
+
+      if (rejectProtected && isProtectedRepoPath(normalized.path).protected) {
         this.addError(fieldPath, "invalid_path", "Path must be a safe repo-relative write-scope path.");
         return false;
       }

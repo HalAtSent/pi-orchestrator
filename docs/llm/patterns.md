@@ -105,9 +105,11 @@ Classification: `repo-confirmed`.
 - The validator does not mutate or persist normalized paths.
 - `context.files[].path` and `verification.commands[].cwd` are intentionally
   still on the older validator path helper; `cwd: "."` remains valid.
-- `isProtectedRepoPath()` detects an initial protected-path subset for already
-  normalized repo-relative paths, but it is not wired into Work Order
-  validation.
+- `isProtectedRepoPath()` rejects an initial protected-path subset in Work
+  Order `scope.allowed` and `scope.allowedNewFiles` after lexical
+  normalization.
+- `scope.forbidden` may still list protected paths as denial metadata. This is
+  not full runtime scope authorization or observed worker path enforcement.
 
 ## Artifact Separation
 

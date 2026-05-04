@@ -37,11 +37,12 @@ Classification: `repo-confirmed`.
   - Exports `validateWorkOrder(workOrder)`.
   - Implements current Work Order schema validation, result shape, executable
     derivation, summary copy, approval action-class binding, approval
-    fingerprint binding, and write-scope lexical path validation.
+    fingerprint binding, write-scope lexical path validation, and protected
+    path rejection for `scope.allowed` and `scope.allowedNewFiles`.
   - Does not implement Evidence Pack validation, worker execution, artifact
-    persistence, run journals, protected-path enforcement, full scope
-    authorization, root containment, symlink/realpath checks, or normalized
-    artifact persistence.
+    persistence, run journals, runtime protected-path write enforcement, full
+    scope authorization, root containment, symlink/realpath checks, or
+    normalized artifact persistence.
 - `src/kernel/work-order-fingerprint.js`
   - Exports `canonicalJson(value)` and `fingerprintWorkOrder(workOrder)`.
   - Canonical JSON sorts object keys lexicographically, preserves own

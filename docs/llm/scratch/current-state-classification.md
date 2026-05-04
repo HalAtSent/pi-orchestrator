@@ -36,7 +36,7 @@ not authority.
 | Approval fingerprint validation must call the fingerprint primitive, not reimplement canonicalization. | `repo-confirmed` | Promoted to `patterns.md` and `known-traps.md`. |
 | Canonical JSON `__proto__`, integer-like key ordering, and undeclared `extensions` behavior. | `repo-confirmed` | Promoted to `patterns.md` and `known-traps.md`. |
 | Path-safety drive/scheme and embedded segment traps. | `repo-confirmed` | Promoted to `known-traps.md`. |
-| Protected-path detection exists but is not validator enforcement. | `repo-confirmed` | Promoted to `patterns.md`, `known-traps.md`, and `repo-map.md`. |
+| Protected-path detection is wired only for Work Order write allowlists. | `repo-confirmed` | Promoted to `patterns.md`, `known-traps.md`, and `repo-map.md`. |
 | Evidence Pack validation, artifact store, journal, worker execution, repair loops, model workers, templates, `/build`. | `documented-target` | Promoted as future/non-current behavior in `README.md`, `patterns.md`, and `conventions.md`. |
 
 ## Items To Promote Into Real Authority Later
@@ -45,8 +45,9 @@ not authority.
 - If Work Order authoring/review guidance should be normative, add it to
   `docs/WORK-ORDER-SCHEMA.md` or a dedicated authoritative Work Order authoring
   document instead of relying on `docs/llm/`.
-- When protected-path enforcement is wired into validation, update authoritative
-  schema/implementation docs or tests to distinguish detection from enforcement.
+- When broader protected-path enforcement is wired into runtime scope checks,
+  update authoritative schema/implementation docs or tests to distinguish
+  allowlist validation from full write enforcement.
 
 ## Discarded As Obsolete
 

@@ -75,10 +75,12 @@ Classification: `repo-confirmed`.
   checks so drive forms use `absolute_path`.
 - URL-like and drive-qualified forms must be rejected even after leading `./`
   removal and when embedded as path segments.
-- Path primitives are lexical only. Do not add filesystem checks, protected
-  path enforcement, scope authorization, or validator wiring unless the Work
-  Order names that single invariant.
-- Protected-path detection exists but is not validator enforcement yet.
+- Path primitives are lexical only. Do not add filesystem checks, full scope
+  authorization, runtime write enforcement, or broader validator coupling
+  unless the Work Order names that single invariant.
+- Protected-path detection is wired only to reject protected entries in Work
+  Order `scope.allowed` and `scope.allowedNewFiles`; do not reject protected
+  `scope.forbidden` entries, which are valid denial metadata.
 
 ## Backlog As Defect
 

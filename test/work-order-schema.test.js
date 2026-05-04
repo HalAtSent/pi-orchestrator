@@ -514,6 +514,56 @@ test("write-scope paths use lexical normalization without mutating source values
   assert.equal(workOrder.scope.allowedNewFiles[0], "./src/./kernel/work-order.js");
 });
 
+test("protected paths in scope.allowed fail with invalid_path at the write-scope field", () => {
+  const cases = [
+    [".git/", ".git/"],
+    ["./.pi/runs/", "./.pi/runs/"],
+    ["packages/app/node_modules/lib.js", "packages/app/node_modules/lib.js"],
+    ["src/.env.local", "src/.env.local"],
+    [".GIT/config", ".GIT/config"],
+  ];
+
+  for (const [name, protectedPath] of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed[0] = protectedPath;
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowed[0]", "invalid_path");
+    assert.equal(workOrder.scope.allowed[0], protectedPath);
+  }
+});
+
+test("protected paths in scope.allowedNewFiles fail with invalid_path at the write-scope field", () => {
+  const cases = [
+    ["dist/output.js", "dist/output.js"],
+    ["keys/deploy.key", "keys/deploy.key"],
+    ["config/credentials.json", "config/credentials.json"],
+  ];
+
+  for (const [name, protectedPath] of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowedNewFiles[0] = protectedPath;
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+    assert.equal(workOrder.scope.allowedNewFiles[0], protectedPath);
+  }
+});
+
+test("protected paths in scope.forbidden remain valid denial metadata", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.forbidden = [".git/", "./.pi/runs/", "packages/app/node_modules/lib.js", "src/.env.local"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(workOrder.scope.forbidden, [".git/", "./.pi/runs/", "packages/app/node_modules/lib.js", "src/.env.local"]);
+});
+
 test("unsafe write-scope path forms fail with invalid_path at the write-scope field", () => {
   const cases = [
     ["nested url-like allowed path", (workOrder) => (workOrder.scope.allowed[0] = "src/http:example"), "$.scope.allowed[0]"],

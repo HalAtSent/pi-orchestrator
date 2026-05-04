@@ -77,8 +77,10 @@ Classification: `repo-confirmed` for implemented files/tests,
 - Current repo has implemented early Work Order validation, CLI wrapper,
   fixtures, fingerprint primitive, approval bindings, lexical path
   normalization, write-scope lexical validation, and protected-path detection
-  primitive.
-- Protected-path detection is not wired into Work Order validation yet.
+  for Work Order write allowlists.
+- Protected-path rejection is limited to `scope.allowed` and
+  `scope.allowedNewFiles`; it is not full scope authorization or runtime worker
+  write enforcement.
 - Full scope authorization, root containment, symlink/realpath checks,
   Evidence Pack validation, artifact store, run journal, worker execution,
   repair loops, model-backed workers, templates, and `/build` remain future

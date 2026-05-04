@@ -105,13 +105,16 @@ Classification: `repo-confirmed` from current source and tests.
   `src/kernel/work-order-fingerprint.js`.
 - Lexical path normalization and protected-path detection primitives exist in
   `src/kernel/path-safety.js`.
+- Work Order validation rejects protected paths in `scope.allowed` and
+  `scope.allowedNewFiles`; `scope.forbidden` may still list protected paths as
+  denial metadata.
 - Valid lifecycle fixtures and two negative Work Order fixtures exist under
   `test/fixtures/work-orders/`.
 
 Classification: `documented-target`.
 
 - Evidence Pack validation, artifact store, run journal, worker execution,
-  repair loops, model-backed workers, `/build`, protected-path enforcement in
-  validation, full scope authorization, root containment, symlink/realpath
+  repair loops, model-backed workers, `/build`, full scope authorization,
+  runtime protected-path write enforcement, root containment, symlink/realpath
   checks, and observed worker path enforcement remain target/backlog behavior
   unless current code and tests say otherwise.
