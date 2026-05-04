@@ -8,6 +8,22 @@ const ROOT_PATH = "root_path";
 
 const DRIVE_QUALIFIED_PATTERN = /^[A-Za-z]:/;
 const URL_LIKE_PATTERN = /^[A-Za-z][A-Za-z0-9+.-]*:/;
+const PROTECTED_DIRECTORY_REASONS = new Map([
+  [".git", "git"],
+  [".pi", "pi_runtime"],
+  ["node_modules", "dependency"],
+  ["vendor", "dependency"],
+  [".venv", "dependency"],
+  ["dist", "build_output"],
+  ["build", "build_output"],
+  ["coverage", "build_output"],
+  [".next", "build_output"],
+]);
+const PROTECTED_SECRET_BASENAMES = new Set([".npmrc", ".pypirc", ".netrc", "credentials.json"]);
+const PROTECTED_SECRET_SEGMENT_PAIRS = [
+  [".aws", "credentials"],
+  [".ssh", "id_rsa"],
+];
 
 export function normalizeRepoRelativePath(pathValue) {
   if (typeof pathValue !== "string") {
@@ -70,6 +86,86 @@ export function normalizeRepoRelativePath(pathValue) {
   return { ok: true, path: normalizedPath };
 }
 
+export function isProtectedRepoPath(pathValue) {
+  if (typeof pathValue !== "string") {
+    return protectedReject();
+  }
+
+  if (pathValue.trim() === "") {
+    return protectedReject();
+  }
+
+  if (DRIVE_QUALIFIED_PATTERN.test(pathValue)) {
+    return protectedReject();
+  }
+
+  if (pathValue.startsWith("/")) {
+    return protectedReject();
+  }
+
+  if (URL_LIKE_PATTERN.test(pathValue)) {
+    return protectedReject();
+  }
+
+  if (pathValue.includes("\\") || pathValue.includes("//")) {
+    return protectedReject();
+  }
+
+  const segments = pathValue.split("/");
+  if (segments.length === 0 || segments.includes(".") || segments.includes("..")) {
+    return protectedReject();
+  }
+
+  if (segments.at(-1) === "") {
+    segments.pop();
+  }
+
+  if (segments.length === 0 || segments.includes("")) {
+    return protectedReject();
+  }
+
+  for (const segment of segments) {
+    if (DRIVE_QUALIFIED_PATTERN.test(segment) || URL_LIKE_PATTERN.test(segment)) {
+      return protectedReject();
+    }
+
+    const reason = PROTECTED_DIRECTORY_REASONS.get(segment.toLowerCase());
+    if (reason !== undefined) {
+      return { protected: true, reason };
+    }
+  }
+
+  const basename = segments.at(-1);
+  const normalizedBasename = basename.toLowerCase();
+  if (PROTECTED_SECRET_BASENAMES.has(normalizedBasename) || hasProtectedSegmentPair(segments)) {
+    return { protected: true, reason: "secret" };
+  }
+
+  if (
+    normalizedBasename === ".env" ||
+    normalizedBasename.startsWith(".env.") ||
+    normalizedBasename.endsWith(".pem") ||
+    normalizedBasename.endsWith(".key")
+  ) {
+    return { protected: true, reason: "secret" };
+  }
+
+  return { protected: false };
+}
+
 function reject(reason) {
   return { ok: false, reason };
+}
+
+function protectedReject() {
+  return { protected: false, reason: "invalid_input" };
+}
+
+function hasProtectedSegmentPair(segments) {
+  return PROTECTED_SECRET_SEGMENT_PAIRS.some(([parentSegment, childSegment]) =>
+    segments.some(
+      (segment, index) =>
+        segment.toLowerCase() === parentSegment && segments[index + 1]?.toLowerCase() === childSegment,
+    ),
+  );
 }
