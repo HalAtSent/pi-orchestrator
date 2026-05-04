@@ -153,12 +153,33 @@ export function isProtectedRepoPath(pathValue) {
   return { protected: false };
 }
 
+export function repoPathCovers(scopePath, candidatePath) {
+  if (!isNormalizedRepoRelativePath(scopePath) || !isNormalizedRepoRelativePath(candidatePath)) {
+    return { ok: false, reason: "invalid_input" };
+  }
+
+  if (scopePath === candidatePath) {
+    return { ok: true, covered: true, relation: "exact" };
+  }
+
+  if (scopePath.endsWith("/") && candidatePath.startsWith(scopePath)) {
+    return { ok: true, covered: true, relation: "descendant" };
+  }
+
+  return { ok: true, covered: false };
+}
+
 function reject(reason) {
   return { ok: false, reason };
 }
 
 function protectedReject() {
   return { protected: false, reason: "invalid_input" };
+}
+
+function isNormalizedRepoRelativePath(pathValue) {
+  const result = normalizeRepoRelativePath(pathValue);
+  return result.ok === true && result.path === pathValue;
 }
 
 function hasProtectedSegmentPair(segments) {

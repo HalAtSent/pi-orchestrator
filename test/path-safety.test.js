@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isProtectedRepoPath, normalizeRepoRelativePath } from "../src/kernel/path-safety.js";
+import { isProtectedRepoPath, normalizeRepoRelativePath, repoPathCovers } from "../src/kernel/path-safety.js";
 
 test("repo-relative path normalization accepts safe lexical forms", () => {
   const cases = [
@@ -186,5 +186,57 @@ test("protected repo path detection matches credential-store paths without loose
 
   for (const pathValue of nonProtectedCases) {
     assert.deepEqual(isProtectedRepoPath(pathValue), { protected: false });
+  }
+});
+
+test("repo path coverage handles exact file scopes", () => {
+  const cases = [
+    ["src/app.js", "src/app.js", { ok: true, covered: true, relation: "exact" }],
+    ["src/app.js", "src/app.test.js", { ok: true, covered: false }],
+    ["src/app.js", "src/app.js/child", { ok: true, covered: false }],
+  ];
+
+  for (const [scopePath, candidatePath, expected] of cases) {
+    assert.deepEqual(repoPathCovers(scopePath, candidatePath), expected);
+  }
+});
+
+test("repo path coverage handles trailing-slash directory scopes with segment bounds", () => {
+  const cases = [
+    ["src/", "src/", { ok: true, covered: true, relation: "exact" }],
+    ["src/", "src/app.js", { ok: true, covered: true, relation: "descendant" }],
+    ["src/", "src/nested/app.js", { ok: true, covered: true, relation: "descendant" }],
+    ["src/", "src2/app.js", { ok: true, covered: false }],
+    ["dist/", "distillery/file", { ok: true, covered: false }],
+  ];
+
+  for (const [scopePath, candidatePath, expected] of cases) {
+    assert.deepEqual(repoPathCovers(scopePath, candidatePath), expected);
+  }
+});
+
+test("repo path coverage rejects invalid or unnormalized inputs without throwing", () => {
+  const invalidInputs = [
+    null,
+    123,
+    { path: "src/file" },
+    "",
+    "   ",
+    ".",
+    "./src",
+    "src//file",
+    "src/../file",
+    "/tmp/outside",
+    "src\\file",
+    "src/http:example",
+    "src/http://example",
+    "C:/outside",
+  ];
+
+  for (const pathValue of invalidInputs) {
+    assert.doesNotThrow(() => repoPathCovers(pathValue, "src/app.js"));
+    assert.deepEqual(repoPathCovers(pathValue, "src/app.js"), { ok: false, reason: "invalid_input" });
+    assert.doesNotThrow(() => repoPathCovers("src/", pathValue));
+    assert.deepEqual(repoPathCovers("src/", pathValue), { ok: false, reason: "invalid_input" });
   }
 });
