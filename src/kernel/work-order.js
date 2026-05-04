@@ -1,5 +1,6 @@
 import path from "node:path";
 
+import { normalizeRepoRelativePath } from "./path-safety.js";
 import { fingerprintWorkOrder } from "./work-order-fingerprint.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -580,9 +581,19 @@ class WorkOrderValidator {
   }
 
   validateRepoRelativePath(value, fieldPath, options = {}) {
-    const { allowDot = false } = options;
+    const { allowDot = false, writeScope = false } = options;
     if (!this.requireNonEmptyString(value, fieldPath)) {
       return false;
+    }
+
+    if (writeScope) {
+      const normalized = normalizeRepoRelativePath(value);
+      if (!normalized.ok) {
+        this.addError(fieldPath, "invalid_path", "Path must be a safe repo-relative write-scope path.");
+        return false;
+      }
+
+      return true;
     }
 
     if (value.includes("\\")) {

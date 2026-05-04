@@ -500,6 +500,61 @@ test("shallow repo-relative path syntax checks fail closed", () => {
   }
 });
 
+test("write-scope paths use lexical normalization without mutating source values", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed[0] = "./src/./kernel/";
+  workOrder.scope.forbidden[0] = "./.pi/";
+  workOrder.scope.allowedNewFiles[0] = "./src/./kernel/work-order.js";
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.equal(workOrder.scope.allowed[0], "./src/./kernel/");
+  assert.equal(workOrder.scope.forbidden[0], "./.pi/");
+  assert.equal(workOrder.scope.allowedNewFiles[0], "./src/./kernel/work-order.js");
+});
+
+test("unsafe write-scope path forms fail with invalid_path at the write-scope field", () => {
+  const cases = [
+    ["nested url-like allowed path", (workOrder) => (workOrder.scope.allowed[0] = "src/http:example"), "$.scope.allowed[0]"],
+    ["nested drive-qualified allowed path", (workOrder) => (workOrder.scope.allowed[0] = "src/C:outside"), "$.scope.allowed[0]"],
+    ["root allowed path", (workOrder) => (workOrder.scope.allowed[0] = "."), "$.scope.allowed[0]"],
+    ["traversal allowed path", (workOrder) => (workOrder.scope.allowed[0] = "src/../outside"), "$.scope.allowed[0]"],
+    ["absolute forbidden path", (workOrder) => (workOrder.scope.forbidden[0] = "/tmp/outside"), "$.scope.forbidden[0]"],
+    ["backslash allowed-new-file path", (workOrder) => (workOrder.scope.allowedNewFiles[0] = "src\\kernel"), "$.scope.allowedNewFiles[0]"],
+  ];
+
+  for (const [name, mutate, expectedPath] of cases) {
+    const workOrder = validWorkOrder();
+    mutate(workOrder);
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, expectedPath, "invalid_path");
+  }
+});
+
+test("allowedNewFiles remains exact-file-only after write-scope normalization", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowedNewFiles[0] = "./src/./kernel/";
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+});
+
+test("command cwd dot behavior remains valid outside write-scope normalization", () => {
+  const workOrder = validWorkOrder();
+  workOrder.verification.commands[0].cwd = ".";
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.equal(workOrder.verification.commands[0].cwd, ".");
+});
+
 function validWorkOrder() {
   return {
     schemaVersion: 1,
