@@ -39,7 +39,7 @@ Classification: `repo-confirmed`.
 | --- | --- | --- |
 | Work Order validator | `node --test test/work-order-schema.test.js` | Result shape, schema fields, executable derivation, summary copy, approval bindings, write-scope path validation. |
 | Fingerprint primitive | `node --test test/work-order-fingerprint.test.js` | Canonical JSON, action-class set canonicalization, volatile approval fields, undeclared `extensions`, `__proto__`, integer-like keys, fingerprint format. |
-| Path safety primitive | `node --test test/path-safety.test.js` | Lexical repo-relative normalization and protected-path detection primitive. |
+| Path safety primitive | `node --test test/path-safety.test.js` | Lexical repo-relative normalization, protected-path detection, and normalized path coverage primitives. |
 | CLI wrapper | `node --test test/work-order-cli.test.js` | `pi validate-work-order`, JSON stdout, exit codes, large piped output flush. |
 | Work Order fixtures | `node --test test/work-order-fixtures.test.js` | Valid lifecycle fixtures plus missing-context and unknown-policy negative fixtures. |
 

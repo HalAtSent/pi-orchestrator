@@ -78,6 +78,9 @@ Classification: `repo-confirmed`.
 - Path primitives are lexical only. Do not add filesystem checks, full scope
   authorization, runtime write enforcement, or broader validator coupling
   unless the Work Order names that single invariant.
+- Use `repoPathCovers()` for lexical scope-path coverage instead of ad hoc
+  prefix checks. It requires normalized inputs, and only trailing-slash scope
+  paths cover descendants.
 - Protected-path detection is wired only to reject protected entries in Work
   Order `scope.allowed` and `scope.allowedNewFiles`; do not reject protected
   `scope.forbidden` entries, which are valid denial metadata.

@@ -54,6 +54,7 @@ Classification: `repo-confirmed`.
 - `src/kernel/path-safety.js`
   - Exports `normalizeRepoRelativePath(pathValue)`.
   - Exports `isProtectedRepoPath(pathValue)`.
+  - Exports `repoPathCovers(scopePath, candidatePath)`.
   - Path primitives are lexical and do not inspect the filesystem.
 - `src/cli/pi.js`
   - Implements `pi validate-work-order <file>`.
@@ -73,8 +74,8 @@ Classification: `repo-confirmed`.
 - `test/work-order-schema.test.js` - Work Order validator behavior.
 - `test/work-order-fingerprint.test.js` - canonical JSON and fingerprint
   primitives.
-- `test/path-safety.test.js` - lexical path normalization and protected path
-  detection primitives.
+- `test/path-safety.test.js` - lexical path normalization, protected path
+  detection, and normalized path coverage primitives.
 - `test/work-order-cli.test.js` - CLI wrapper behavior and stdout flushing.
 - `test/work-order-fixtures.test.js` - static Work Order fixtures.
 

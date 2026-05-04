@@ -49,9 +49,10 @@ Current surface-specific boundaries:
 - Fixture additions are separate from new validator behavior.
 - Fingerprint primitive changes are separate from approval validation, except
   later approval-binding passes may call the existing primitive.
-- Path normalization, protected-path detection, limited validator allowlist
-  wiring, and full scope authorization are distinct slices. Do not bundle
-  future scope authorization with the current protected-path allowlist check.
+- Path normalization, path coverage, protected-path detection, limited
+  validator allowlist wiring, and full scope authorization are distinct slices.
+  Do not bundle future scope authorization with the current protected-path
+  allowlist check.
 
 ## Testing
 

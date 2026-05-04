@@ -103,8 +103,8 @@ Classification: `repo-confirmed` from current source and tests.
   the validator result as JSON.
 - Canonical JSON and Work Order fingerprint primitives exist in
   `src/kernel/work-order-fingerprint.js`.
-- Lexical path normalization and protected-path detection primitives exist in
-  `src/kernel/path-safety.js`.
+- Lexical path normalization, protected-path detection, and normalized path
+  coverage primitives exist in `src/kernel/path-safety.js`.
 - Work Order validation rejects protected paths in `scope.allowed` and
   `scope.allowedNewFiles`; `scope.forbidden` may still list protected paths as
   denial metadata.

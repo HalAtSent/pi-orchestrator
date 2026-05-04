@@ -108,6 +108,9 @@ Classification: `repo-confirmed`.
 - `isProtectedRepoPath()` rejects an initial protected-path subset in Work
   Order `scope.allowed` and `scope.allowedNewFiles` after lexical
   normalization.
+- `repoPathCovers()` compares already-normalized repo-relative paths. Exact
+  matches cover, trailing-slash scope paths cover descendants, and invalid or
+  unnormalized inputs fail closed with `invalid_input`.
 - `scope.forbidden` may still list protected paths as denial metadata. This is
   not full runtime scope authorization or observed worker path enforcement.
 
