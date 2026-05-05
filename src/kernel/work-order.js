@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { isProtectedRepoPath, normalizeRepoRelativePath } from "./path-safety.js";
+import { isProtectedRepoPath, normalizeRepoRelativePath, repoPathCovers } from "./path-safety.js";
 import { fingerprintWorkOrder } from "./work-order-fingerprint.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -72,6 +72,10 @@ function buildWorkOrderSummary(workOrder) {
     verificationCommands: workOrder?.verification?.commands,
     counterexampleReviewRequired: workOrder?.execution?.counterexampleReview?.required,
   };
+}
+
+function isRawDirectoryAlias(pathValue) {
+  return typeof pathValue === "string" && (pathValue.endsWith("/") || pathValue.split("/").at(-1) === ".");
 }
 
 class WorkOrderValidator {
@@ -225,13 +229,18 @@ class WorkOrderValidator {
       return;
     }
 
+    const allowedCoverageCandidates = [];
     if (this.requireArray(scope.allowed, "$.scope.allowed", { minItems: 1 })) {
       for (let index = 0; index < scope.allowed.length; index += 1) {
-        this.validateRepoRelativePath(scope.allowed[index], `$.scope.allowed[${index}]`, {
+        const allowedPath = scope.allowed[index];
+        const allowedPathValid = this.validateRepoRelativePath(allowedPath, `$.scope.allowed[${index}]`, {
           allowDot: false,
           rejectProtected: true,
           writeScope: true,
         });
+        if (allowedPathValid) {
+          allowedCoverageCandidates.push(normalizeRepoRelativePath(allowedPath).path);
+        }
       }
     }
 
@@ -256,17 +265,39 @@ class WorkOrderValidator {
     if (this.requireArray(scope.allowedNewFiles, "$.scope.allowedNewFiles", { minItems })) {
       for (let index = 0; index < scope.allowedNewFiles.length; index += 1) {
         const currentPath = scope.allowedNewFiles[index];
-        this.validateRepoRelativePath(currentPath, `$.scope.allowedNewFiles[${index}]`, {
+        const currentFieldPath = `$.scope.allowedNewFiles[${index}]`;
+        const currentPathValid = this.validateRepoRelativePath(currentPath, currentFieldPath, {
           allowDot: false,
           rejectProtected: true,
           writeScope: true,
         });
-        if (typeof currentPath === "string" && currentPath.endsWith("/")) {
+        if (currentPathValid && isRawDirectoryAlias(currentPath)) {
           this.addError(
-            `$.scope.allowedNewFiles[${index}]`,
+            currentFieldPath,
             "invalid_path",
             "allowedNewFiles entries must be exact file paths, not directories.",
           );
+          continue;
+        }
+
+        if (!currentPathValid) {
+          continue;
+        }
+
+        if (scope.newFiles !== "forbidden") {
+          const normalizedNewFilePath = normalizeRepoRelativePath(currentPath).path;
+          const covered = allowedCoverageCandidates.some((allowedPath) => {
+            const coverage = repoPathCovers(allowedPath, normalizedNewFilePath);
+            return coverage.ok && coverage.covered;
+          });
+
+          if (!covered) {
+            this.addError(
+              currentFieldPath,
+              "invalid_path",
+              "allowedNewFiles entries must be inside declared allowed write scope.",
+            );
+          }
         }
       }
     }

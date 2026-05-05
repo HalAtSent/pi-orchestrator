@@ -586,12 +586,189 @@ test("unsafe write-scope path forms fail with invalid_path at the write-scope fi
 });
 
 test("allowedNewFiles remains exact-file-only after write-scope normalization", () => {
+  const cases = [
+    {
+      name: "normalized trailing slash directory",
+      allowed: ["src/kernel/"],
+      allowedNewFiles: ["./src/./kernel/"],
+    },
+    {
+      name: "matching terminal-dot directory alias",
+      allowed: ["src/kernel/."],
+      allowedNewFiles: ["src/kernel/."],
+    },
+    {
+      name: "covered child terminal-dot directory alias",
+      allowed: ["src/kernel/"],
+      allowedNewFiles: ["src/kernel/new-file.js/."],
+    },
+  ];
+
+  for (const { name, allowed, allowedNewFiles } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles, name);
+  }
+});
+
+test("allowedNewFiles entries pass when covered by allowed write scope", () => {
+  const cases = [
+    {
+      name: "directory scope covers child file",
+      allowed: ["src/kernel/"],
+      allowedNewFiles: ["src/kernel/new-file.js"],
+    },
+    {
+      name: "exact file scope covers matching new file",
+      allowed: ["src/kernel/new-file.js"],
+      allowedNewFiles: ["src/kernel/new-file.js"],
+    },
+    {
+      name: "normalized allowed directory covers new file without mutation",
+      allowed: ["./src/./kernel/"],
+      allowedNewFiles: ["src/kernel/new-file.js"],
+    },
+    {
+      name: "normalized new-file path is compared without mutation",
+      allowed: ["src/kernel/"],
+      allowedNewFiles: ["./src/kernel/./new-file.js"],
+    },
+  ];
+
+  for (const { name, allowed, allowedNewFiles } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, true, name);
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles, name);
+  }
+});
+
+test("allowedNewFiles containment is skipped when new files are forbidden", () => {
   const workOrder = validWorkOrder();
-  workOrder.scope.allowedNewFiles[0] = "./src/./kernel/";
+  workOrder.scope.allowed = ["src/kernel/"];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = ["test/new-file.js"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(workOrder.scope.allowed, ["src/kernel/"]);
+  assert.equal(workOrder.scope.newFiles, "forbidden");
+  assert.deepEqual(workOrder.scope.allowedNewFiles, ["test/new-file.js"]);
+});
+
+test("allowedNewFiles entries fail when outside allowed write scope", () => {
+  const cases = [
+    {
+      name: "directory scope does not cover unrelated test file",
+      allowed: ["src/kernel/"],
+      allowedNewFiles: ["test/new-file.js"],
+    },
+    {
+      name: "exact file scope does not cover sibling file",
+      allowed: ["src/kernel/existing.js"],
+      allowedNewFiles: ["src/kernel/new-file.js"],
+    },
+    {
+      name: "directory coverage is segment bounded",
+      allowed: ["src/"],
+      allowedNewFiles: ["src2/new-file.js"],
+    },
+  ];
+
+  for (const { name, allowed, allowedNewFiles } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = allowed;
+    workOrder.scope.allowedNewFiles = allowedNewFiles;
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  }
+});
+
+test("listed_only allowedNewFiles containment still rejects outside write scope", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed = ["src/kernel/"];
+  workOrder.scope.newFiles = "listed_only";
+  workOrder.scope.allowedNewFiles = ["test/new-file.js"];
 
   const result = validateWorkOrder(workOrder);
 
   assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, ["src/kernel/"]);
+  assert.equal(workOrder.scope.newFiles, "listed_only");
+  assert.deepEqual(workOrder.scope.allowedNewFiles, ["test/new-file.js"]);
+});
+
+test("allowedNewFiles containment skips entries with existing path failures", () => {
+  const cases = [
+    {
+      name: "protected new file only reports existing protected-path error",
+      mutate: (workOrder) => {
+        workOrder.scope.allowed = ["src/kernel/"];
+        workOrder.scope.allowedNewFiles = ["dist/output.js"];
+      },
+    },
+    {
+      name: "directory new file only reports existing exact-file error",
+      mutate: (workOrder) => {
+        workOrder.scope.allowed = ["src/kernel/"];
+        workOrder.scope.allowedNewFiles = ["src/kernel/"];
+      },
+    },
+    {
+      name: "invalid lexical new file only reports existing lexical error",
+      mutate: (workOrder) => {
+        workOrder.scope.allowed = ["src/kernel/"];
+        workOrder.scope.allowedNewFiles = ["src\\kernel\\new-file.js"];
+      },
+    },
+    {
+      name: "invalid terminal-dot new file only reports existing lexical error",
+      mutate: (workOrder) => {
+        workOrder.scope.allowed = ["src/kernel/"];
+        workOrder.scope.allowedNewFiles = ["src\\kernel\\."];
+      },
+    },
+  ];
+
+  for (const { name, mutate } of cases) {
+    const workOrder = validWorkOrder();
+    mutate(workOrder);
+
+    const result = validateWorkOrder(workOrder);
+    const pathErrors = result.errors.filter((error) => error.path === "$.scope.allowedNewFiles[0]");
+
+    assert.equal(result.success, false, name);
+    assert.equal(pathErrors.length, 1, `${name}: ${JSON.stringify(result.errors, null, 2)}`);
+    assert.equal(pathErrors[0].code, "invalid_path", name);
+  }
+});
+
+test("allowedNewFiles containment ignores invalid allowed write-scope entries", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed = ["src\\kernel\\", "test/"];
+  workOrder.scope.allowedNewFiles = ["src/kernel/new-file.js"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowed[0]", "invalid_path");
   assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
 });
 
