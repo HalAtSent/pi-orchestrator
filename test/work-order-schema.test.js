@@ -715,6 +715,40 @@ test("listed_only allowedNewFiles containment still rejects outside write scope"
   assert.deepEqual(workOrder.scope.allowedNewFiles, ["test/new-file.js"]);
 });
 
+test("allowed allowedNewFiles entries fail when covered by forbidden write scope", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed = ["src/"];
+  workOrder.scope.forbidden = ["src/private/"];
+  workOrder.scope.newFiles = "allowed";
+  workOrder.scope.allowedNewFiles = ["src/private/new-file.js"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, ["src/"]);
+  assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
+  assert.equal(workOrder.scope.newFiles, "allowed");
+  assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/private/new-file.js"]);
+});
+
+test("allowed allowedNewFiles entries pass when inside allowed scope and outside forbidden scope", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed = ["src/"];
+  workOrder.scope.forbidden = ["src/private/"];
+  workOrder.scope.newFiles = "allowed";
+  workOrder.scope.allowedNewFiles = ["src/public/new-file.js"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(workOrder.scope.allowed, ["src/"]);
+  assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
+  assert.equal(workOrder.scope.newFiles, "allowed");
+  assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/public/new-file.js"]);
+});
+
 test("listed_only allowedNewFiles entries fail when covered by forbidden write scope", () => {
   const cases = [
     {

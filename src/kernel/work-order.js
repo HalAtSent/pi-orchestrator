@@ -305,19 +305,17 @@ class WorkOrderValidator {
             continue;
           }
 
-          if (scope.newFiles === "listed_only") {
-            const forbiddenCovered = forbiddenCoverageCandidates.some((forbiddenPath) => {
-              const coverage = repoPathCovers(forbiddenPath, normalizedNewFilePath);
-              return coverage.ok && coverage.covered;
-            });
+          const forbiddenCovered = forbiddenCoverageCandidates.some((forbiddenPath) => {
+            const coverage = repoPathCovers(forbiddenPath, normalizedNewFilePath);
+            return coverage.ok && coverage.covered;
+          });
 
-            if (forbiddenCovered) {
-              this.addError(
-                currentFieldPath,
-                "invalid_path",
-                "allowedNewFiles entries must not be inside declared forbidden write scope.",
-              );
-            }
+          if (forbiddenCovered) {
+            this.addError(
+              currentFieldPath,
+              "invalid_path",
+              "allowedNewFiles entries must not be inside declared forbidden write scope.",
+            );
           }
         }
       }
