@@ -435,6 +435,40 @@ test("approval-required stale fingerprint fails closed", () => {
   assertError(result, "$.approval.approvedFingerprint", "approval_fingerprint_mismatch");
 });
 
+test("approval-required fingerprint canonicalization failure returns structured invalid result", () => {
+  const workOrder = validWorkOrder();
+  workOrder.approval = validRequiredApproval({
+    approvedActionClasses: ["execute_local_command", "read_repository"],
+    approvedFingerprint: `sha256:${"b".repeat(64)}`,
+  });
+  workOrder.goal = 1n;
+
+  let result;
+  assert.doesNotThrow(() => {
+    result = validateWorkOrder(workOrder);
+  });
+
+  assert.equal(result.success, false);
+  assert.equal(result.status, "invalid");
+  assert.equal(result.executable, false);
+  assert.deepEqual(result.warnings, []);
+  assert.deepEqual(result.hardFailures, result.errors);
+  assertError(result, "$.goal", "invalid_type");
+  assert.deepEqual(
+    result.errors.find(
+      (error) =>
+        error.path === "$.approval.approvedFingerprint" &&
+        error.code === "approval_fingerprint_canonicalization_failed",
+    ),
+    {
+      path: "$.approval.approvedFingerprint",
+      code: "approval_fingerprint_canonicalization_failed",
+      message:
+        "approvedFingerprint could not be compared because Work Order fingerprint canonicalization failed.",
+    },
+  );
+});
+
 test("approval-required verification command changes stale prior fingerprint", () => {
   const workOrder = validWorkOrder();
   approveWorkOrder(workOrder);

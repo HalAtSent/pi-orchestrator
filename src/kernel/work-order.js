@@ -583,12 +583,26 @@ class WorkOrderValidator {
           "malformed_approval",
           "approvedFingerprint must use sha256:<64 lowercase hex> format.",
         );
-      } else if (approval.approvedFingerprint !== fingerprintWorkOrder(workOrder)) {
-        this.addError(
-          "$.approval.approvedFingerprint",
-          "approval_fingerprint_mismatch",
-          "approvedFingerprint must equal the canonical Work Order fingerprint.",
-        );
+      } else {
+        let actualFingerprint;
+        try {
+          actualFingerprint = fingerprintWorkOrder(workOrder);
+        } catch {
+          this.addError(
+            "$.approval.approvedFingerprint",
+            "approval_fingerprint_canonicalization_failed",
+            "approvedFingerprint could not be compared because Work Order fingerprint canonicalization failed.",
+          );
+          return;
+        }
+
+        if (approval.approvedFingerprint !== actualFingerprint) {
+          this.addError(
+            "$.approval.approvedFingerprint",
+            "approval_fingerprint_mismatch",
+            "approvedFingerprint must equal the canonical Work Order fingerprint.",
+          );
+        }
       }
     }
   }
