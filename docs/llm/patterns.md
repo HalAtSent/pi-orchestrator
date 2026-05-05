@@ -107,6 +107,9 @@ Classification: `repo-confirmed`.
   `scope.newFiles` is `allowed` or `listed_only`, each normalized new-file path
   must be covered by a normalized `scope.allowed` entry; containment is skipped
   when `scope.newFiles` is `forbidden`.
+- When `scope.newFiles` is `listed_only`, valid normalized `scope.forbidden`
+  entries also deny covered `scope.allowedNewFiles` entries. Invalid forbidden
+  entries produce their own path errors and are not reused for coverage.
 - `context.files[].path` and `verification.commands[].cwd` are intentionally
   still on the older validator path helper; `cwd: "."` remains valid.
 - `isProtectedRepoPath()` rejects an initial protected-path subset in Work
