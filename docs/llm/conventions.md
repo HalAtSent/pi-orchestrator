@@ -79,8 +79,9 @@ Classification: `repo-confirmed` for implemented files/tests,
   normalization, write-scope lexical validation, and protected-path detection
   for Work Order write allowlists.
 - Work Order validation also applies limited lexical and existing-path realpath
-  forbidden-over-allowed checks for `scope.allowed`, plus lexical
-  forbidden-over-allowed checks for `scope.allowedNewFiles`.
+  forbidden-over-allowed checks for `scope.allowed`, plus lexical and parent
+  realpath forbidden-over-allowed checks for `scope.allowedNewFiles` when
+  new-file policy allows them.
 - Work Order validation checks existing `scope.allowed` entries and allowed or
   listed `scope.allowedNewFiles` parents for repository-root containment.
 - Protected-path rejection is limited to `scope.allowed` and

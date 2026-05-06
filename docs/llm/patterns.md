@@ -112,14 +112,16 @@ Classification: `repo-confirmed`.
 - Existing `scope.allowed` entries must stay inside `repositoryRoot` after
   realpath resolution. Missing `scope.allowed` targets pass under an available
   `repositoryRoot` unless an existing path prefix escapes.
-- `scope.allowedNewFiles` entries must remain exact file paths. When
-  `scope.newFiles` is `allowed` or `listed_only`, each normalized new-file path
-  must be covered by a normalized `scope.allowed` entry; containment is skipped
-  when `scope.newFiles` is `forbidden`.
+- `scope.allowedNewFiles` entries reject raw directory aliases in every mode.
+  When `scope.newFiles` is `listed_only`, existing directory targets also fail
+  as non-exact file paths. When `scope.newFiles` is `allowed` or `listed_only`,
+  each normalized new-file path must be covered by a normalized `scope.allowed`
+  entry; containment is skipped when `scope.newFiles` is `forbidden`.
 - When `scope.newFiles` is `allowed` or `listed_only`, valid normalized
-  `scope.forbidden` entries also deny covered `scope.allowedNewFiles` entries.
-  Invalid forbidden entries produce their own path errors and are not reused for
-  coverage.
+  `scope.forbidden` entries also deny lexically covered
+  `scope.allowedNewFiles` entries. Existing new-file parents are also checked
+  against valid forbidden entries by realpath. Invalid forbidden entries produce
+  their own path errors and are not reused for coverage.
 - `context.files[].path` and `verification.commands[].cwd` are intentionally
   still on the older validator path helper; `cwd: "."` remains valid.
 - `isProtectedRepoPath()` rejects an initial protected-path subset in Work
@@ -132,7 +134,8 @@ Classification: `repo-confirmed`.
   matches cover, trailing-slash scope paths cover realpath descendants, and
   missing or escaping paths fail closed with structured reasons.
 - When `scope.newFiles` is `allowed` or `listed_only`, `scope.allowedNewFiles`
-  entries must have an available parent inside `repositoryRoot`.
+  entries must have an available parent inside `repositoryRoot`; that parent
+  must not realpath-resolve under a valid forbidden scope.
 - `scope.forbidden` may still list protected paths as denial metadata. This is
   not full runtime scope authorization or observed worker path enforcement.
 

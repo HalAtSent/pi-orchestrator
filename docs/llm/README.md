@@ -115,7 +115,8 @@ Classification: `repo-confirmed` from current source and tests.
   behavior, not runtime worker path enforcement.
 - Work Order validation rejects existing `scope.allowed` symlink/realpath
   escapes and rejects `scope.allowedNewFiles` entries whose existing parent is
-  unavailable or escapes `repositoryRoot` when new-file policy allows them.
+  unavailable, escapes `repositoryRoot`, or is covered by a valid forbidden
+  scope by realpath when new-file policy allows them.
   Missing `scope.allowed` targets still pass under an available `repositoryRoot`
   unless an existing path prefix escapes.
 - Valid lifecycle fixtures and two negative Work Order fixtures exist under

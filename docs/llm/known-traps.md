@@ -93,7 +93,8 @@ Classification: `repo-confirmed`.
   allowed parent may still contain a forbidden child.
 - Do not treat `scope.allowedNewFiles` as an exception to `scope.forbidden`.
   For `scope.newFiles: "allowed"` or `"listed_only"`, valid forbidden files or
-  directories still block covered listed new-file entries. This is lexical
+  directories still block covered listed new-file entries lexically, and valid
+  forbidden scopes also block existing new-file parents by realpath. This is
   validator coverage only, not runtime worker path enforcement.
 - Do not describe all root-containment or symlink/realpath behavior as either
   absent or complete. Current validator checks cover existing `scope.allowed`

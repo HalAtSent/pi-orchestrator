@@ -42,8 +42,8 @@ Classification: `repo-confirmed`.
     `scope.allowed` and `scope.allowedNewFiles`.
   - Applies lexical forbidden-over-allowed coverage for `scope.allowed` and
     `scope.allowedNewFiles`, plus realpath forbidden-over-allowed coverage for
-    existing `scope.allowed` paths; this is validator behavior, not runtime
-    worker path enforcement.
+    existing `scope.allowed` paths and allowed/listed `scope.allowedNewFiles`
+    parents; this is validator behavior, not runtime worker path enforcement.
   - Does not implement Evidence Pack validation, worker execution, artifact
     persistence, run journals, runtime protected-path write enforcement, full
     scope authorization, runtime observed-path enforcement, or normalized
