@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -39,6 +39,9 @@ Classification: `repo-confirmed`.
     derivation, summary copy, approval action-class binding, approval
     fingerprint binding, write-scope lexical path validation, and protected
     path rejection for `scope.allowed` and `scope.allowedNewFiles`.
+  - Applies lexical forbidden-over-allowed coverage for `scope.allowed` and
+    `scope.allowedNewFiles`; this is validator behavior, not runtime worker
+    path enforcement.
   - Does not implement Evidence Pack validation, worker execution, artifact
     persistence, run journals, runtime protected-path write enforcement, full
     scope authorization, root containment, symlink/realpath checks, or

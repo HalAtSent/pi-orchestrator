@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-05
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -84,9 +84,12 @@ Classification: `repo-confirmed`.
 - Protected-path detection is wired only to reject protected entries in Work
   Order `scope.allowed` and `scope.allowedNewFiles`; do not reject protected
   `scope.forbidden` entries, which are valid denial metadata.
-- Do not treat listed `scope.allowedNewFiles` as an exception to
-  `scope.forbidden`. For `scope.newFiles: "listed_only"`, valid forbidden files
-  or directories still block covered listed new-file entries. This is lexical
+- Do not treat `scope.allowed` as an exception to `scope.forbidden`. Valid
+  forbidden files or directories invalidate covered allowed entries, but an
+  allowed parent may still contain a forbidden child.
+- Do not treat `scope.allowedNewFiles` as an exception to `scope.forbidden`.
+  For `scope.newFiles: "allowed"` or `"listed_only"`, valid forbidden files or
+  directories still block covered listed new-file entries. This is lexical
   validator coverage only, not runtime worker path enforcement.
 
 ## Backlog As Defect

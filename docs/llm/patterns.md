@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-05
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -103,13 +103,17 @@ Classification: `repo-confirmed`.
 - Work Order write-scope validation uses the normalizer for `scope.allowed`,
   `scope.forbidden`, and `scope.allowedNewFiles` only.
 - The validator does not mutate or persist normalized paths.
+- `scope.allowed` entries must not be covered by valid normalized
+  `scope.forbidden` entries. This is one-way: an allowed parent may still
+  contain a forbidden child.
 - `scope.allowedNewFiles` entries must remain exact file paths. When
   `scope.newFiles` is `allowed` or `listed_only`, each normalized new-file path
   must be covered by a normalized `scope.allowed` entry; containment is skipped
   when `scope.newFiles` is `forbidden`.
-- When `scope.newFiles` is `listed_only`, valid normalized `scope.forbidden`
-  entries also deny covered `scope.allowedNewFiles` entries. Invalid forbidden
-  entries produce their own path errors and are not reused for coverage.
+- When `scope.newFiles` is `allowed` or `listed_only`, valid normalized
+  `scope.forbidden` entries also deny covered `scope.allowedNewFiles` entries.
+  Invalid forbidden entries produce their own path errors and are not reused for
+  coverage.
 - `context.files[].path` and `verification.commands[].cwd` are intentionally
   still on the older validator path helper; `cwd: "."` remains valid.
 - `isProtectedRepoPath()` rejects an initial protected-path subset in Work

@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../IMPLEMENTATION-SEQUENCE.md
@@ -78,6 +78,8 @@ Classification: `repo-confirmed` for implemented files/tests,
   fixtures, fingerprint primitive, approval bindings, lexical path
   normalization, write-scope lexical validation, and protected-path detection
   for Work Order write allowlists.
+- Work Order validation also applies limited lexical forbidden-over-allowed
+  checks for `scope.allowed` and `scope.allowedNewFiles`.
 - Protected-path rejection is limited to `scope.allowed` and
   `scope.allowedNewFiles`; it is not full scope authorization or runtime worker
   write enforcement.

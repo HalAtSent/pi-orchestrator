@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -108,6 +108,9 @@ Classification: `repo-confirmed` from current source and tests.
 - Work Order validation rejects protected paths in `scope.allowed` and
   `scope.allowedNewFiles`; `scope.forbidden` may still list protected paths as
   denial metadata.
+- Work Order validation rejects `scope.allowed` entries covered by valid
+  `scope.forbidden` entries. An allowed parent may still contain a forbidden
+  child. This is lexical validator coverage only.
 - Valid lifecycle fixtures and two negative Work Order fixtures exist under
   `test/fixtures/work-orders/`.
 

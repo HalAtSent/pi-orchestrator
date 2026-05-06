@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-06
 authority_sources:
   - ../../../AGENTS.md
   - ../../KERNEL-INVARIANTS.md
@@ -51,8 +51,8 @@ Current surface-specific boundaries:
   later approval-binding passes may call the existing primitive.
 - Path normalization, path coverage, protected-path detection, limited
   validator allowlist wiring, and full scope authorization are distinct slices.
-  Do not bundle future scope authorization with the current protected-path
-  allowlist check.
+  Do not bundle future scope authorization with current limited validator scope
+  checks.
 
 ## Testing
 
