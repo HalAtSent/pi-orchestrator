@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   checkExistingRepoPathContainment,
+  checkRepoFileParentContainment,
   isProtectedRepoPath,
   normalizeRepoRelativePath,
   repoPathCovers,
@@ -341,6 +342,112 @@ test("existing repo path containment returns missing_path for normalized target 
   assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src/missing.txt"), {
     ok: false,
     reason: "missing_path",
+  });
+});
+
+test("repo file parent containment accepts missing target files with contained parents", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await symlink(path.join(repoRoot, "src"), path.join(repoRoot, "inside-link"));
+
+  const repoRootRealpath = await realpath(repoRoot);
+  const srcRealpath = await realpath(path.join(repoRoot, "src"));
+  const insideLinkRealpath = await realpath(path.join(repoRoot, "inside-link"));
+
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "src/new-file.js"), {
+    ok: true,
+    parentRealpath: srcRealpath,
+  });
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "new-file.js"), {
+    ok: true,
+    parentRealpath: repoRootRealpath,
+  });
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "inside-link/new-file.js"), {
+    ok: true,
+    parentRealpath: insideLinkRealpath,
+  });
+});
+
+test("repo file parent containment rejects symlink parent escapes outside repository root", async () => {
+  const { repoRoot, outsideRoot } = await createContainmentWorkspace();
+  await symlink(outsideRoot, path.join(repoRoot, "outside-link"));
+
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "outside-link/new-file.js"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("repo file parent containment rejects repo-sibling prefix escapes", async () => {
+  const baseRoot = await mkdtemp(path.join(tmpdir(), "pi-file-parent-containment-"));
+  const repoRoot = path.join(baseRoot, "repo");
+  const siblingRoot = path.join(baseRoot, "repo-sibling");
+  await mkdirp(repoRoot);
+  await mkdirp(siblingRoot);
+  await symlink(siblingRoot, path.join(repoRoot, "sibling-link"));
+
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "sibling-link/new-file.js"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("repo file parent containment returns stable failures for invalid repository roots", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  const fileRoot = path.join(repoRoot, "root-file.txt");
+  await writeFile(fileRoot, "not a directory");
+
+  const invalidRoots = [null, "", "   ", "relative/repo"];
+  for (const repositoryRoot of invalidRoots) {
+    assert.doesNotThrow(() => checkRepoFileParentContainment(repositoryRoot, "src/file.txt"));
+    assert.deepEqual(checkRepoFileParentContainment(repositoryRoot, "src/file.txt"), {
+      ok: false,
+      reason: "invalid_repository_root",
+    });
+  }
+
+  assert.deepEqual(checkRepoFileParentContainment(path.join(repoRoot, "missing"), "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+  assert.deepEqual(checkRepoFileParentContainment(fileRoot, "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+});
+
+test("repo file parent containment returns stable failures for invalid repo-relative file paths", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  const invalidPaths = [
+    null,
+    "./src/file.js",
+    "src//file.js",
+    "src/../file.js",
+    "/tmp/outside",
+    "src\\file.js",
+    "src/http:example",
+    "src/",
+  ];
+
+  for (const repoRelativePath of invalidPaths) {
+    assert.doesNotThrow(() => checkRepoFileParentContainment(repoRoot, repoRelativePath));
+    assert.deepEqual(checkRepoFileParentContainment(repoRoot, repoRelativePath), {
+      ok: false,
+      reason: "invalid_repo_path",
+    });
+  }
+});
+
+test("repo file parent containment returns parent_unavailable for missing or non-directory parents", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await writeFile(path.join(repoRoot, "parent-file"), "not a directory");
+
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "missing/new-file.js"), {
+    ok: false,
+    reason: "parent_unavailable",
+  });
+  assert.deepEqual(checkRepoFileParentContainment(repoRoot, "parent-file/new-file.js"), {
+    ok: false,
+    reason: "parent_unavailable",
   });
 });
 

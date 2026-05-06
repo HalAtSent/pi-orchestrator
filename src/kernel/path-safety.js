@@ -200,6 +200,45 @@ export function checkExistingRepoPathContainment(repositoryRoot, repoRelativePat
   return reject("outside_repository");
 }
 
+export function checkRepoFileParentContainment(repositoryRoot, repoRelativePath) {
+  if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "" || !path.isAbsolute(repositoryRoot)) {
+    return reject("invalid_repository_root");
+  }
+
+  const repositoryRootRealpath = realpathOrNull(repositoryRoot);
+  if (repositoryRootRealpath === null || !isDirectory(repositoryRootRealpath)) {
+    return reject("repository_root_unavailable");
+  }
+
+  const normalizedRepoPath = normalizeRepoRelativePath(repoRelativePath);
+  if (
+    normalizedRepoPath.ok !== true ||
+    normalizedRepoPath.path !== repoRelativePath ||
+    repoRelativePath.endsWith("/")
+  ) {
+    return reject("invalid_repo_path");
+  }
+
+  const parentRepoPath = path.dirname(repoRelativePath);
+  const parentPath =
+    parentRepoPath === "." ? repositoryRootRealpath : path.join(repositoryRootRealpath, parentRepoPath);
+  if (!isDirectory(parentPath)) {
+    return reject("parent_unavailable");
+  }
+
+  const parentRealpath = realpathOrNull(parentPath);
+  if (parentRealpath === null || !isDirectory(parentRealpath)) {
+    return reject("parent_unavailable");
+  }
+
+  const relativePath = path.relative(repositoryRootRealpath, parentRealpath);
+  if (relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))) {
+    return { ok: true, parentRealpath };
+  }
+
+  return reject("outside_repository");
+}
+
 function reject(reason) {
   return { ok: false, reason };
 }
