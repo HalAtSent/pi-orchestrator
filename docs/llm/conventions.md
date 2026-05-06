@@ -78,15 +78,19 @@ Classification: `repo-confirmed` for implemented files/tests,
   fixtures, fingerprint primitive, approval bindings, lexical path
   normalization, write-scope lexical validation, and protected-path detection
   for Work Order write allowlists.
-- Work Order validation also applies limited lexical forbidden-over-allowed
-  checks for `scope.allowed` and `scope.allowedNewFiles`.
+- Work Order validation also applies limited lexical and existing-path realpath
+  forbidden-over-allowed checks for `scope.allowed`, plus lexical
+  forbidden-over-allowed checks for `scope.allowedNewFiles`.
+- Work Order validation checks existing `scope.allowed` entries and allowed or
+  listed `scope.allowedNewFiles` parents for repository-root containment.
 - Protected-path rejection is limited to `scope.allowed` and
   `scope.allowedNewFiles`; it is not full scope authorization or runtime worker
   write enforcement.
-- Full scope authorization, root containment, symlink/realpath checks,
-  Evidence Pack validation, artifact store, run journal, worker execution,
-  repair loops, model-backed workers, templates, and `/build` remain future
-  work unless a current Work Order explicitly implements them.
+- Full runtime scope authorization, observed worker path enforcement,
+  case-ambiguity handling, Evidence Pack validation, artifact store, run
+  journal, worker execution, repair loops, model-backed workers, templates, and
+  `/build` remain future work unless a current Work Order explicitly implements
+  them.
 
 ## Uncommitted Changes
 

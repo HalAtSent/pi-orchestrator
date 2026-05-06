@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-06
 authority_sources:
   - ../../AGENTS.md
   - ../../package.json
@@ -37,9 +37,9 @@ Classification: `repo-confirmed`.
 
 | Surface | Focused command | Covers |
 | --- | --- | --- |
-| Work Order validator | `node --test test/work-order-schema.test.js` | Result shape, schema fields, executable derivation, summary copy, approval bindings, write-scope path validation. |
+| Work Order validator | `node --test test/work-order-schema.test.js` | Result shape, schema fields, executable derivation, summary copy, approval bindings, write-scope lexical validation, and limited repository-root containment. |
 | Fingerprint primitive | `node --test test/work-order-fingerprint.test.js` | Canonical JSON, action-class set canonicalization, volatile approval fields, undeclared `extensions`, `__proto__`, integer-like keys, fingerprint format. |
-| Path safety primitive | `node --test test/path-safety.test.js` | Lexical repo-relative normalization, protected-path detection, and normalized path coverage primitives. |
+| Path safety primitive | `node --test test/path-safety.test.js` | Lexical repo-relative normalization, protected-path detection, normalized path coverage, existing-path realpath containment, realpath coverage, and new-file parent containment primitives. |
 | CLI wrapper | `node --test test/work-order-cli.test.js` | `pi validate-work-order`, JSON stdout, exit codes, large piped output flush. |
 | Work Order fixtures | `node --test test/work-order-fixtures.test.js` | Valid lifecycle fixtures plus missing-context and unknown-policy negative fixtures. |
 

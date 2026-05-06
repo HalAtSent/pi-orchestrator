@@ -37,15 +37,17 @@ Classification: `repo-confirmed`.
   - Exports `validateWorkOrder(workOrder)`.
   - Implements current Work Order schema validation, result shape, executable
     derivation, summary copy, approval action-class binding, approval
-    fingerprint binding, write-scope lexical path validation, and protected
-    path rejection for `scope.allowed` and `scope.allowedNewFiles`.
+    fingerprint binding, write-scope lexical path validation, limited
+    repository-root realpath containment, and protected path rejection for
+    `scope.allowed` and `scope.allowedNewFiles`.
   - Applies lexical forbidden-over-allowed coverage for `scope.allowed` and
-    `scope.allowedNewFiles`; this is validator behavior, not runtime worker
-    path enforcement.
+    `scope.allowedNewFiles`, plus realpath forbidden-over-allowed coverage for
+    existing `scope.allowed` paths; this is validator behavior, not runtime
+    worker path enforcement.
   - Does not implement Evidence Pack validation, worker execution, artifact
     persistence, run journals, runtime protected-path write enforcement, full
-    scope authorization, root containment, symlink/realpath checks, or
-    normalized artifact persistence.
+    scope authorization, runtime observed-path enforcement, or normalized
+    artifact persistence.
 - `src/kernel/work-order-fingerprint.js`
   - Exports `canonicalJson(value)` and `fingerprintWorkOrder(workOrder)`.
   - Canonical JSON sorts object keys lexicographically, preserves own
@@ -58,7 +60,9 @@ Classification: `repo-confirmed`.
   - Exports `normalizeRepoRelativePath(pathValue)`.
   - Exports `isProtectedRepoPath(pathValue)`.
   - Exports `repoPathCovers(scopePath, candidatePath)`.
-  - Path primitives are lexical and do not inspect the filesystem.
+  - Exports filesystem-backed containment helpers for existing repo paths,
+    realpath coverage, and new-file parent containment.
+  - Keep lexical helpers and filesystem-backed containment helpers distinct.
 - `src/cli/pi.js`
   - Implements `pi validate-work-order <file>`.
   - Prints machine-readable JSON to stdout and uses validator success for exit

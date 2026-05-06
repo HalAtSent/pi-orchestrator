@@ -75,8 +75,12 @@ Classification: `repo-confirmed`.
   checks so drive forms use `absolute_path`.
 - URL-like and drive-qualified forms must be rejected even after leading `./`
   removal and when embedded as path segments.
-- Path primitives are lexical only. Do not add filesystem checks, full scope
-  authorization, runtime write enforcement, or broader validator coupling
+- Keep lexical helpers and filesystem-backed containment helpers separate.
+  `normalizeRepoRelativePath()` and `repoPathCovers()` are lexical;
+  existing-path containment, realpath coverage, and new-file parent containment
+  inspect the filesystem.
+- Do not widen the limited validator containment checks into full scope
+  authorization, runtime write enforcement, or observed worker path enforcement
   unless the Work Order names that single invariant.
 - Use `repoPathCovers()` for lexical scope-path coverage instead of ad hoc
   prefix checks. It requires normalized inputs, and only trailing-slash scope
@@ -91,6 +95,10 @@ Classification: `repo-confirmed`.
   For `scope.newFiles: "allowed"` or `"listed_only"`, valid forbidden files or
   directories still block covered listed new-file entries. This is lexical
   validator coverage only, not runtime worker path enforcement.
+- Do not describe all root-containment or symlink/realpath behavior as either
+  absent or complete. Current validator checks cover existing `scope.allowed`
+  containment, existing-path realpath forbidden coverage, and
+  `scope.allowedNewFiles` parent containment in the allowed/listed-only paths.
 
 ## Backlog As Defect
 

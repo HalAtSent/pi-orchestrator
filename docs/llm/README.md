@@ -103,14 +103,21 @@ Classification: `repo-confirmed` from current source and tests.
   the validator result as JSON.
 - Canonical JSON and Work Order fingerprint primitives exist in
   `src/kernel/work-order-fingerprint.js`.
-- Lexical path normalization, protected-path detection, and normalized path
-  coverage primitives exist in `src/kernel/path-safety.js`.
+- Lexical path normalization, protected-path detection, normalized path
+  coverage, existing-path realpath containment, realpath coverage, and
+  new-file parent containment primitives exist in `src/kernel/path-safety.js`.
 - Work Order validation rejects protected paths in `scope.allowed` and
   `scope.allowedNewFiles`; `scope.forbidden` may still list protected paths as
   denial metadata.
 - Work Order validation rejects `scope.allowed` entries covered by valid
-  `scope.forbidden` entries. An allowed parent may still contain a forbidden
-  child. This is lexical validator coverage only.
+  `scope.forbidden` entries, lexically and for existing paths by realpath. An
+  allowed parent may still contain a forbidden child. This is validator
+  behavior, not runtime worker path enforcement.
+- Work Order validation rejects existing `scope.allowed` symlink/realpath
+  escapes and rejects `scope.allowedNewFiles` entries whose existing parent is
+  unavailable or escapes `repositoryRoot` when new-file policy allows them.
+  Missing `scope.allowed` targets still pass under an available `repositoryRoot`
+  unless an existing path prefix escapes.
 - Valid lifecycle fixtures and two negative Work Order fixtures exist under
   `test/fixtures/work-orders/`.
 
@@ -118,6 +125,6 @@ Classification: `documented-target`.
 
 - Evidence Pack validation, artifact store, run journal, worker execution,
   repair loops, model-backed workers, `/build`, full scope authorization,
-  runtime protected-path write enforcement, root containment, symlink/realpath
-  checks, and observed worker path enforcement remain target/backlog behavior
-  unless current code and tests say otherwise.
+  runtime protected-path write enforcement, case-ambiguity handling, runtime
+  worker root-containment checks, and observed worker path enforcement remain
+  target/backlog behavior unless current code and tests say otherwise.
