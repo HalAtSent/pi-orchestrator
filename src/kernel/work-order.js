@@ -239,7 +239,10 @@ class WorkOrderValidator {
           writeScope: true,
         });
         if (allowedPathValid) {
-          allowedCoverageCandidates.push(normalizeRepoRelativePath(allowedPath).path);
+          allowedCoverageCandidates.push({
+            index,
+            path: normalizeRepoRelativePath(allowedPath).path,
+          });
         }
       }
     }
@@ -255,6 +258,21 @@ class WorkOrderValidator {
         if (forbiddenPathValid) {
           forbiddenCoverageCandidates.push(normalizeRepoRelativePath(forbiddenPath).path);
         }
+      }
+    }
+
+    for (const allowedPath of allowedCoverageCandidates) {
+      const forbiddenCovered = forbiddenCoverageCandidates.some((forbiddenPath) => {
+        const coverage = repoPathCovers(forbiddenPath, allowedPath.path);
+        return coverage.ok && coverage.covered;
+      });
+
+      if (forbiddenCovered) {
+        this.addError(
+          `$.scope.allowed[${allowedPath.index}]`,
+          "invalid_path",
+          "scope.allowed entries must not be inside declared forbidden write scope.",
+        );
       }
     }
 
@@ -292,7 +310,7 @@ class WorkOrderValidator {
         if (scope.newFiles !== "forbidden") {
           const normalizedNewFilePath = normalizeRepoRelativePath(currentPath).path;
           const covered = allowedCoverageCandidates.some((allowedPath) => {
-            const coverage = repoPathCovers(allowedPath, normalizedNewFilePath);
+            const coverage = repoPathCovers(allowedPath.path, normalizedNewFilePath);
             return coverage.ok && coverage.covered;
           });
 

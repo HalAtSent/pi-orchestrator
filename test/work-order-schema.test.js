@@ -598,6 +598,125 @@ test("protected paths in scope.forbidden remain valid denial metadata", () => {
   assert.deepEqual(workOrder.scope.forbidden, [".git/", "./.pi/runs/", "packages/app/node_modules/lib.js", "src/.env.local"]);
 });
 
+test("scope.allowed entries fail when covered by valid forbidden write scope", () => {
+  const cases = [
+    {
+      name: "matching directory denial blocks allowed directory",
+      allowed: ["src/kernel/"],
+      forbidden: ["src/kernel/"],
+    },
+    {
+      name: "matching file denial blocks allowed file",
+      allowed: ["src/kernel/work-order.js"],
+      forbidden: ["src/kernel/work-order.js"],
+    },
+    {
+      name: "forbidden directory blocks allowed child file",
+      allowed: ["src/kernel/work-order.js"],
+      forbidden: ["src/kernel/"],
+    },
+    {
+      name: "forbidden parent directory blocks allowed child directory",
+      allowed: ["src/private/"],
+      forbidden: ["src/"],
+    },
+  ];
+
+  for (const { name, allowed, forbidden } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [...forbidden];
+    workOrder.scope.newFiles = "forbidden";
+    workOrder.scope.allowedNewFiles = [];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowed[0]", "invalid_path");
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.forbidden, forbidden, name);
+  }
+});
+
+test("scope.allowed forbidden coverage is segment bounded and one way", () => {
+  const cases = [
+    {
+      name: "similarly prefixed forbidden directory does not block sibling segment",
+      allowed: ["src/"],
+      forbidden: ["src2/"],
+    },
+    {
+      name: "different forbidden file does not block sibling allowed file",
+      allowed: ["src/kernel/work-order.js"],
+      forbidden: ["src/kernel/other-file.js"],
+    },
+    {
+      name: "allowed parent may contain forbidden child",
+      allowed: ["src/"],
+      forbidden: ["src/private/"],
+    },
+  ];
+
+  for (const { name, allowed, forbidden } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [...forbidden];
+    workOrder.scope.newFiles = "forbidden";
+    workOrder.scope.allowedNewFiles = [];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, true, name);
+    assert.deepEqual(result.errors, [], name);
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.forbidden, forbidden, name);
+  }
+});
+
+test("scope.allowed forbidden coverage ignores invalid forbidden write-scope entries", () => {
+  const workOrder = validWorkOrder();
+  workOrder.scope.allowed = ["src/kernel/"];
+  workOrder.scope.forbidden = ["src\\kernel\\"];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.forbidden[0]", "invalid_path");
+  assert.equal(
+    result.errors.some((error) => error.path === "$.scope.allowed[0]"),
+    false,
+    JSON.stringify(result.errors, null, 2),
+  );
+});
+
+test("scope.allowed forbidden coverage skips entries with existing path failures", () => {
+  const cases = [
+    {
+      name: "protected allowed path only reports existing protected-path error",
+      allowed: "dist/",
+    },
+    {
+      name: "invalid lexical allowed path only reports existing lexical error",
+      allowed: "src\\kernel\\",
+    },
+  ];
+
+  for (const { name, allowed } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.scope.allowed = [allowed];
+    workOrder.scope.forbidden = [allowed];
+
+    const result = validateWorkOrder(workOrder);
+    const pathErrors = result.errors.filter((error) => error.path === "$.scope.allowed[0]");
+
+    assert.equal(result.success, false, name);
+    assert.equal(pathErrors.length, 1, `${name}: ${JSON.stringify(result.errors, null, 2)}`);
+    assert.equal(pathErrors[0].code, "invalid_path", name);
+    assert.equal(workOrder.scope.allowed[0], allowed, name);
+    assert.equal(workOrder.scope.forbidden[0], allowed, name);
+  }
+});
+
 test("unsafe write-scope path forms fail with invalid_path at the write-scope field", () => {
   const cases = [
     ["nested url-like allowed path", (workOrder) => (workOrder.scope.allowed[0] = "src/http:example"), "$.scope.allowed[0]"],
@@ -882,7 +1001,7 @@ test("allowedNewFiles forbidden coverage ignores invalid forbidden write-scope e
 test("allowedNewFiles forbidden coverage is skipped when new files are forbidden", () => {
   const workOrder = validWorkOrder();
   workOrder.scope.allowed = ["src/kernel/"];
-  workOrder.scope.forbidden = ["src/kernel/"];
+  workOrder.scope.forbidden = ["src/private/"];
   workOrder.scope.newFiles = "forbidden";
   workOrder.scope.allowedNewFiles = ["src/kernel/new-file.js", "test/new-file.js"];
 
@@ -891,7 +1010,7 @@ test("allowedNewFiles forbidden coverage is skipped when new files are forbidden
   assert.equal(result.success, true);
   assert.deepEqual(result.errors, []);
   assert.deepEqual(workOrder.scope.allowed, ["src/kernel/"]);
-  assert.deepEqual(workOrder.scope.forbidden, ["src/kernel/"]);
+  assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
   assert.equal(workOrder.scope.newFiles, "forbidden");
   assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/kernel/new-file.js", "test/new-file.js"]);
 });
