@@ -1,3 +1,6 @@
+import { realpathSync, statSync } from "node:fs";
+import path from "node:path";
+
 const INVALID_TYPE = "invalid_type";
 const EMPTY_PATH = "empty_path";
 const ABSOLUTE_PATH = "absolute_path";
@@ -169,6 +172,34 @@ export function repoPathCovers(scopePath, candidatePath) {
   return { ok: true, covered: false };
 }
 
+export function checkExistingRepoPathContainment(repositoryRoot, repoRelativePath) {
+  if (typeof repositoryRoot !== "string" || repositoryRoot.trim() === "" || !path.isAbsolute(repositoryRoot)) {
+    return reject("invalid_repository_root");
+  }
+
+  const repositoryRootRealpath = realpathOrNull(repositoryRoot);
+  if (repositoryRootRealpath === null || !isDirectory(repositoryRootRealpath)) {
+    return reject("repository_root_unavailable");
+  }
+
+  const normalizedRepoPath = normalizeRepoRelativePath(repoRelativePath);
+  if (normalizedRepoPath.ok !== true || normalizedRepoPath.path !== repoRelativePath) {
+    return reject("invalid_repo_path");
+  }
+
+  const targetRealpath = realpathOrNull(path.join(repositoryRootRealpath, repoRelativePath));
+  if (targetRealpath === null) {
+    return reject("missing_path");
+  }
+
+  const relativePath = path.relative(repositoryRootRealpath, targetRealpath);
+  if (relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))) {
+    return { ok: true, realpath: targetRealpath };
+  }
+
+  return reject("outside_repository");
+}
+
 function reject(reason) {
   return { ok: false, reason };
 }
@@ -189,4 +220,20 @@ function hasProtectedSegmentPair(segments) {
         segment.toLowerCase() === parentSegment && segments[index + 1]?.toLowerCase() === childSegment,
     ),
   );
+}
+
+function realpathOrNull(pathValue) {
+  try {
+    return realpathSync(pathValue);
+  } catch {
+    return null;
+  }
+}
+
+function isDirectory(pathValue) {
+  try {
+    return statSync(pathValue).isDirectory();
+  } catch {
+    return false;
+  }
 }

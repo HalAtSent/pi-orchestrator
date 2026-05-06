@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { isProtectedRepoPath, normalizeRepoRelativePath, repoPathCovers } from "../src/kernel/path-safety.js";
+import {
+  checkExistingRepoPathContainment,
+  isProtectedRepoPath,
+  normalizeRepoRelativePath,
+  repoPathCovers,
+} from "../src/kernel/path-safety.js";
 
 test("repo-relative path normalization accepts safe lexical forms", () => {
   const cases = [
@@ -240,3 +248,111 @@ test("repo path coverage rejects invalid or unnormalized inputs without throwing
     assert.deepEqual(repoPathCovers("src/", pathValue), { ok: false, reason: "invalid_input" });
   }
 });
+
+test("existing repo path containment accepts existing normalized targets inside repository root", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await writeFile(path.join(repoRoot, "src", "file.txt"), "inside");
+  await symlink("src/file.txt", path.join(repoRoot, "inside-link.txt"));
+
+  const fileRealpath = await realpath(path.join(repoRoot, "src", "file.txt"));
+  const directoryRealpath = await realpath(path.join(repoRoot, "src"));
+  const symlinkRealpath = await realpath(path.join(repoRoot, "inside-link.txt"));
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src/file.txt"), {
+    ok: true,
+    realpath: fileRealpath,
+  });
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src"), {
+    ok: true,
+    realpath: directoryRealpath,
+  });
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "inside-link.txt"), {
+    ok: true,
+    realpath: symlinkRealpath,
+  });
+});
+
+test("existing repo path containment rejects symlink realpath escapes outside repository root", async () => {
+  const { repoRoot, outsideRoot } = await createContainmentWorkspace();
+  await writeFile(path.join(outsideRoot, "outside.txt"), "outside");
+  await symlink(path.join(outsideRoot, "outside.txt"), path.join(repoRoot, "outside-link.txt"));
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "outside-link.txt"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("existing repo path containment rejects repo-sibling prefix escapes", async () => {
+  const baseRoot = await mkdtemp(path.join(tmpdir(), "pi-path-containment-"));
+  const repoRoot = path.join(baseRoot, "repo");
+  const siblingRoot = path.join(baseRoot, "repo-sibling");
+  await mkdirp(path.join(repoRoot, "links"));
+  await mkdirp(siblingRoot);
+  await writeFile(path.join(siblingRoot, "outside.txt"), "outside");
+  await symlink(path.join(siblingRoot, "outside.txt"), path.join(repoRoot, "links", "sibling.txt"));
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "links/sibling.txt"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("existing repo path containment returns stable failures for invalid repository roots", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  const fileRoot = path.join(repoRoot, "root-file.txt");
+  await writeFile(fileRoot, "not a directory");
+
+  const invalidRoots = [null, "", "   ", "relative/repo"];
+  for (const repositoryRoot of invalidRoots) {
+    assert.doesNotThrow(() => checkExistingRepoPathContainment(repositoryRoot, "src/file.txt"));
+    assert.deepEqual(checkExistingRepoPathContainment(repositoryRoot, "src/file.txt"), {
+      ok: false,
+      reason: "invalid_repository_root",
+    });
+  }
+
+  assert.deepEqual(checkExistingRepoPathContainment(path.join(repoRoot, "missing"), "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+  assert.deepEqual(checkExistingRepoPathContainment(fileRoot, "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+});
+
+test("existing repo path containment returns stable failures for invalid repo-relative paths", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  const invalidPaths = [null, "./src", "src//file", "src/../file", "/tmp/outside", "src\\file", "src/http:example"];
+
+  for (const repoRelativePath of invalidPaths) {
+    assert.doesNotThrow(() => checkExistingRepoPathContainment(repoRoot, repoRelativePath));
+    assert.deepEqual(checkExistingRepoPathContainment(repoRoot, repoRelativePath), {
+      ok: false,
+      reason: "invalid_repo_path",
+    });
+  }
+});
+
+test("existing repo path containment returns missing_path for normalized target misses", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src/missing.txt"), {
+    ok: false,
+    reason: "missing_path",
+  });
+});
+
+async function createContainmentWorkspace() {
+  const baseRoot = await mkdtemp(path.join(tmpdir(), "pi-path-containment-"));
+  const repoRoot = path.join(baseRoot, "repo");
+  const outsideRoot = path.join(baseRoot, "outside");
+  await mkdirp(path.join(repoRoot, "src"));
+  await mkdirp(outsideRoot);
+  return { repoRoot, outsideRoot };
+}
+
+async function mkdirp(pathValue) {
+  await mkdir(pathValue, { recursive: true });
+}
