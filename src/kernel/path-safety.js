@@ -1,4 +1,4 @@
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 const INVALID_TYPE = "invalid_type";
@@ -189,6 +189,11 @@ export function checkExistingRepoPathContainment(repositoryRoot, repoRelativePat
 
   const targetRealpath = realpathOrNull(path.join(repositoryRootRealpath, repoRelativePath));
   if (targetRealpath === null) {
+    const prefixContainment = checkExistingPathPrefixContainment(repositoryRootRealpath, repoRelativePath);
+    if (prefixContainment.ok === false) {
+      return prefixContainment;
+    }
+
     return reject("missing_path");
   }
 
@@ -198,6 +203,56 @@ export function checkExistingRepoPathContainment(repositoryRoot, repoRelativePat
   }
 
   return reject("outside_repository");
+}
+
+export function repoRealpathCovers(repositoryRoot, scopePath, candidatePath) {
+  const scopeContainment = checkExistingRepoPathContainment(repositoryRoot, scopePath);
+  if (scopeContainment.ok === false) {
+    return scopeContainment;
+  }
+
+  const candidateContainment = checkExistingRepoPathContainment(repositoryRoot, candidatePath);
+  if (candidateContainment.ok === false) {
+    return candidateContainment;
+  }
+
+  if (scopeContainment.realpath === candidateContainment.realpath) {
+    return { ok: true, covered: true, relation: "exact" };
+  }
+
+  if (!scopePath.endsWith("/")) {
+    return { ok: true, covered: false };
+  }
+
+  const relativePath = path.relative(scopeContainment.realpath, candidateContainment.realpath);
+  if (relativePath !== "" && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
+    return { ok: true, covered: true, relation: "descendant" };
+  }
+
+  return { ok: true, covered: false };
+}
+
+function checkExistingPathPrefixContainment(repositoryRootRealpath, repoRelativePath) {
+  const segments = repoRelativePath.split("/").filter(Boolean);
+  for (let index = 0; index < segments.length; index += 1) {
+    const currentPath = path.join(repositoryRootRealpath, ...segments.slice(0, index + 1));
+    const currentLstat = lstatOrNull(currentPath);
+    if (currentLstat === null) {
+      return { ok: true };
+    }
+
+    const currentRealpath = realpathOrNull(currentPath);
+    if (currentRealpath === null) {
+      return reject("outside_repository");
+    }
+
+    const relativePath = path.relative(repositoryRootRealpath, currentRealpath);
+    if (relativePath !== "" && (relativePath.startsWith("..") || path.isAbsolute(relativePath))) {
+      return reject("outside_repository");
+    }
+  }
+
+  return { ok: true };
 }
 
 export function checkRepoFileParentContainment(repositoryRoot, repoRelativePath) {
@@ -264,6 +319,14 @@ function hasProtectedSegmentPair(segments) {
 function realpathOrNull(pathValue) {
   try {
     return realpathSync(pathValue);
+  } catch {
+    return null;
+  }
+}
+
+function lstatOrNull(pathValue) {
+  try {
+    return lstatSync(pathValue);
   } catch {
     return null;
   }

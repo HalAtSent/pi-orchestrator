@@ -1,6 +1,14 @@
+import { statSync } from "node:fs";
 import path from "node:path";
 
-import { isProtectedRepoPath, normalizeRepoRelativePath, repoPathCovers } from "./path-safety.js";
+import {
+  checkExistingRepoPathContainment,
+  checkRepoFileParentContainment,
+  isProtectedRepoPath,
+  normalizeRepoRelativePath,
+  repoPathCovers,
+  repoRealpathCovers,
+} from "./path-safety.js";
 import { fingerprintWorkOrder } from "./work-order-fingerprint.js";
 
 const SUPPORTED_SCHEMA_VERSION = 1;
@@ -78,6 +86,14 @@ function isRawDirectoryAlias(pathValue) {
   return typeof pathValue === "string" && (pathValue.endsWith("/") || pathValue.split("/").at(-1) === ".");
 }
 
+function isExistingDirectoryTarget(repositoryRoot, repoRelativePath) {
+  try {
+    return statSync(path.join(repositoryRoot, repoRelativePath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 class WorkOrderValidator {
   constructor() {
     this.errors = [];
@@ -101,7 +117,7 @@ class WorkOrderValidator {
     this.validatePolicyProfile(workOrder.policyProfile);
     this.validateReadiness(workOrder.readiness);
     this.validateChange(workOrder.change);
-    this.validateScope(workOrder.scope);
+    this.validateScope(workOrder.scope, workOrder.repositoryRoot);
     this.validateContext(workOrder.context);
     this.validateAcceptance(workOrder.acceptance);
     this.validateVerification(workOrder.verification);
@@ -224,7 +240,7 @@ class WorkOrderValidator {
     this.requireBoolean(patchBudget.incidentalRefactors, "$.change.patchBudget.incidentalRefactors");
   }
 
-  validateScope(scope) {
+  validateScope(scope, repositoryRoot) {
     if (!this.requirePlainObject(scope, "$.scope")) {
       return;
     }
@@ -273,6 +289,58 @@ class WorkOrderValidator {
           "invalid_path",
           "scope.allowed entries must not be inside declared forbidden write scope.",
         );
+        allowedPath.realpathEligible = false;
+      }
+    }
+
+    for (const allowedPath of allowedCoverageCandidates) {
+      if (allowedPath.realpathEligible === false) {
+        continue;
+      }
+
+      const forbiddenRealpathCovered = forbiddenCoverageCandidates.some((forbiddenPath) => {
+        const coverage = repoRealpathCovers(repositoryRoot, forbiddenPath, allowedPath.path);
+        return coverage.ok && coverage.covered;
+      });
+
+      if (forbiddenRealpathCovered) {
+        this.addError(
+          `$.scope.allowed[${allowedPath.index}]`,
+          "invalid_path",
+          "scope.allowed entries must not be inside declared forbidden write scope.",
+        );
+        allowedPath.realpathEligible = false;
+      }
+    }
+
+    let repositoryRootContainmentErrorAdded = this.errors.some(
+      (error) => error.path === "$.repositoryRoot" && error.code === "invalid_path",
+    );
+    for (const allowedPath of allowedCoverageCandidates) {
+      if (allowedPath.realpathEligible === false) {
+        continue;
+      }
+
+      const containment = checkExistingRepoPathContainment(repositoryRoot, allowedPath.path);
+      if (containment.ok === false && containment.reason === "outside_repository") {
+        this.addError(
+          `$.scope.allowed[${allowedPath.index}]`,
+          "invalid_path",
+          "scope.allowed entries must stay inside repositoryRoot after realpath resolution.",
+        );
+      }
+      if (
+        containment.ok === false &&
+        (containment.reason === "invalid_repository_root" ||
+          containment.reason === "repository_root_unavailable") &&
+        !repositoryRootContainmentErrorAdded
+      ) {
+        this.addError(
+          "$.repositoryRoot",
+          "invalid_path",
+          "repositoryRoot must be an available directory for scope.allowed realpath containment.",
+        );
+        repositoryRootContainmentErrorAdded = true;
       }
     }
 
@@ -309,6 +377,15 @@ class WorkOrderValidator {
 
         if (scope.newFiles !== "forbidden") {
           const normalizedNewFilePath = normalizeRepoRelativePath(currentPath).path;
+          if (scope.newFiles === "listed_only" && isExistingDirectoryTarget(repositoryRoot, normalizedNewFilePath)) {
+            this.addError(
+              currentFieldPath,
+              "invalid_path",
+              "allowedNewFiles entries must be exact file paths, not directories.",
+            );
+            continue;
+          }
+
           const covered = allowedCoverageCandidates.some((allowedPath) => {
             const coverage = repoPathCovers(allowedPath.path, normalizedNewFilePath);
             return coverage.ok && coverage.covered;
@@ -333,6 +410,38 @@ class WorkOrderValidator {
               currentFieldPath,
               "invalid_path",
               "allowedNewFiles entries must not be inside declared forbidden write scope.",
+            );
+            continue;
+          }
+
+          const normalizedParentPath = path.posix.dirname(normalizedNewFilePath);
+          const forbiddenParentRealpathCovered =
+            normalizedParentPath !== "." &&
+            forbiddenCoverageCandidates.some((forbiddenPath) => {
+              const coverage = repoRealpathCovers(repositoryRoot, forbiddenPath, normalizedParentPath);
+              return coverage.ok && coverage.covered;
+            });
+
+          if (forbiddenParentRealpathCovered) {
+            this.addError(
+              currentFieldPath,
+              "invalid_path",
+              "allowedNewFiles entries must not be inside declared forbidden write scope.",
+            );
+            continue;
+          }
+
+          const parentContainment = checkRepoFileParentContainment(repositoryRoot, normalizedNewFilePath);
+          if (
+            parentContainment.ok === false &&
+            (parentContainment.reason === "outside_repository" ||
+              parentContainment.reason === "parent_unavailable" ||
+              parentContainment.reason === "repository_root_unavailable")
+          ) {
+            this.addError(
+              currentFieldPath,
+              "invalid_path",
+              "allowedNewFiles entries must have an available parent inside repositoryRoot.",
             );
           }
         }

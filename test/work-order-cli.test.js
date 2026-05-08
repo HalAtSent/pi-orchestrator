@@ -8,6 +8,7 @@ import test from "node:test";
 import { validateWorkOrder } from "../src/kernel/work-order.js";
 
 const cliPath = path.resolve("src/cli/pi.js");
+const repositoryRoot = path.resolve(".");
 
 test("validate-work-order prints validator JSON and exits 0 for a valid Work Order", async () => {
   await withTempWorkOrder(validWorkOrder(), async ({ filePath, workOrder }) => {
@@ -122,7 +123,7 @@ function validWorkOrder() {
     state: "active",
     id: "wo-cli-validation",
     goal: "Validate a Work Order through the CLI wrapper.",
-    repositoryRoot: "/absolute/path/to/pi-orchestrator",
+    repositoryRoot,
     policyProfile: "default",
     readiness: {
       status: "ready",

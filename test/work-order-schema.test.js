@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
 
 import { fingerprintWorkOrder } from "../src/kernel/work-order-fingerprint.js";
@@ -673,6 +676,71 @@ test("scope.allowed forbidden coverage is segment bounded and one way", () => {
   }
 });
 
+test("scope.allowed entries fail when realpath covered by forbidden write scope", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+  writeFileSync(path.join(repositoryRoot, "src", "private", "file.txt"), "private");
+  symlinkSync(path.join(repositoryRoot, "src"), path.join(repositoryRoot, "alias"));
+  symlinkSync(
+    path.join(repositoryRoot, "src", "private", "file.txt"),
+    path.join(repositoryRoot, "file-alias.txt"),
+  );
+  symlinkSync(path.join(repositoryRoot, "src", "private"), path.join(repositoryRoot, "private-alias"));
+
+  const cases = [
+    {
+      name: "allowed symlink alias resolves into canonical forbidden directory",
+      allowed: ["alias/private/file.txt"],
+      forbidden: ["src/private/"],
+    },
+    {
+      name: "allowed symlink alias resolves to canonical forbidden exact file",
+      allowed: ["file-alias.txt"],
+      forbidden: ["src/private/file.txt"],
+    },
+    {
+      name: "forbidden symlink alias covers canonical allowed path",
+      allowed: ["src/private/file.txt"],
+      forbidden: ["private-alias/"],
+    },
+  ];
+
+  for (const { name, allowed, forbidden } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.repositoryRoot = repositoryRoot;
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [...forbidden];
+    workOrder.scope.newFiles = "forbidden";
+    workOrder.scope.allowedNewFiles = [];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowed[0]", "invalid_path");
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.forbidden, forbidden, name);
+  }
+});
+
+test("scope.allowed remains valid when canonical forbidden child does not realpath-cover allowed parent", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = ["src/"];
+  workOrder.scope.forbidden = ["src/private/"];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(workOrder.scope.allowed, ["src/"]);
+  assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
+});
+
 test("scope.allowed forbidden coverage ignores invalid forbidden write-scope entries", () => {
   const workOrder = validWorkOrder();
   workOrder.scope.allowed = ["src/kernel/"];
@@ -715,6 +783,188 @@ test("scope.allowed forbidden coverage skips entries with existing path failures
     assert.equal(workOrder.scope.allowed[0], allowed, name);
     assert.equal(workOrder.scope.forbidden[0], allowed, name);
   }
+});
+
+test("existing scope.allowed targets pass realpath containment without mutating submitted values", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src"));
+  writeFileSync(path.join(repositoryRoot, "src", "file.txt"), "contained");
+  symlinkSync(path.join(repositoryRoot, "src", "file.txt"), path.join(repositoryRoot, "src", "internal-link"));
+
+  const allowed = ["src/file.txt", "src/", "src/internal-link", "./src/./file.txt"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+});
+
+test("existing scope.allowed symlink escapes fail realpath containment at the allowed entry", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  const outsideRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-outside-"));
+  mkdirSync(path.join(repositoryRoot, "src"));
+  writeFileSync(path.join(outsideRoot, "file.txt"), "outside");
+  symlinkSync(outsideRoot, path.join(repositoryRoot, "escape-link"));
+
+  const allowed = ["escape-link", "./escape-link/file.txt"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowed[0]", "invalid_path");
+  assertError(result, "$.scope.allowed[1]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+});
+
+test("existing scope.allowed realpath containment is segment bounded for repo siblings", () => {
+  const parentRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-parent-"));
+  const repositoryRoot = path.join(parentRoot, "repo");
+  const siblingRoot = path.join(parentRoot, "repo-sibling");
+  mkdirSync(repositoryRoot);
+  mkdirSync(siblingRoot);
+  writeFileSync(path.join(siblingRoot, "file.txt"), "sibling");
+  symlinkSync(siblingRoot, path.join(repositoryRoot, "sibling-link"));
+
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = ["sibling-link/file.txt"];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowed[0]", "invalid_path");
+});
+
+test("scope.allowed realpath containment skips missing targets under available repository roots", () => {
+  const existingRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(existingRoot, "src"));
+  const allowed = ["src/missing.txt"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = existingRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true);
+  assert.equal(result.errors.filter((error) => error.path === "$.scope.allowed[0]").length, 0);
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+});
+
+test("scope.allowed realpath containment rejects broken symlink target misses", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src"));
+  symlinkSync("../outside/missing.txt", path.join(repositoryRoot, "src", "broken-link"));
+
+  const allowed = ["src/broken-link"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowed[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+});
+
+test("scope.allowed realpath containment rejects missing targets under symlink directory escapes", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  const outsideRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-outside-"));
+  symlinkSync(outsideRoot, path.join(repositoryRoot, "escape-link"));
+
+  const allowed = ["escape-link/new-file.js"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowed[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+});
+
+test("scope.allowed realpath containment fails closed for unavailable repository roots", () => {
+  const tempRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  const fileRoot = path.join(tempRoot, "repository-root-file");
+  writeFileSync(fileRoot, "not a directory");
+  const cases = [
+    {
+      name: "missing absolute repositoryRoot",
+      repositoryRoot: path.join(tempRoot, "missing-repo"),
+    },
+    {
+      name: "file-valued absolute repositoryRoot",
+      repositoryRoot: fileRoot,
+    },
+  ];
+
+  for (const { name, repositoryRoot } of cases) {
+    const allowed = ["src/missing.txt"];
+    const workOrder = validWorkOrder();
+    workOrder.repositoryRoot = repositoryRoot;
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [];
+    workOrder.scope.newFiles = "forbidden";
+    workOrder.scope.allowedNewFiles = [];
+
+    const result = validateWorkOrder(workOrder);
+    const allowedErrors = result.errors.filter((error) => error.path === "$.scope.allowed[0]");
+    const repositoryRootErrors = result.errors.filter((error) => error.path === "$.repositoryRoot");
+
+    assert.equal(result.success, false, name);
+    assert.equal(allowedErrors.length, 0, `${name}: ${JSON.stringify(result.errors, null, 2)}`);
+    assert.equal(repositoryRootErrors.length, 1, `${name}: ${JSON.stringify(result.errors, null, 2)}`);
+    assert.equal(repositoryRootErrors[0].code, "invalid_path", name);
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+  }
+});
+
+test("scope.allowed realpath containment skips entries already invalid from forbidden overlap", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  const outsideRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-outside-"));
+  writeFileSync(path.join(outsideRoot, "file.txt"), "outside");
+  symlinkSync(outsideRoot, path.join(repositoryRoot, "escape-link"));
+
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = ["escape-link/file.txt"];
+  workOrder.scope.forbidden = ["escape-link/"];
+  workOrder.scope.newFiles = "forbidden";
+  workOrder.scope.allowedNewFiles = [];
+
+  const result = validateWorkOrder(workOrder);
+  const pathErrors = result.errors.filter((error) => error.path === "$.scope.allowed[0]");
+
+  assert.equal(result.success, false);
+  assert.equal(pathErrors.length, 1, JSON.stringify(result.errors, null, 2));
+  assert.equal(pathErrors[0].code, "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, ["escape-link/file.txt"]);
 });
 
 test("unsafe write-scope path forms fail with invalid_path at the write-scope field", () => {
@@ -868,6 +1118,71 @@ test("listed_only allowedNewFiles containment still rejects outside write scope"
   assert.deepEqual(workOrder.scope.allowedNewFiles, ["test/new-file.js"]);
 });
 
+test("listed_only allowedNewFiles reject existing directory targets", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+
+  const allowed = ["src/"];
+  const allowedNewFiles = ["src/private"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "listed_only";
+  workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+  assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles);
+});
+
+test("listed_only allowedNewFiles reject symlinks that resolve to existing directories", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+  symlinkSync(path.join(repositoryRoot, "src", "private"), path.join(repositoryRoot, "src", "private-link"));
+
+  const allowed = ["src/"];
+  const allowedNewFiles = ["src/private-link"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "listed_only";
+  workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+  assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles);
+});
+
+test("listed_only allowedNewFiles keep exact existing and missing file paths valid", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+  writeFileSync(path.join(repositoryRoot, "src", "private", "existing.js"), "");
+
+  const allowed = ["src/"];
+  const allowedNewFiles = ["src/private/existing.js", "src/private/new-file.js"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "listed_only";
+  workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, true, JSON.stringify(result.errors, null, 2));
+  assert.deepEqual(result.errors, []);
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+  assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles);
+});
+
 test("allowed allowedNewFiles entries fail when covered by forbidden write scope", () => {
   const workOrder = validWorkOrder();
   workOrder.scope.allowed = ["src/"];
@@ -888,18 +1203,18 @@ test("allowed allowedNewFiles entries fail when covered by forbidden write scope
 test("allowed allowedNewFiles entries pass when inside allowed scope and outside forbidden scope", () => {
   const workOrder = validWorkOrder();
   workOrder.scope.allowed = ["src/"];
-  workOrder.scope.forbidden = ["src/private/"];
+  workOrder.scope.forbidden = ["src/cli/"];
   workOrder.scope.newFiles = "allowed";
-  workOrder.scope.allowedNewFiles = ["src/public/new-file.js"];
+  workOrder.scope.allowedNewFiles = ["src/kernel/new-file.js"];
 
   const result = validateWorkOrder(workOrder);
 
   assert.equal(result.success, true);
   assert.deepEqual(result.errors, []);
   assert.deepEqual(workOrder.scope.allowed, ["src/"]);
-  assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
+  assert.deepEqual(workOrder.scope.forbidden, ["src/cli/"]);
   assert.equal(workOrder.scope.newFiles, "allowed");
-  assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/public/new-file.js"]);
+  assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/kernel/new-file.js"]);
 });
 
 test("listed_only allowedNewFiles entries fail when covered by forbidden write scope", () => {
@@ -941,6 +1256,55 @@ test("listed_only allowedNewFiles entries fail when covered by forbidden write s
   }
 });
 
+test("allowedNewFiles entries fail when existing parent is covered by forbidden directory realpath", () => {
+  const cases = [
+    {
+      name: "listed_only mode",
+      newFiles: "listed_only",
+      expectSuccess: false,
+    },
+    {
+      name: "allowed mode",
+      newFiles: "allowed",
+      expectSuccess: false,
+    },
+    {
+      name: "forbidden mode",
+      newFiles: "forbidden",
+      expectSuccess: true,
+    },
+  ];
+
+  for (const { name, newFiles, expectSuccess } of cases) {
+    const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+    mkdirSync(path.join(repositoryRoot, "src", "private"), { recursive: true });
+    symlinkSync(path.join(repositoryRoot, "src", "private"), path.join(repositoryRoot, "private-alias"));
+
+    const allowed = ["src/"];
+    const forbidden = ["private-alias/"];
+    const allowedNewFiles = ["src/private/new-file.js"];
+    const workOrder = validWorkOrder();
+    workOrder.repositoryRoot = repositoryRoot;
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [...forbidden];
+    workOrder.scope.newFiles = newFiles;
+    workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, expectSuccess, name);
+    if (expectSuccess) {
+      assert.deepEqual(result.errors, [], name);
+    } else {
+      assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+    }
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.forbidden, forbidden, name);
+    assert.equal(workOrder.scope.newFiles, newFiles, name);
+    assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles, name);
+  }
+});
+
 test("listed_only forbidden coverage for allowedNewFiles is segment bounded", () => {
   const cases = [
     {
@@ -958,8 +1322,8 @@ test("listed_only forbidden coverage for allowedNewFiles is segment bounded", ()
     {
       name: "allowed parent may contain forbidden child when listed new file is outside child",
       allowed: ["src/"],
-      forbidden: ["src/private/"],
-      allowedNewFiles: ["src/public/new-file.js"],
+      forbidden: ["src/cli/"],
+      allowedNewFiles: ["src/kernel/new-file.js"],
     },
   ];
 
@@ -1013,6 +1377,78 @@ test("allowedNewFiles forbidden coverage is skipped when new files are forbidden
   assert.deepEqual(workOrder.scope.forbidden, ["src/private/"]);
   assert.equal(workOrder.scope.newFiles, "forbidden");
   assert.deepEqual(workOrder.scope.allowedNewFiles, ["src/kernel/new-file.js", "test/new-file.js"]);
+});
+
+test("listed_only allowedNewFiles fail when the existing parent symlink escapes repositoryRoot", () => {
+  const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+  const outsideRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-outside-"));
+  mkdirSync(path.join(repositoryRoot, "src"));
+  symlinkSync(outsideRoot, path.join(repositoryRoot, "src", "escape-link"));
+
+  const allowed = ["src/"];
+  const allowedNewFiles = ["src/escape-link/new-file.js"];
+  const workOrder = validWorkOrder();
+  workOrder.repositoryRoot = repositoryRoot;
+  workOrder.scope.allowed = [...allowed];
+  workOrder.scope.forbidden = [];
+  workOrder.scope.newFiles = "listed_only";
+  workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+  const result = validateWorkOrder(workOrder);
+
+  assert.equal(result.success, false);
+  assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+  assert.deepEqual(workOrder.scope.allowed, allowed);
+  assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles);
+});
+
+test("allowed allowedNewFiles parent containment failures map to the new-file field", () => {
+  const cases = [
+    {
+      name: "outside_repository",
+      setupRepositoryRoot: () => {
+        const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+        const outsideRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-outside-"));
+        mkdirSync(path.join(repositoryRoot, "src"));
+        symlinkSync(outsideRoot, path.join(repositoryRoot, "src", "escape-link"));
+        return repositoryRoot;
+      },
+      allowed: ["src/"],
+      allowedNewFiles: ["src/escape-link/new-file.js"],
+    },
+    {
+      name: "parent_unavailable",
+      setupRepositoryRoot: () => {
+        const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+        mkdirSync(path.join(repositoryRoot, "src"));
+        return repositoryRoot;
+      },
+      allowed: ["src/"],
+      allowedNewFiles: ["src/missing-parent/new-file.js"],
+    },
+    {
+      name: "repository_root_unavailable",
+      setupRepositoryRoot: () => path.join(tmpdir(), `pi-wo-missing-${process.pid}-${Date.now()}`),
+      allowed: ["src/"],
+      allowedNewFiles: ["src/new-file.js"],
+    },
+  ];
+
+  for (const { name, setupRepositoryRoot, allowed, allowedNewFiles } of cases) {
+    const workOrder = validWorkOrder();
+    workOrder.repositoryRoot = setupRepositoryRoot();
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [];
+    workOrder.scope.newFiles = "allowed";
+    workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, false, name);
+    assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles, name);
+  }
 });
 
 test("allowedNewFiles containment skips entries with existing path failures", () => {
@@ -1089,7 +1525,7 @@ function validWorkOrder() {
     state: "active",
     id: "wo-minimal-validation",
     goal: "Add focused Work Order schema validation tests.",
-    repositoryRoot: "/absolute/path/to/pi-orchestrator",
+    repositoryRoot: process.cwd(),
     policyProfile: "default",
     readiness: {
       status: "ready",

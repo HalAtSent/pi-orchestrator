@@ -8,6 +8,7 @@ import { validateWorkOrder } from "../src/kernel/work-order.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureDir = path.join(__dirname, "fixtures", "work-orders");
+const repositoryRoot = path.resolve(".");
 
 test("valid lifecycle Work Order fixtures validate with expected executability", async () => {
   const cases = [
@@ -73,5 +74,11 @@ test("unknown policyProfile Work Order fixture fails with unsupported policy har
 
 async function loadFixture(fixtureName) {
   const fixturePath = path.join(fixtureDir, fixtureName);
-  return JSON.parse(await readFile(fixturePath, "utf8"));
+  const workOrder = JSON.parse(await readFile(fixturePath, "utf8"));
+
+  if (Object.hasOwn(workOrder, "repositoryRoot")) {
+    workOrder.repositoryRoot = repositoryRoot;
+  }
+
+  return workOrder;
 }

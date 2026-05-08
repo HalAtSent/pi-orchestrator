@@ -9,6 +9,7 @@ import {
   checkRepoFileParentContainment,
   isProtectedRepoPath,
   normalizeRepoRelativePath,
+  repoRealpathCovers,
   repoPathCovers,
 } from "../src/kernel/path-safety.js";
 
@@ -342,6 +343,136 @@ test("existing repo path containment returns missing_path for normalized target 
   assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src/missing.txt"), {
     ok: false,
     reason: "missing_path",
+  });
+});
+
+test("existing repo path containment rejects broken symlink target misses", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await symlink("../outside/missing.txt", path.join(repoRoot, "src", "broken-link"));
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "src/broken-link"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("existing repo path containment rejects missing targets under symlink directory escapes", async () => {
+  const { repoRoot, outsideRoot } = await createContainmentWorkspace();
+  await symlink(outsideRoot, path.join(repoRoot, "escape-link"));
+
+  assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "escape-link/new-file.js"), {
+    ok: false,
+    reason: "outside_repository",
+  });
+});
+
+test("repo realpath coverage handles exact file, directory descendant, and directory exact coverage", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await mkdirp(path.join(repoRoot, "src", "private"));
+  await writeFile(path.join(repoRoot, "src", "private", "file.txt"), "private");
+
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private/file.txt", "src/private/file.txt"), {
+    ok: true,
+    covered: true,
+    relation: "exact",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private/", "src/private/file.txt"), {
+    ok: true,
+    covered: true,
+    relation: "descendant",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private/", "src/private/"), {
+    ok: true,
+    covered: true,
+    relation: "exact",
+  });
+});
+
+test("repo realpath coverage compares contained symlink aliases by realpath", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await mkdirp(path.join(repoRoot, "src", "private"));
+  await writeFile(path.join(repoRoot, "src", "private", "file.txt"), "private");
+  await symlink(path.join(repoRoot, "src", "private"), path.join(repoRoot, "private-link"));
+  await symlink(path.join(repoRoot, "src", "private", "file.txt"), path.join(repoRoot, "private-file-link.txt"));
+
+  assert.deepEqual(repoRealpathCovers(repoRoot, "private-file-link.txt", "src/private/file.txt"), {
+    ok: true,
+    covered: true,
+    relation: "exact",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "private-link/", "src/private/file.txt"), {
+    ok: true,
+    covered: true,
+    relation: "descendant",
+  });
+});
+
+test("repo realpath coverage returns uncovered for sibling, file-intent directory, and sibling-prefix paths", async () => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await mkdirp(path.join(repoRoot, "src", "private"));
+  await mkdirp(path.join(repoRoot, "src2"));
+  await writeFile(path.join(repoRoot, "src", "private", "file.txt"), "private");
+  await writeFile(path.join(repoRoot, "src", "private", "sibling.txt"), "sibling");
+  await writeFile(path.join(repoRoot, "src2", "file.txt"), "sibling prefix");
+
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private/file.txt", "src/private/sibling.txt"), {
+    ok: true,
+    covered: false,
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private", "src/private/file.txt"), {
+    ok: true,
+    covered: false,
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/private/file.txt", "src/private/"), {
+    ok: true,
+    covered: false,
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/", "src2/file.txt"), {
+    ok: true,
+    covered: false,
+  });
+});
+
+test("repo realpath coverage preserves stable failure reasons without throwing", async () => {
+  const { repoRoot, outsideRoot } = await createContainmentWorkspace();
+  const fileRoot = path.join(repoRoot, "root-file.txt");
+  await writeFile(fileRoot, "not a directory");
+  await writeFile(path.join(repoRoot, "src", "file.txt"), "inside");
+  await writeFile(path.join(outsideRoot, "outside.txt"), "outside");
+  await symlink(path.join(outsideRoot, "outside.txt"), path.join(repoRoot, "outside-link.txt"));
+
+  assert.deepEqual(repoRealpathCovers(null, "src/file.txt", "src/file.txt"), {
+    ok: false,
+    reason: "invalid_repository_root",
+  });
+  assert.deepEqual(repoRealpathCovers(path.join(repoRoot, "missing"), "src/file.txt", "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+  assert.deepEqual(repoRealpathCovers(fileRoot, "src/file.txt", "src/file.txt"), {
+    ok: false,
+    reason: "repository_root_unavailable",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "./src/file.txt", "src/file.txt"), {
+    ok: false,
+    reason: "invalid_repo_path",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/file.txt", "src//file.txt"), {
+    ok: false,
+    reason: "invalid_repo_path",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/missing.txt", "src/file.txt"), {
+    ok: false,
+    reason: "missing_path",
+  });
+  assert.deepEqual(repoRealpathCovers(repoRoot, "src/file.txt", "src/missing.txt"), {
+    ok: false,
+    reason: "missing_path",
+  });
+  assert.doesNotThrow(() => repoRealpathCovers(repoRoot, "outside-link.txt", "outside-link.txt"));
+  assert.deepEqual(repoRealpathCovers(repoRoot, "outside-link.txt", "outside-link.txt"), {
+    ok: false,
+    reason: "outside_repository",
   });
 });
 
