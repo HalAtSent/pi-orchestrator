@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-06
+last_verified: 2026-05-08
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -100,6 +100,11 @@ Classification: `repo-confirmed`.
   absent or complete. Current validator checks cover existing `scope.allowed`
   containment, existing-path realpath forbidden coverage, and
   `scope.allowedNewFiles` parent containment in the allowed/listed-only paths.
+- Do not describe case-ambiguity handling as entirely absent or complete.
+  Existing `scope.allowed` paths reject case-mismatched spellings when they
+  resolve, and allowed/listed `scope.allowedNewFiles` parent containment rejects
+  case-variant parent spellings. Broader runtime case policy remains target
+  behavior.
 
 ## Backlog As Defect
 

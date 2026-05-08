@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-06
+last_verified: 2026-05-08
 authority_sources:
   - ../../AGENTS.md
   - ../IMPLEMENTATION-SEQUENCE.md
@@ -83,15 +83,16 @@ Classification: `repo-confirmed` for implemented files/tests,
   realpath forbidden-over-allowed checks for `scope.allowedNewFiles` when
   new-file policy allows them.
 - Work Order validation checks existing `scope.allowed` entries and allowed or
-  listed `scope.allowedNewFiles` parents for repository-root containment.
+  listed `scope.allowedNewFiles` parents for repository-root containment and
+  exact filesystem spelling when those paths resolve.
 - Protected-path rejection is limited to `scope.allowed` and
   `scope.allowedNewFiles`; it is not full scope authorization or runtime worker
   write enforcement.
-- Full runtime scope authorization, observed worker path enforcement,
-  case-ambiguity handling, Evidence Pack validation, artifact store, run
-  journal, worker execution, repair loops, model-backed workers, templates, and
-  `/build` remain future work unless a current Work Order explicitly implements
-  them.
+- Full runtime scope authorization, observed worker path enforcement, broader
+  case-ambiguity handling beyond current existing-path and new-file-parent
+  spelling checks, Evidence Pack validation, artifact store, run journal,
+  worker execution, repair loops, model-backed workers, templates, and `/build`
+  remain future work unless a current Work Order explicitly implements them.
 
 ## Uncommitted Changes
 

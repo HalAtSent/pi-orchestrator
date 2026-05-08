@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-06
+last_verified: 2026-05-08
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -115,8 +115,9 @@ Classification: `repo-confirmed` from current source and tests.
   behavior, not runtime worker path enforcement.
 - Work Order validation rejects existing `scope.allowed` symlink/realpath
   escapes and rejects `scope.allowedNewFiles` entries whose existing parent is
-  unavailable, escapes `repositoryRoot`, or is covered by a valid forbidden
-  scope by realpath when new-file policy allows them.
+  unavailable, has a case-variant spelling, escapes `repositoryRoot`, or is
+  covered by a valid forbidden scope by realpath when new-file policy allows
+  them.
   Missing `scope.allowed` targets still pass under an available `repositoryRoot`
   unless an existing path prefix escapes.
 - Valid lifecycle fixtures and two negative Work Order fixtures exist under
@@ -126,6 +127,7 @@ Classification: `documented-target`.
 
 - Evidence Pack validation, artifact store, run journal, worker execution,
   repair loops, model-backed workers, `/build`, full scope authorization,
-  runtime protected-path write enforcement, case-ambiguity handling, runtime
+  runtime protected-path write enforcement, broader case-ambiguity handling
+  beyond current existing-path and new-file-parent spelling checks, runtime
   worker root-containment checks, and observed worker path enforcement remain
   target/backlog behavior unless current code and tests say otherwise.
