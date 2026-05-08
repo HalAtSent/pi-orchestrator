@@ -525,6 +525,31 @@ test("repo file parent containment accepts missing target files with contained p
   });
 });
 
+test("repo file parent containment rejects case-variant existing parent spelling", async (t) => {
+  const { repoRoot } = await createContainmentWorkspace();
+  const targetPath = path.join(repoRoot, "Src", "new-file.js");
+
+  assert.equal(await realpathOrNull(targetPath), null);
+
+  const caseVariantParentRealpath = await realpathOrNull(path.join(repoRoot, "Src"));
+  if (caseVariantParentRealpath !== null) {
+    t.diagnostic("case-variant parent resolves on this filesystem; expecting parent_unavailable");
+    assert.deepEqual(checkRepoFileParentContainment(repoRoot, "Src/new-file.js"), {
+      ok: false,
+      reason: "parent_unavailable",
+    });
+    return;
+  }
+
+  t.diagnostic("case-variant parent does not resolve on this filesystem; expecting fail-closed rejection");
+  const result = checkRepoFileParentContainment(repoRoot, "Src/new-file.js");
+  assert.notEqual(result.ok, true);
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "parent_unavailable",
+  });
+});
+
 test("repo file parent containment rejects symlink parent escapes outside repository root", async () => {
   const { repoRoot, outsideRoot } = await createContainmentWorkspace();
   await symlink(outsideRoot, path.join(repoRoot, "outside-link"));

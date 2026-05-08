@@ -314,6 +314,10 @@ export function checkRepoFileParentContainment(repositoryRoot, repoRelativePath)
 
   const relativePath = path.relative(repositoryRootRealpath, parentRealpath);
   if (relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))) {
+    if (parentRepoPath !== "." && !hasExactDirectoryEntrySpellings(repositoryRootRealpath, parentRepoPath)) {
+      return reject("parent_unavailable");
+    }
+
     return { ok: true, parentRealpath };
   }
 

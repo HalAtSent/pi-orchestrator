@@ -1451,6 +1451,52 @@ test("allowed allowedNewFiles parent containment failures map to the new-file fi
   }
 });
 
+test("case-variant allowedNewFiles parent spelling fails unless new files are forbidden", () => {
+  const cases = [
+    {
+      name: "listed_only mode",
+      newFiles: "listed_only",
+      expectSuccess: false,
+    },
+    {
+      name: "allowed mode",
+      newFiles: "allowed",
+      expectSuccess: false,
+    },
+    {
+      name: "forbidden mode",
+      newFiles: "forbidden",
+      expectSuccess: true,
+    },
+  ];
+
+  for (const { name, newFiles, expectSuccess } of cases) {
+    const repositoryRoot = mkdtempSync(path.join(tmpdir(), "pi-wo-repo-"));
+    mkdirSync(path.join(repositoryRoot, "src"), { recursive: true });
+
+    const allowed = ["Src/"];
+    const allowedNewFiles = ["Src/new-file.js"];
+    const workOrder = validWorkOrder();
+    workOrder.repositoryRoot = repositoryRoot;
+    workOrder.scope.allowed = [...allowed];
+    workOrder.scope.forbidden = [];
+    workOrder.scope.newFiles = newFiles;
+    workOrder.scope.allowedNewFiles = [...allowedNewFiles];
+
+    const result = validateWorkOrder(workOrder);
+
+    assert.equal(result.success, expectSuccess, name);
+    if (expectSuccess) {
+      assert.deepEqual(result.errors, [], name);
+    } else {
+      assertError(result, "$.scope.allowedNewFiles[0]", "invalid_path");
+    }
+    assert.deepEqual(workOrder.scope.allowed, allowed, name);
+    assert.equal(workOrder.scope.newFiles, newFiles, name);
+    assert.deepEqual(workOrder.scope.allowedNewFiles, allowedNewFiles, name);
+  }
+});
+
 test("allowedNewFiles containment skips entries with existing path failures", () => {
   const cases = [
     {
