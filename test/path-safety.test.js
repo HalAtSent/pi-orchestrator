@@ -274,6 +274,33 @@ test("existing repo path containment accepts existing normalized targets inside 
   });
 });
 
+test("existing repo path containment rejects case-variant existing paths when the filesystem resolves them", async (t) => {
+  const { repoRoot } = await createContainmentWorkspace();
+  await mkdirp(path.join(repoRoot, "src"));
+  await writeFile(path.join(repoRoot, "src", "File.txt"), "inside");
+
+  const caseVariantRealpath = await realpathOrNull(path.join(repoRoot, "Src", "File.txt"));
+  if (caseVariantRealpath !== null) {
+    t.diagnostic("case-variant paths resolve on this filesystem; expecting case_mismatch");
+    assert.deepEqual(checkExistingRepoPathContainment(repoRoot, "Src/File.txt"), {
+      ok: false,
+      reason: "case_mismatch",
+    });
+    return;
+  }
+
+  t.diagnostic("case-variant paths do not resolve on this filesystem; expecting fail-closed miss");
+  const result = checkExistingRepoPathContainment(repoRoot, "Src/File.txt");
+  assert.notDeepEqual(result, {
+    ok: true,
+    realpath: await realpath(path.join(repoRoot, "src", "File.txt")),
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    reason: "missing_path",
+  });
+});
+
 test("existing repo path containment rejects symlink realpath escapes outside repository root", async () => {
   const { repoRoot, outsideRoot } = await createContainmentWorkspace();
   await writeFile(path.join(outsideRoot, "outside.txt"), "outside");
@@ -593,4 +620,12 @@ async function createContainmentWorkspace() {
 
 async function mkdirp(pathValue) {
   await mkdir(pathValue, { recursive: true });
+}
+
+async function realpathOrNull(pathValue) {
+  try {
+    return await realpath(pathValue);
+  } catch {
+    return null;
+  }
 }

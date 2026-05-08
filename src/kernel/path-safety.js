@@ -1,4 +1,4 @@
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 const INVALID_TYPE = "invalid_type";
@@ -199,10 +199,36 @@ export function checkExistingRepoPathContainment(repositoryRoot, repoRelativePat
 
   const relativePath = path.relative(repositoryRootRealpath, targetRealpath);
   if (relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))) {
+    if (!hasExactDirectoryEntrySpellings(repositoryRootRealpath, repoRelativePath)) {
+      return reject("case_mismatch");
+    }
+
     return { ok: true, realpath: targetRealpath };
   }
 
   return reject("outside_repository");
+}
+
+function hasExactDirectoryEntrySpellings(repositoryRootRealpath, repoRelativePath) {
+  const segments = repoRelativePath.split("/").filter(Boolean);
+  let currentDirectory = repositoryRootRealpath;
+
+  for (const segment of segments) {
+    let entries;
+    try {
+      entries = readdirSync(currentDirectory);
+    } catch {
+      return false;
+    }
+
+    if (!entries.includes(segment)) {
+      return false;
+    }
+
+    currentDirectory = path.join(currentDirectory, segment);
+  }
+
+  return true;
 }
 
 export function repoRealpathCovers(repositoryRoot, scopePath, candidatePath) {
