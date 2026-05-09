@@ -1,11 +1,12 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-09
 authority_sources:
   - ../../AGENTS.md
   - ../../package.json
   - ../../src/cli/pi.js
+  - ../../test/artifact-store.test.js
   - ../../test/work-order-cli.test.js
 verify_with:
   - npm test
@@ -38,6 +39,7 @@ Current focused test targets:
 node --test test/work-order-schema.test.js
 node --test test/work-order-fingerprint.test.js
 node --test test/path-safety.test.js
+node --test test/artifact-store.test.js
 node --test test/work-order-cli.test.js
 node --test test/work-order-fixtures.test.js
 ```

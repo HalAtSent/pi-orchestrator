@@ -1,11 +1,13 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-08
+last_verified: 2026-05-09
 authority_sources:
   - ../../AGENTS.md
   - ../IMPLEMENTATION-SEQUENCE.md
   - ../WORK-ORDER-SCHEMA.md
+  - ../../src/kernel/artifact-store.js
+  - ../../test/artifact-store.test.js
 verify_with:
   - git diff --check
 ---
@@ -85,14 +87,17 @@ Classification: `repo-confirmed` for implemented files/tests,
 - Work Order validation checks existing `scope.allowed` entries and allowed or
   listed `scope.allowedNewFiles` parents for repository-root containment and
   exact filesystem spelling when those paths resolve.
+- Run-store directory creation exists for `.pi/runs/<runId>` in
+  `src/kernel/artifact-store.js`.
 - Protected-path rejection is limited to `scope.allowed` and
   `scope.allowedNewFiles`; it is not full scope authorization or runtime worker
   write enforcement.
 - Full runtime scope authorization, observed worker path enforcement, broader
   case-ambiguity handling beyond current existing-path and new-file-parent
-  spelling checks, Evidence Pack validation, artifact store, run journal,
-  worker execution, repair loops, model-backed workers, templates, and `/build`
-  remain future work unless a current Work Order explicitly implements them.
+  spelling checks, Evidence Pack validation, Work Order and Evidence Pack
+  artifact write/load validation, run journal, worker execution, repair loops,
+  model-backed workers, templates, and `/build` remain future work unless a
+  current Work Order explicitly implements them.
 
 ## Uncommitted Changes
 

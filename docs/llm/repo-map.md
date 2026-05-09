@@ -1,17 +1,19 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-06
+last_verified: 2026-05-09
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
   - ../../src/kernel/work-order.js
   - ../../src/kernel/work-order-fingerprint.js
   - ../../src/kernel/path-safety.js
+  - ../../src/kernel/artifact-store.js
   - ../../src/cli/pi.js
   - ../../test/work-order-schema.test.js
   - ../../test/work-order-fingerprint.test.js
   - ../../test/path-safety.test.js
+  - ../../test/artifact-store.test.js
   - ../../test/work-order-cli.test.js
   - ../../test/work-order-fixtures.test.js
 verify_with:
@@ -63,6 +65,13 @@ Classification: `repo-confirmed`.
   - Exports filesystem-backed containment helpers for existing repo paths,
     realpath coverage, and new-file parent containment.
   - Keep lexical helpers and filesystem-backed containment helpers distinct.
+- `src/kernel/artifact-store.js`
+  - Exports `ensureRunStoreDirectory(repositoryRoot, runId)`.
+  - Creates or validates `.pi/runs/<runId>` under the repository root realpath.
+  - Fails closed for invalid roots, invalid run IDs, unavailable storage,
+    non-directory storage, symlinked storage, and detected storage escapes.
+  - Does not implement Work Order or Evidence Pack artifact write/load
+    validation, run journals, worker execution, or runtime authorization.
 - `src/cli/pi.js`
   - Implements `pi validate-work-order <file>`.
   - Prints machine-readable JSON to stdout and uses validator success for exit
@@ -83,6 +92,8 @@ Classification: `repo-confirmed`.
   primitives.
 - `test/path-safety.test.js` - lexical path normalization, protected path
   detection, and normalized path coverage primitives.
+- `test/artifact-store.test.js` - run-store directory creation and fail-closed
+  storage shape checks.
 - `test/work-order-cli.test.js` - CLI wrapper behavior and stdout flushing.
 - `test/work-order-fixtures.test.js` - static Work Order fixtures.
 

@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-08
+last_verified: 2026-05-09
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -13,10 +13,12 @@ authority_sources:
   - ../../src/kernel/work-order.js
   - ../../src/kernel/work-order-fingerprint.js
   - ../../src/kernel/path-safety.js
+  - ../../src/kernel/artifact-store.js
   - ../../src/cli/pi.js
   - ../../test/work-order-schema.test.js
   - ../../test/work-order-fingerprint.test.js
   - ../../test/path-safety.test.js
+  - ../../test/artifact-store.test.js
   - ../../test/work-order-cli.test.js
 verify_with:
   - git diff --check
@@ -106,6 +108,11 @@ Classification: `repo-confirmed` from current source and tests.
 - Lexical path normalization, protected-path detection, normalized path
   coverage, existing-path realpath containment, realpath coverage, and
   new-file parent containment primitives exist in `src/kernel/path-safety.js`.
+- Run-store directory creation exists in `src/kernel/artifact-store.js`.
+  `ensureRunStoreDirectory(repositoryRoot, runId)` creates or validates an
+  ignored `.pi/runs/<runId>` directory under the repository root realpath and
+  fails closed for invalid roots, invalid run IDs, unavailable storage,
+  non-directory storage, symlinked storage, and detected storage escapes.
 - Work Order validation rejects protected paths in `scope.allowed` and
   `scope.allowedNewFiles`; `scope.forbidden` may still list protected paths as
   denial metadata.
@@ -125,9 +132,10 @@ Classification: `repo-confirmed` from current source and tests.
 
 Classification: `documented-target`.
 
-- Evidence Pack validation, artifact store, run journal, worker execution,
-  repair loops, model-backed workers, `/build`, full scope authorization,
-  runtime protected-path write enforcement, broader case-ambiguity handling
-  beyond current existing-path and new-file-parent spelling checks, runtime
-  worker root-containment checks, and observed worker path enforcement remain
-  target/backlog behavior unless current code and tests say otherwise.
+- Evidence Pack validation, Work Order and Evidence Pack artifact write/load
+  validation, run journal, worker execution, repair loops, model-backed
+  workers, `/build`, full scope authorization, runtime protected-path write
+  enforcement, broader case-ambiguity handling beyond current existing-path and
+  new-file-parent spelling checks, runtime worker root-containment checks, and
+  observed worker path enforcement remain target/backlog behavior unless
+  current code and tests say otherwise.
