@@ -6,3 +6,4 @@ coverage/
 .env.*
 .pi/
 skills/
+.DS_Store
