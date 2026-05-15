@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-08
+last_verified: 2026-05-15
 authority_sources:
   - ../../AGENTS.md
   - ../KERNEL-INVARIANTS.md
@@ -12,9 +12,11 @@ authority_sources:
   - ../../src/kernel/work-order.js
   - ../../src/kernel/work-order-fingerprint.js
   - ../../src/kernel/path-safety.js
+  - ../../src/kernel/artifact-store.js
   - ../../test/work-order-schema.test.js
   - ../../test/work-order-fingerprint.test.js
   - ../../test/path-safety.test.js
+  - ../../test/artifact-store.test.js
 verify_with:
   - git diff --check
 ---
@@ -105,6 +107,24 @@ Classification: `repo-confirmed`.
   resolve, and allowed/listed `scope.allowedNewFiles` parent containment rejects
   case-variant parent spellings. Broader runtime case policy remains target
   behavior.
+
+## Artifact Store Traps
+
+Classification: `repo-confirmed`.
+
+- `ensureRunStoreDirectory()` is the current artifact-store primitive. It
+  creates or validates `.pi/runs/<runId>` only; Work Order load validation,
+  Evidence Pack validation, run journals, worker execution, runtime
+  authorization, and artifact JSON serialization remain separate backlog
+  surfaces unless a Work Order explicitly names them.
+- Treat the current storage-safety guarantee as detected and path-based, not
+  atomic no-outside-mkdir protection. The current helper can detect bad storage
+  shapes, test-visible parent swaps before the relevant `mkdirSync()`, and
+  final containment failures, but it is not an fd-anchored or no-follow
+  primitive.
+- If a Work Order claims no outside mkdir attempt may happen, require
+  filesystem-call instrumentation in `test/artifact-store.test.js`; a clean
+  final filesystem state is not enough proof.
 
 ## Backlog As Defect
 

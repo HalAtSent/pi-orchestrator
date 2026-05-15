@@ -1,7 +1,7 @@
 ---
 status: context
 owner: engineering
-last_verified: 2026-05-04
+last_verified: 2026-05-15
 authority_sources:
   - ../../../AGENTS.md
   - ../../KERNEL-INVARIANTS.md
@@ -22,8 +22,8 @@ edits.
 2. `docs/llm/authority-map.md`
 3. The files directly named by the task
 4. The nearest relevant test file when behavior changes
-5. `docs/llm/known-traps.md` when touching validator, fingerprint, CLI, fixture,
-   or path-safety surfaces
+5. `docs/llm/known-traps.md` when touching validator, fingerprint,
+   artifact-store, CLI, fixture, or path-safety surfaces
 
 Use the rest of `docs/llm/` only if orientation is needed.
 
