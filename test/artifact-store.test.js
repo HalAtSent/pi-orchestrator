@@ -1,12 +1,385 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { ensureRunStoreDirectory, writeWorkOrderArtifact } from "../src/kernel/artifact-store.js";
+import { ensureRunStoreDirectory, loadWorkOrderArtifact, writeWorkOrderArtifact } from "../src/kernel/artifact-store.js";
 import { validateWorkOrder } from "../src/kernel/work-order.js";
+
+test("valid Work Order artifact loads from an existing run store without creating or writing", async (t) => {
+  const { repoRoot } = await createArtifactStoreWorkspace();
+  const repositoryRootRealpath = await realpath(repoRoot);
+  const runId = "run_20260515_001";
+  const runDirectory = path.join(repositoryRootRealpath, ".pi", "runs", runId);
+  const artifactPath = path.join(runDirectory, "work-order.json");
+  const workOrder = validWorkOrder(repoRoot);
+  const originalWorkOrder = structuredClone(workOrder);
+
+  await mkdir(runDirectory, { recursive: true });
+  await writeFile(artifactPath, JSON.stringify(workOrder, null, 2));
+  failOnLoadMutation(t);
+
+  const parsedWorkOrder = JSON.parse(await readFile(artifactPath, "utf8"));
+  const validation = validateWorkOrder(parsedWorkOrder);
+
+  assert.deepEqual(loadWorkOrderArtifact(repoRoot, runId), {
+    ok: true,
+    artifactPath,
+    workOrder: parsedWorkOrder,
+    validation,
+  });
+  assert.deepEqual(workOrder, originalWorkOrder);
+  assert.deepEqual(JSON.parse(await readFile(artifactPath, "utf8")), originalWorkOrder);
+});
+
+test("invalid persisted Work Order artifact content fails closed without creating or writing", async (t) => {
+  const cases = [
+    {
+      name: "malformed JSON",
+      content: "{not json",
+      expected: () => ({ ok: false, reason: "invalid_json" }),
+    },
+    {
+      name: "validation-invalid JSON",
+      content: ({ repoRoot }) => {
+        const workOrder = validWorkOrder(repoRoot);
+        delete workOrder.goal;
+        return JSON.stringify(workOrder);
+      },
+      expected: ({ artifactPath }) => {
+        const parsed = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+        return { ok: false, reason: "invalid_work_order", validation: validateWorkOrder(parsed) };
+      },
+    },
+    {
+      name: "unavailable declared repositoryRoot",
+      content: async ({ repoRoot, outsideRoot }) => {
+        const repoAlias = path.join(outsideRoot, "repo-alias");
+        await symlink(repoRoot, repoAlias);
+        return JSON.stringify(validWorkOrder(repoAlias));
+      },
+      mock: ({ t, repoRoot, outsideRoot }) => {
+        const repoAlias = path.join(outsideRoot, "repo-alias");
+        const originalRealpathSync = fs.realpathSync;
+        t.mock.method(fs, "realpathSync", (pathValue, options) => {
+          if (pathValue === repoAlias) {
+            return null;
+          }
+
+          return originalRealpathSync(pathValue, options);
+        });
+      },
+      expected: () => ({ ok: false, reason: "repository_root_mismatch" }),
+    },
+    {
+      name: "different declared repositoryRoot realpath",
+      content: ({ outsideRoot }) => JSON.stringify(validWorkOrder(outsideRoot)),
+      expected: () => ({ ok: false, reason: "repository_root_mismatch" }),
+    },
+  ];
+
+  for (const { name, content, mock, expected } of cases) {
+    await t.test(name, async (t) => {
+      const { repoRoot, outsideRoot } = await createArtifactStoreWorkspace();
+      const repositoryRootRealpath = await realpath(repoRoot);
+      const runId = "run_20260515_001";
+      const runDirectory = path.join(repositoryRootRealpath, ".pi", "runs", runId);
+      const artifactPath = path.join(runDirectory, "work-order.json");
+      await mkdir(runDirectory, { recursive: true });
+      await writeFile(artifactPath, typeof content === "function" ? await content({ repoRoot, outsideRoot }) : content);
+      if (typeof mock === "function") {
+        mock({ t, repoRoot, outsideRoot });
+      }
+      failOnLoadMutation(t);
+
+      assert.deepEqual(loadWorkOrderArtifact(repoRoot, runId), expected({ artifactPath }));
+    });
+  }
+});
+
+test("unavailable or unsafe Work Order artifact load targets fail without creating or writing", async (t) => {
+  await t.test("invalid repositoryRoot", async (t) => {
+    failOnLoadMutation(t);
+
+    for (const repositoryRoot of [null, "", " ", "relative/repo"]) {
+      assert.deepEqual(loadWorkOrderArtifact(repositoryRoot, "run_20260515_001"), {
+        ok: false,
+        reason: "invalid_repository_root",
+      });
+    }
+  });
+
+  await t.test("unavailable repositoryRoot", async (t) => {
+    const { repoRoot } = await createArtifactStoreWorkspace();
+    const missingRoot = path.join(repoRoot, "missing");
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(missingRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "repository_root_unavailable",
+    });
+  });
+
+  await t.test("invalid runId", async (t) => {
+    const { repoRoot } = await createArtifactStoreWorkspace();
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "../run"), {
+      ok: false,
+      reason: "invalid_run_id",
+    });
+    assert.equal(await pathExists(path.join(repoRoot, ".pi")), false);
+  });
+
+  const storageCases = [
+    {
+      name: "missing .pi",
+      setup: async () => {},
+    },
+    {
+      name: "missing runs",
+      setup: async ({ repoRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi"));
+      },
+    },
+    {
+      name: "missing run directory",
+      setup: async ({ repoRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi", "runs"), { recursive: true });
+      },
+    },
+    {
+      name: "non-directory .pi",
+      setup: async ({ repoRoot }) => {
+        await writeFile(path.join(repoRoot, ".pi"), "not a directory");
+      },
+    },
+    {
+      name: "non-directory runs",
+      setup: async ({ repoRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi"));
+        await writeFile(path.join(repoRoot, ".pi", "runs"), "not a directory");
+      },
+    },
+    {
+      name: "non-directory run directory",
+      setup: async ({ repoRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi", "runs"), { recursive: true });
+        await writeFile(path.join(repoRoot, ".pi", "runs", "run_20260515_001"), "not a directory");
+      },
+    },
+    {
+      name: "symlinked .pi",
+      setup: async ({ repoRoot, outsideRoot }) => {
+        await symlink(outsideRoot, path.join(repoRoot, ".pi"));
+      },
+    },
+    {
+      name: "symlinked runs",
+      setup: async ({ repoRoot, outsideRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi"));
+        await symlink(outsideRoot, path.join(repoRoot, ".pi", "runs"));
+      },
+    },
+    {
+      name: "symlinked run directory",
+      setup: async ({ repoRoot, outsideRoot }) => {
+        await mkdir(path.join(repoRoot, ".pi", "runs"), { recursive: true });
+        await symlink(outsideRoot, path.join(repoRoot, ".pi", "runs", "run_20260515_001"));
+      },
+    },
+  ];
+
+  for (const { name, setup } of storageCases) {
+    await t.test(name, async (t) => {
+      const workspace = await createArtifactStoreWorkspace();
+      await setup(workspace);
+      failOnLoadMutation(t);
+
+      assert.deepEqual(loadWorkOrderArtifact(workspace.repoRoot, "run_20260515_001"), {
+        ok: false,
+        reason: "storage_unavailable",
+      });
+    });
+  }
+
+  await t.test("missing work-order.json", async (t) => {
+    const { repoRoot } = await createArtifactStoreWorkspace();
+    await mkdir(path.join(repoRoot, ".pi", "runs", "run_20260515_001"), { recursive: true });
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "artifact_missing",
+    });
+  });
+
+  await t.test("directory work-order.json", async (t) => {
+    const { repoRoot } = await createArtifactStoreWorkspace();
+    await mkdir(path.join(repoRoot, ".pi", "runs", "run_20260515_001", "work-order.json"), { recursive: true });
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "artifact_unavailable",
+    });
+  });
+
+  await t.test("symlink work-order.json is rejected without reading outside target", async (t) => {
+    const { repoRoot, outsideRoot } = await createArtifactStoreWorkspace();
+    const runDirectory = path.join(repoRoot, ".pi", "runs", "run_20260515_001");
+    const outsideTarget = path.join(outsideRoot, "outside-work-order.json");
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(outsideTarget, JSON.stringify(validWorkOrder(repoRoot)));
+    await symlink(outsideTarget, path.join(runDirectory, "work-order.json"));
+
+    const originalReadFileSync = fs.readFileSync;
+    t.mock.method(fs, "readFileSync", (pathValue, options) => {
+      if (pathValue === outsideTarget || pathValue === path.join(runDirectory, "work-order.json")) {
+        assert.fail("symlinked work-order.json was read");
+      }
+
+      return originalReadFileSync(pathValue, options);
+    });
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "artifact_unavailable",
+    });
+  });
+
+  await t.test("work-order.json replaced by symlink before read is rejected without reading outside target", async (t) => {
+    const { repoRoot, outsideRoot } = await createArtifactStoreWorkspace();
+    const repositoryRootRealpath = await realpath(repoRoot);
+    const runDirectory = path.join(repositoryRootRealpath, ".pi", "runs", "run_20260515_001");
+    const artifactPath = path.join(runDirectory, "work-order.json");
+    const outsideTarget = path.join(outsideRoot, "outside-work-order.json");
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(artifactPath, JSON.stringify(validWorkOrder(repoRoot)));
+    await writeFile(outsideTarget, JSON.stringify(validWorkOrder(repoRoot)));
+
+    const originalLstatSync = fs.lstatSync;
+    let swapped = false;
+    t.mock.method(fs, "lstatSync", (pathValue, options) => {
+      const result = originalLstatSync(pathValue, options);
+      if (pathValue === artifactPath && swapped === false) {
+        swapped = true;
+        fs.unlinkSync(artifactPath);
+        fs.symlinkSync(outsideTarget, artifactPath);
+      }
+
+      return result;
+    });
+
+    const originalReadFileSync = fs.readFileSync;
+    t.mock.method(fs, "readFileSync", (pathValue, options) => {
+      if (pathValue === outsideTarget || pathValue === artifactPath) {
+        assert.fail("symlink-swapped work-order.json was read through its path");
+      }
+
+      return originalReadFileSync(pathValue, options);
+    });
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "artifact_unavailable",
+    });
+    assert.equal(swapped, true);
+  });
+
+  await t.test("work-order.json replaced by FIFO before read returns artifact_unavailable without hanging", async () => {
+    const setupRoot = await mkdtemp(path.join(tmpdir(), "pi-artifact-fifo-setup-"));
+    const setupFifo = path.join(setupRoot, "fifo");
+    const setupResult = spawnSync("mkfifo", [setupFifo], { encoding: "utf8" });
+    assert.equal(
+      setupResult.status,
+      0,
+      `mkfifo setup failed; FIFO regression cannot run on this host: ${setupResult.stderr || setupResult.error?.message}`,
+    );
+
+    const childWorkOrderTemplate = validWorkOrder("__REPOSITORY_ROOT__");
+    const childScript = `
+      import assert from "node:assert/strict";
+      import fs from "node:fs";
+      import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+      import { tmpdir } from "node:os";
+      import path from "node:path";
+      import { spawnSync } from "node:child_process";
+      import { loadWorkOrderArtifact } from "./src/kernel/artifact-store.js";
+
+      const baseRoot = mkdtempSync(path.join(tmpdir(), "pi-artifact-fifo-child-"));
+      const repoRoot = path.join(baseRoot, "repo");
+      mkdirSync(repoRoot);
+      const repositoryRootRealpath = fs.realpathSync(repoRoot);
+      mkdirSync(path.join(repositoryRootRealpath, ".pi", "runs", "run_20260515_001"), { recursive: true });
+      const artifactPath = path.join(repositoryRootRealpath, ".pi", "runs", "run_20260515_001", "work-order.json");
+      const workOrder = ${JSON.stringify(childWorkOrderTemplate)};
+      workOrder.repositoryRoot = repoRoot;
+      writeFileSync(artifactPath, JSON.stringify(workOrder));
+
+      const originalLstatSync = fs.lstatSync;
+      let swapped = false;
+      fs.lstatSync = (pathValue, options) => {
+        const result = originalLstatSync(pathValue, options);
+        if (pathValue === artifactPath && swapped === false) {
+          swapped = true;
+          fs.unlinkSync(artifactPath);
+          const mkfifoResult = spawnSync("mkfifo", [artifactPath], { encoding: "utf8" });
+          assert.equal(mkfifoResult.status, 0, mkfifoResult.stderr || mkfifoResult.error?.message);
+        }
+        return result;
+      };
+
+      const result = loadWorkOrderArtifact(repoRoot, "run_20260515_001");
+      assert.deepEqual(result, { ok: false, reason: "artifact_unavailable" });
+      assert.equal(swapped, true);
+      assert.equal(originalLstatSync(artifactPath).isFIFO(), true);
+      process.stdout.write(JSON.stringify({ result, swapped }));
+    `;
+
+    const childResult = spawnSync(process.execPath, ["--input-type=module", "--eval", childScript], {
+      cwd: path.resolve("."),
+      encoding: "utf8",
+      timeout: 2000,
+    });
+
+    assert.notEqual(childResult.error?.code, "ETIMEDOUT", "FIFO-swapped artifact load timed out");
+    assert.equal(childResult.status, 0, childResult.stderr);
+    assert.deepEqual(JSON.parse(childResult.stdout), {
+      result: { ok: false, reason: "artifact_unavailable" },
+      swapped: true,
+    });
+  });
+
+  await t.test("read failure after artifact shape checks", async (t) => {
+    const { repoRoot } = await createArtifactStoreWorkspace();
+    const repositoryRootRealpath = await realpath(repoRoot);
+    const runDirectory = path.join(repositoryRootRealpath, ".pi", "runs", "run_20260515_001");
+    const artifactPath = path.join(runDirectory, "work-order.json");
+    await mkdir(runDirectory, { recursive: true });
+    await writeFile(artifactPath, JSON.stringify(validWorkOrder(repoRoot)));
+
+    const originalReadFileSync = fs.readFileSync;
+    t.mock.method(fs, "readFileSync", (pathValue, options) => {
+      if (typeof pathValue === "number") {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      }
+
+      return originalReadFileSync(pathValue, options);
+    });
+    failOnLoadMutation(t);
+
+    assert.deepEqual(loadWorkOrderArtifact(repoRoot, "run_20260515_001"), {
+      ok: false,
+      reason: "read_failed",
+    });
+  });
+});
 
 test("valid Work Order artifact writes exactly one artifact under the run store", async () => {
   const { repoRoot } = await createArtifactStoreWorkspace();
@@ -772,6 +1145,15 @@ function validWorkOrder(repositoryRoot) {
     },
     extensions: {},
   };
+}
+
+function failOnLoadMutation(t) {
+  t.mock.method(fs, "mkdirSync", () => {
+    assert.fail("load attempted to create run storage");
+  });
+  t.mock.method(fs, "writeFileSync", () => {
+    assert.fail("load attempted to write an artifact");
+  });
 }
 
 async function pathExists(pathValue) {
